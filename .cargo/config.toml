@@ -1,0 +1,16 @@
+[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --monitor"
+
+rustflags = [
+    # esp-hal's `linkall.x` pulls in every sub-script (memory map, ROM
+    # functions, RTC sections, ...) needed to link an ESP32-C3 image.
+    "-C", "link-arg=-Tlinkall.x",
+]
+
+[build]
+target = "riscv32imc-unknown-none-elf"
+
+[env]
+# Compile-time Wi-Fi / MQTT credentials. Override on the command line:
+#   SSID=MyNet PASSWORD=secret cargo run --release
+ESP_LOG = "info"
