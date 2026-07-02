@@ -1,0 +1,23 @@
+# Home Assistant MQTT sensor for the rs-bird-scale.
+#
+# The firmware publishes the *raw* 24-bit HX711 reading (a signed integer) to
+# `birds/scale/state`. All calibration is done here so it can be tuned without
+# reflashing the MCU.
+#
+# Calibration procedure:
+#   1. With the pan empty, note the steady raw value -> that is `offset`.
+#   2. Place a known mass (e.g. 100 g), note the new raw value.
+#   3. scale_factor = (raw_loaded - offset) / mass_in_grams
+#
+# Merge this into your existing `configuration.yaml`.
+
+sensor:
+  - platform: mqtt
+    name: "Meisenknödel Gewicht"
+    state_topic: "birds/scale/state"
+    unit_of_measurement: "g"
+    value_template: >
+      {% set raw = value | int %}
+      {% set offset = 8388608 %}     {# raw tare offset (empty pan) #}
+      {% set scale_factor = 420.0 %} {# raw ticks per gram          #}
+      {{ ((raw - offset) / scale_factor) | round(1) }}

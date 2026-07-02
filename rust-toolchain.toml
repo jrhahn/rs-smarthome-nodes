@@ -1,0 +1,7 @@
+[toolchain]
+# Pinned to the toolchain era that matches the esp-hal 0.22 / esp-wifi 0.11
+# ecosystem. Newer Rust (>=1.84) correctly defines `c_char` as unsigned on
+# RISC-V, which breaks esp-wifi 0.11's pre-generated C bindings.
+channel = "1.83.0"
+components = ["rust-src", "rustfmt", "clippy"]
+targets = ["riscv32imc-unknown-none-elf"]
