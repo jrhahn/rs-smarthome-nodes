@@ -1,8 +1,14 @@
 # Building & flashing `rs-bird-scale`
 
-This guide covers preparing the firmware and getting it onto a Seeed XIAO
-ESP32-C3 — first the simple native-USB path, then how to use a **Raspberry Pi
-Pico as a debug/flash probe ("picoprobe")**.
+Preparing the firmware and getting it onto a Seeed XIAO ESP32-C3.
+
+**TL;DR — you flash by just plugging the XIAO into USB-C.** The ESP32-C3 has a
+built-in USB Serial/JTAG controller, so no external programmer or probe is
+needed. See [§4](#4-flash-over-the-xiaos-native-usb-c-the-normal-way).
+
+The Raspberry Pi Pico probe in [§5](#5-optional-flash-with-a-raspberry-pi-pico-picoprobe)
+is **entirely optional** — only for when the native USB isn't usable (board
+sealed in the enclosure, galvanic isolation, USB-JTAG disabled).
 
 ---
 
@@ -44,10 +50,11 @@ cargo build --release
 
 ---
 
-## 4. Flash over the XIAO's native USB-C (recommended)
+## 4. Flash over the XIAO's native USB-C (the normal way)
 
-The ESP32-C3 has a **built-in USB Serial/JTAG controller**, so the XIAO's USB-C
-port is all you need — plug it straight into your computer.
+**This is all you need.** The ESP32-C3 has a **built-in USB Serial/JTAG
+controller**, so the XIAO's USB-C port is the programmer — plug it straight into
+your computer, no probe or adapter involved.
 
 ```bash
 # Build, flash, and open the serial monitor in one step
@@ -72,10 +79,11 @@ espflash board-info          # confirm the chip is detected
 
 ---
 
-## 5. Flash with a Raspberry Pi Pico ("picoprobe")
+## 5. (Optional) Flash with a Raspberry Pi Pico ("picoprobe")
 
-Use this when you don't want to hang the target off your PC's USB directly (e.g.
-the board is potted in the feeder enclosure, or you want galvanic separation).
+> **You almost certainly don't need this.** Use [§4](#4-flash-over-the-xiaos-native-usb-c-the-normal-way)
+> unless the XIAO's own USB-C is unavailable — e.g. the board is potted in the
+> feeder enclosure, or you want galvanic separation from your PC.
 
 ### 5a. Turn the Pico into a probe
 
