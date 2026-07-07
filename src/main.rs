@@ -68,7 +68,7 @@ const MQTT_USER: Option<&str> = option_env!("MQTT_USER");
 const MQTT_PASSWORD: Option<&str> = option_env!("MQTT_PASSWORD");
 
 /// Home Assistant / Mosquitto broker on the LAN.
-const MQTT_BROKER: Ipv4Address = Ipv4Address::new(192, 168, 1, 10);
+const MQTT_BROKER: Ipv4Address = Ipv4Address::new(192, 168, 1, 67);
 const MQTT_PORT: u16 = 1883;
 const MQTT_TOPIC: &str = "birds/scale/state";
 const MQTT_CLIENT_ID: &str = "rs-bird-scale";
