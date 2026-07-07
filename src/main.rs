@@ -61,6 +61,12 @@ const PASSWORD: &str = match option_env!("PASSWORD") {
     None => "your-password",
 };
 
+/// Optional MQTT broker credentials, baked in at build time (see .env).
+/// When unset the client connects anonymously, so an auth-free broker still
+/// works out of the box.
+const MQTT_USER: Option<&str> = option_env!("MQTT_USER");
+const MQTT_PASSWORD: Option<&str> = option_env!("MQTT_PASSWORD");
+
 /// Home Assistant / Mosquitto broker on the LAN.
 const MQTT_BROKER: Ipv4Address = Ipv4Address::new(192, 168, 1, 10);
 const MQTT_PORT: u16 = 1883;
@@ -194,6 +200,12 @@ async fn publish_reading(stack: &'static WifiStack, raw: i32) -> Result<(), &'st
         CountingRng(20_000),
     );
     mqtt_config.add_client_id(MQTT_CLIENT_ID);
+    if let Some(user) = MQTT_USER {
+        mqtt_config.add_username(user);
+    }
+    if let Some(password) = MQTT_PASSWORD {
+        mqtt_config.add_password(password);
+    }
     mqtt_config.max_packet_size = 100;
 
     let mut recv_buffer = [0u8; 256];

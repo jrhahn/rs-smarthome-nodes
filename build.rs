@@ -5,4 +5,6 @@ fn main() {
     // silently keeping stale credentials in the binary.
     println!("cargo:rerun-if-env-changed=SSID");
     println!("cargo:rerun-if-env-changed=PASSWORD");
+    println!("cargo:rerun-if-env-changed=MQTT_USER");
+    println!("cargo:rerun-if-env-changed=MQTT_PASSWORD");
 }
