@@ -8,11 +8,15 @@
 //! never exceeds 60 µs — otherwise the chip enters power-down — so the tight
 //! read loop must *not* yield to the executor mid-transfer.
 
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_hal::{
     delay::Delay,
     gpio::{Input, Output},
 };
+
+/// Holding `PD_SCK` high for longer than 60 µs latches the HX711 into
+/// power-down (datasheet). Use a comfortable margin.
+const POWER_DOWN_US: u32 = 80;
 
 /// Gain / channel selection, encoded as the number of extra clock pulses that
 /// follow the 24 data pulses (25/26/27).
@@ -57,29 +61,61 @@ impl<'d> Hx711<'d> {
         self.gain = gain;
     }
 
+    /// Put the HX711 into its ~0.3 µA power-down state by parking `PD_SCK` high.
+    ///
+    /// NOTE: on the ESP32-C3 the pad level is *not* retained across deep sleep
+    /// unless RTC GPIO hold is enabled, so this only saves power while the MCU
+    /// stays awake. Enabling hold on `SCK` to keep the chip powered down through
+    /// deep sleep is the follow-up battery optimisation (see issue #5).
+    #[allow(dead_code)]
+    pub fn power_down(&mut self) {
+        self.sck.set_low();
+        self.sck.set_high();
+        self.delay.delay_micros(POWER_DOWN_US);
+    }
+
+    /// Wake the HX711 from power-down. The next conversion needs the internal
+    /// filter to settle, so the first `read` afterwards should be discarded.
+    #[allow(dead_code)]
+    pub fn power_up(&mut self) {
+        self.sck.set_low();
+    }
+
     /// True when a fresh conversion result is latched and ready to be clocked
     /// out (`DT` is pulled low by the HX711 when data is ready).
     fn is_ready(&self) -> bool {
         self.dt.is_low()
     }
 
-    /// Asynchronously wait until a conversion result is available.
+    /// Asynchronously wait until a conversion result is available, or until
+    /// `timeout` elapses.
     ///
     /// Polls `DT` roughly at the HX711's 10 SPS output rate, yielding to the
     /// executor between checks so nothing else is blocked while we wait.
-    pub async fn wait_ready(&mut self) {
+    /// Returns `true` once data is ready, or `false` on timeout — which is what
+    /// a disconnected sensor looks like (with `DT` pulled up it never goes low).
+    pub async fn wait_ready(&mut self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         while !self.is_ready() {
-            Timer::after(Duration::from_millis(10)).await;
+            if Instant::now() >= deadline {
+                return false;
+            }
+            Timer::after(Duration::from_millis(5)).await;
         }
+        true
     }
 
     /// Read one raw 24-bit sample, sign-extended to `i32`.
     ///
     /// Waits (async) for the device to become ready, then performs the blocking
-    /// 24 + N pulse read cycle. Returns a value in the range −2^23..2^23.
-    pub async fn read(&mut self) -> i32 {
-        self.wait_ready().await;
-        self.read_raw()
+    /// 24 + N pulse read cycle. Returns the value (range −2^23..2^23), or `None`
+    /// if the device did not become ready within `timeout`.
+    pub async fn read(&mut self, timeout: Duration) -> Option<i32> {
+        if self.wait_ready(timeout).await {
+            Some(self.read_raw())
+        } else {
+            None
+        }
     }
 
     /// The timing-critical portion: clock out 24 data bits (MSB first) plus the

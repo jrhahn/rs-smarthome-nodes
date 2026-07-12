@@ -4,9 +4,12 @@ Async, battery-powered **bird-feeder scale** firmware for the
 **Seeed Studio XIAO ESP32-C3**, written in `no_std` Rust on the
 [Embassy](https://embassy.dev) async framework.
 
-On each wake-up the device reads a load cell via an HX711 amplifier, publishes
-the raw 24-bit value to MQTT (Home Assistant / Mosquitto), then drops back into
-deep sleep for 5 minutes to preserve battery.
+On each wake-up the device reads a load cell via an HX711 amplifier and compares
+it against a tare baseline kept in RTC RAM. While the feeder is empty it just
+drops back into deep sleep for a couple of seconds — no radio — so it can catch
+short visits cheaply. Only when weight crosses a threshold does it bring up
+Wi-Fi and publish the raw 24-bit value to MQTT (Home Assistant / Mosquitto),
+sampling faster while the bird is present.
 
 ```
 ┌──────────┐  bit-bang   ┌────────┐   Wi-Fi/MQTT   ┌────────────────┐
@@ -38,10 +41,11 @@ deep sleep for 5 minutes to preserve battery.
 | Concern            | Implementation                                                    |
 | ------------------ | ----------------------------------------------------------------- |
 | HAL / async runtime| `esp-hal` 0.22 + `esp-hal-embassy`, executor driven by **TIMG0**  |
-| Load-cell driver   | [`src/hx711.rs`](src/hx711.rs) — async `wait_ready()`, blocking 24+N clock read, two's-complement sign-extend to `i32` |
+| Load-cell driver   | [`src/hx711.rs`](src/hx711.rs) — async `wait_ready()` with timeout, blocking 24+N clock read, two's-complement sign-extend to `i32` |
+| Presence / tare    | [`src/state.rs`](src/state.rs) — baseline + presence edge in RTC-persistent RAM, threshold + drift tracking in `main` |
 | Wi-Fi + TCP/IP     | `esp-wifi` (STA + DHCP) + `embassy-net`, background `net_task`     |
 | MQTT               | `rust-mqtt` (embedded-async, MQTT v5) over an `embassy-net` socket |
-| Power management   | `esp_hal::rtc_cntl` RTC-timer deep sleep, 5-minute interval       |
+| Power management   | `esp_hal::rtc_cntl` RTC-timer deep sleep; short idle poll, longer active poll while a bird is present |
 
 The HX711 read cycle is deliberately a short **blocking** critical section:
 the datasheet forbids a single clock-high pulse longer than 60 µs (it would put
