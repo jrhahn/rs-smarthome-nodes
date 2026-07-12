@@ -1,19 +1,16 @@
-# Home Assistant MQTT sensor for the rs-bird-scale.
+# Home Assistant entities for the rs-bird-scale.
 #
-# The firmware publishes the *raw* 24-bit HX711 reading (a signed integer) to
-# `birds/scale/state`. All calibration is done here so it can be tuned without
-# reflashing the MCU.
+# The firmware now converts the load-cell reading to grams **on-device** using
+# calibration stored in flash, so `birds/scale/state` carries a ready-to-use
+# gram value (no template maths here anymore). Temperature is published in °C.
 #
-# Calibration procedure:
-#   1. With the pan empty, note the steady raw value -> that is `offset`.
-#   2. Place a known mass (e.g. 100 g), note the new raw value.
-#   3. scale_factor = (raw_loaded - offset) / mass_in_grams
+# Calibration and tuning are done from Home Assistant: the `number`/`button`
+# entities below publish **retained** values to `birds/scale/config/<key>`, and
+# the device reads them the next time it is online for a publish (i.e. while a
+# bird is on / has just left the scale), then persists them to flash. Changes
+# therefore take effect with a short delay, not instantly.
 #
-# Merge this into your existing `configuration.yaml`. This uses the modern
-# `mqtt:` platform format (the legacy `sensor: - platform: mqtt` style was
-# removed in Home Assistant 2022.6). The device does not use MQTT discovery,
-# so this manual entry is what makes it appear as an entity; `unique_id` lets
-# you rename it / assign an area from the UI.
+# Merge this into your existing `configuration.yaml`.
 
 mqtt:
   sensor:
@@ -23,18 +20,81 @@ mqtt:
       unit_of_measurement: "g"
       device_class: weight
       state_class: measurement
-      value_template: >
-        {% set raw = value | int %}
-        {% set offset = 8388608 %}     {# raw tare offset (empty pan) #}
-        {% set scale_factor = 420.0 %} {# raw ticks per gram          #}
-        {{ ((raw - offset) / scale_factor) | round(1) }}
 
-    # The firmware publishes the DS18B20 temperature already converted to °C
-    # (one decimal), so no template maths is needed here — it is sent alongside
-    # each weight reading (i.e. while a bird is on / just left the scale).
     - name: "Meisenknödel Temperatur"
       unique_id: birdscale_temperature
       state_topic: "birds/scale/temperature"
       unit_of_measurement: "°C"
       device_class: temperature
       state_class: measurement
+
+  # --- Calibration & tuning (retained -> stored on the controller) ----------
+  # These are "optimistic" (no state_topic): HA shows the last value you set.
+  number:
+    - name: "Meisenknödel Auslöseschwelle"
+      unique_id: birdscale_threshold
+      command_topic: "birds/scale/config/threshold"
+      unit_of_measurement: "g"
+      min: 0
+      max: 500
+      step: 1
+      mode: box
+      retain: true
+
+    - name: "Meisenknödel Kalibrierfaktor"
+      unique_id: birdscale_scale_factor
+      command_topic: "birds/scale/config/scale_factor"
+      min: 1
+      max: 100000
+      step: 0.1
+      mode: box
+      retain: true
+
+    - name: "Meisenknödel Tara-Offset"
+      unique_id: birdscale_offset
+      command_topic: "birds/scale/config/offset"
+      min: -8388608
+      max: 8388607
+      step: 1
+      mode: box
+      retain: true
+
+    - name: "Meisenknödel Idle-Intervall"
+      unique_id: birdscale_idle_interval
+      command_topic: "birds/scale/config/idle_interval"
+      unit_of_measurement: "s"
+      min: 1
+      max: 3600
+      step: 1
+      mode: box
+      retain: true
+
+    - name: "Meisenknödel Aktiv-Intervall"
+      unique_id: birdscale_active_interval
+      command_topic: "birds/scale/config/active_interval"
+      unit_of_measurement: "s"
+      min: 1
+      max: 3600
+      step: 1
+      mode: box
+      retain: true
+
+# --- Tare button ------------------------------------------------------------
+# The device re-zeros by adopting a *new* token published to
+# `birds/scale/config/tare`, so each press must publish a fresh value. An MQTT
+# button's payload is static, so drive the tare from an automation that
+# publishes the current timestamp (retained). Add a Lovelace button that calls
+# this script, or press it from Developer Tools.
+script:
+  birdscale_tare:
+    alias: "Meisenknödel tarieren"
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "birds/scale/config/tare"
+          retain: true
+          payload: "{{ now().timestamp() | int }}"
+
+# The tare adopts the current empty-house baseline as the new zero, so trigger
+# it while the pan is empty. It only takes effect on the device's next online
+# cycle (next bird visit / publish).

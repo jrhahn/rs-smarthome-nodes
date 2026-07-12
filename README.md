@@ -8,14 +8,17 @@ On each wake-up the device reads a load cell via an HX711 amplifier and compares
 it against a tare baseline kept in RTC RAM. While the feeder is empty it just
 drops back into deep sleep for a couple of seconds — no radio — so it can catch
 short visits cheaply. Only when weight crosses a threshold does it bring up
-Wi-Fi and publish the raw 24-bit value to MQTT (Home Assistant / Mosquitto),
-sampling faster while the bird is present.
+Wi-Fi and publish the weight (converted to grams on-device) to MQTT (Home
+Assistant / Mosquitto), sampling faster while the bird is present. While online
+it also pulls any retained calibration/tuning back from Home Assistant and
+persists it to flash.
 
 ```
-┌──────────┐  bit-bang   ┌────────┐   Wi-Fi/MQTT   ┌────────────────┐
-│  Load    │────────────▶│ HX711  │──▶ ESP32-C3 ──▶│ Home Assistant │
-│  Cell    │  DT / SCK   │ 24-bit │   birds/scale  │  (calibration) │
-└──────────┘             └────────┘     /state     └────────────────┘
+┌──────────┐  bit-bang   ┌────────┐    Wi-Fi/MQTT (grams, °C)   ┌────────────────┐
+│  Load    │────────────▶│ HX711  │──▶ ESP32-C3 ───────────────▶│ Home Assistant │
+│  Cell    │  DT / SCK   │ 24-bit │        birds/scale/state    │                │
+└──────────┘             └────────┘   ◀── config/* (retained) ──│  (calibration) │
+   DS18B20 ─ 1-Wire ─────────────────▶     grams + tuning       └────────────────┘
 ```
 
 ## Hardware
@@ -78,6 +81,7 @@ low-power idle-poll cycles. It is published to `birds/scale/temperature` in °C.
 | Load-cell driver   | [`src/hx711.rs`](src/hx711.rs) — async `wait_ready()` with timeout, blocking 24+N clock read, two's-complement sign-extend to `i32` |
 | Temperature driver | [`src/ds18b20.rs`](src/ds18b20.rs) — bit-bang 1-Wire on an open-drain pin, blocking time slots, async 750 ms conversion wait, CRC-checked scratchpad |
 | Presence / tare    | [`src/state.rs`](src/state.rs) — baseline + presence edge in RTC-persistent RAM, threshold + drift tracking in `main` |
+| Config / calibration | [`src/config.rs`](src/config.rs) — calibration + tuning in a CRC-guarded flash blob (`esp-storage`), loaded at boot, updated from retained MQTT while online |
 | Wi-Fi + TCP/IP     | `esp-wifi` (STA + DHCP) + `embassy-net`, background `net_task`     |
 | MQTT               | `rust-mqtt` (embedded-async, MQTT v5) over an `embassy-net` socket |
 | Power management   | `esp_hal::rtc_cntl` RTC-timer deep sleep; short idle poll, longer active poll while a bird is present |
@@ -124,26 +128,39 @@ probe — is in [FLASHING.md](FLASHING.md).**
 
 ## Home Assistant integration
 
-Calibration math (tare offset + ticks-per-gram) lives in Home Assistant so it
-can be tuned without reflashing. Add the snippet from
-[`home-assistant/configuration.yaml`](home-assistant/configuration.yaml):
+The device publishes ready-to-use **grams** to `birds/scale/state` and **°C** to
+`birds/scale/temperature` — no template maths needed. Add the sensor + config
+entities from
+[`home-assistant/configuration.yaml`](home-assistant/configuration.yaml).
 
-```yaml
-sensor:
-  - platform: mqtt
-    name: "Meisenknödel Gewicht"
-    state_topic: "birds/scale/state"
-    unit_of_measurement: "g"
-    value_template: >
-      {% set raw = value | int %}
-      {% set offset = 8388608 %}     {# raw tare offset  #}
-      {% set scale_factor = 420.0 %} {# ticks per gram   #}
-      {{ ((raw - offset) / scale_factor) | round(1) }}
-```
+### Configure & calibrate from Home Assistant
 
-**Calibrating:** watch the raw values on `birds/scale/state` with the pan empty
-(that's your `offset`), then place a known mass and compute
-`scale_factor = (raw_loaded − offset) / grams`.
+Calibration (`offset`, `scale_factor`) and tuning (`threshold`, poll intervals)
+are **stored on the controller in flash** and set from Home Assistant — no
+reflashing. HA publishes each value **retained** to `birds/scale/config/<key>`;
+the firmware reads them the next time it is online for a publish (while a bird is
+on / has just left the scale) and persists them. Changes therefore apply with a
+**short delay**, not instantly.
+
+| HA entity → topic (`birds/scale/config/…`) | Meaning |
+| ------------------------------------------ | ------- |
+| `offset`            | raw HX711 value at 0 g (tare zero) |
+| `scale_factor`      | raw ticks per gram |
+| `threshold`         | grams that count as "a bird landed" |
+| `idle_interval`     | deep-sleep seconds while empty |
+| `active_interval`   | deep-sleep seconds while a bird is present |
+| `tare` (button/script) | re-zero: adopts the current empty baseline as `offset` |
+
+On a blank flash the firmware falls back to built-in defaults
+(`src/config.rs` — `offset` mid-scale, `scale_factor` 420, `threshold` 10 g,
+2 s / 10 s intervals).
+
+**Calibrating `scale_factor`:**
+1. **Tare** with the pan empty (sets `offset`). The empty-pan raw value is also
+   visible in the serial monitor (`HX711 raw reading: N`).
+2. Place a known mass `m` and read the published grams / raw value.
+3. `scale_factor = (raw_loaded − offset) / m`; enter it in the *Kalibrierfaktor*
+   number. Re-check and adjust until the reading matches.
 
 ## License
 
