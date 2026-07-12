@@ -9,15 +9,22 @@
 #   2. Place a known mass (e.g. 100 g), note the new raw value.
 #   3. scale_factor = (raw_loaded - offset) / mass_in_grams
 #
-# Merge this into your existing `configuration.yaml`.
+# Merge this into your existing `configuration.yaml`. This uses the modern
+# `mqtt:` platform format (the legacy `sensor: - platform: mqtt` style was
+# removed in Home Assistant 2022.6). The device does not use MQTT discovery,
+# so this manual entry is what makes it appear as an entity; `unique_id` lets
+# you rename it / assign an area from the UI.
 
-sensor:
-  - platform: mqtt
-    name: "Meisenknödel Gewicht"
-    state_topic: "birds/scale/state"
-    unit_of_measurement: "g"
-    value_template: >
-      {% set raw = value | int %}
-      {% set offset = 8388608 %}     {# raw tare offset (empty pan) #}
-      {% set scale_factor = 420.0 %} {# raw ticks per gram          #}
-      {{ ((raw - offset) / scale_factor) | round(1) }}
+mqtt:
+  sensor:
+    - name: "Meisenknödel Gewicht"
+      unique_id: birdscale_weight
+      state_topic: "birds/scale/state"
+      unit_of_measurement: "g"
+      device_class: weight
+      state_class: measurement
+      value_template: >
+        {% set raw = value | int %}
+        {% set offset = 8388608 %}     {# raw tare offset (empty pan) #}
+        {% set scale_factor = 420.0 %} {# raw ticks per gram          #}
+        {{ ((raw - offset) / scale_factor) | round(1) }}
