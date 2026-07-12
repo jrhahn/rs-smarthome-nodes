@@ -28,3 +28,13 @@ mqtt:
         {% set offset = 8388608 %}     {# raw tare offset (empty pan) #}
         {% set scale_factor = 420.0 %} {# raw ticks per gram          #}
         {{ ((raw - offset) / scale_factor) | round(1) }}
+
+    # The firmware publishes the DS18B20 temperature already converted to °C
+    # (one decimal), so no template maths is needed here — it is sent alongside
+    # each weight reading (i.e. while a bird is on / just left the scale).
+    - name: "Meisenknödel Temperatur"
+      unique_id: birdscale_temperature
+      state_topic: "birds/scale/temperature"
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement

@@ -23,6 +23,7 @@
 #![no_std]
 #![no_main]
 
+mod ds18b20;
 mod hx711;
 mod state;
 
@@ -34,7 +35,8 @@ use embassy_time::{with_timeout, Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
-    gpio::{Input, Level, Output, Pull},
+    gpio::{Input, InputPin, Level, Output, OutputOpenDrain, OutputPin, Pull},
+    peripheral::Peripheral,
     peripherals::{LPWR, RADIO_CLK, RNG, TIMG1, WIFI},
     rng::Rng,
     rtc_cntl::{sleep::TimerWakeupSource, Rtc},
@@ -54,6 +56,7 @@ use rust_mqtt::{
     utils::rng_generator::CountingRng,
 };
 
+use ds18b20::Ds18b20;
 use hx711::Hx711;
 
 /// The concrete network-stack type used throughout the firmware.
@@ -82,6 +85,8 @@ const MQTT_PASSWORD: Option<&str> = option_env!("MQTT_PASSWORD");
 const MQTT_BROKER: Ipv4Address = Ipv4Address::new(192, 168, 1, 67);
 const MQTT_PORT: u16 = 1883;
 const MQTT_TOPIC: &str = "birds/scale/state";
+/// Ambient temperature from the DS18B20, published alongside a weight reading.
+const MQTT_TOPIC_TEMP: &str = "birds/scale/temperature";
 const MQTT_CLIENT_ID: &str = "rs-bird-scale";
 
 // --- Sampling / detection tuning -------------------------------------------
@@ -174,6 +179,7 @@ async fn main(spawner: Spawner) {
         // A bird is on the scale: publish and keep sampling at the active rate.
         info!("presence: raw={} baseline={} delta={}", raw, baseline, delta);
         state::set_bird_present(true);
+        let temp = read_temperature(peripherals.GPIO2).await;
         publish(
             spawner,
             peripherals.TIMG1,
@@ -181,6 +187,7 @@ async fn main(spawner: Spawner) {
             peripherals.RADIO_CLK,
             peripherals.WIFI,
             raw,
+            temp,
         )
         .await;
         enter_deep_sleep(peripherals.LPWR, ACTIVE_POLL_INTERVAL);
@@ -192,6 +199,7 @@ async fn main(spawner: Spawner) {
         // Assistant returns to baseline, then resume idle polling.
         info!("bird left; publishing final reading {}", raw);
         state::set_bird_present(false);
+        let temp = read_temperature(peripherals.GPIO2).await;
         publish(
             spawner,
             peripherals.TIMG1,
@@ -199,6 +207,7 @@ async fn main(spawner: Spawner) {
             peripherals.RADIO_CLK,
             peripherals.WIFI,
             raw,
+            temp,
         )
         .await;
     } else {
@@ -207,6 +216,22 @@ async fn main(spawner: Spawner) {
     }
 
     enter_deep_sleep(peripherals.LPWR, IDLE_POLL_INTERVAL);
+}
+
+/// Read the DS18B20 once over its open-drain 1-Wire line. Only called on the
+/// publish paths (bird present / just-left), so the ~750 ms conversion never
+/// runs on the cheap idle-poll cycles. A missing/faulty probe yields `None`
+/// and simply omits the temperature from the publish.
+async fn read_temperature(
+    pin: impl Peripheral<P = impl InputPin + OutputPin>,
+) -> Option<i16> {
+    let io = OutputOpenDrain::new(pin, Level::High, Pull::Up);
+    let temp = Ds18b20::new(io).read().await;
+    match temp {
+        Some(raw) => info!("DS18B20 raw reading: {}", raw),
+        None => warn!("DS18B20 not responding; skipping temperature"),
+    }
+    temp
 }
 
 /// Bring up Wi-Fi + the network stack and publish `raw`, bounded by
@@ -219,10 +244,11 @@ async fn publish(
     radio_clk: RADIO_CLK,
     wifi: WIFI,
     raw: i32,
+    temp: Option<i16>,
 ) {
     match with_timeout(
         WIFI_BUDGET,
-        connect_and_publish(spawner, timg1, rng, radio_clk, wifi, raw),
+        connect_and_publish(spawner, timg1, rng, radio_clk, wifi, raw, temp),
     )
     .await
     {
@@ -240,6 +266,7 @@ async fn connect_and_publish(
     radio_clk: RADIO_CLK,
     wifi: WIFI,
     raw: i32,
+    temp: Option<i16>,
 ) -> Result<(), &'static str> {
     // esp-wifi needs its own timer; TIMG0 is already owned by the executor, so
     // hand it TIMG1.
@@ -272,7 +299,7 @@ async fn connect_and_publish(
     // Wait for the link and a DHCP lease.
     wait_for_network(stack).await;
 
-    publish_reading(stack, raw).await?;
+    publish_reading(stack, raw, temp).await?;
 
     // Give the TCP stack a moment to flush the FIN before we cut power.
     Timer::after(Duration::from_millis(200)).await;
@@ -307,8 +334,13 @@ async fn wait_for_network(stack: &'static WifiStack) {
     }
 }
 
-/// Open a TCP connection to the broker and publish the raw reading (as ASCII).
-async fn publish_reading(stack: &'static WifiStack, raw: i32) -> Result<(), &'static str> {
+/// Open a TCP connection to the broker and publish the raw weight reading (as
+/// ASCII), plus the DS18B20 temperature in °C when a valid one was read.
+async fn publish_reading(
+    stack: &'static WifiStack,
+    raw: i32,
+    temp: Option<i16>,
+) -> Result<(), &'static str> {
     let mut rx_buffer = [0u8; 1536];
     let mut tx_buffer = [0u8; 1536];
     let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
@@ -361,6 +393,22 @@ async fn publish_reading(stack: &'static WifiStack, raw: i32) -> Result<(), &'st
         )
         .await
         .map_err(|_| "mqtt publish")?;
+
+    // Publish the temperature (°C, one decimal) when the probe answered.
+    if let Some(raw_temp) = temp {
+        let mut temp_payload = heapless::String::<16>::new();
+        ds18b20::write_temp_c(&mut temp_payload, raw_temp);
+        client
+            .send_message(
+                MQTT_TOPIC_TEMP,
+                temp_payload.as_bytes(),
+                QualityOfService::QoS0,
+                false,
+            )
+            .await
+            .map_err(|_| "mqtt publish temp")?;
+        info!("Published {} to {}", temp_payload, MQTT_TOPIC_TEMP);
+    }
 
     Ok(())
 }

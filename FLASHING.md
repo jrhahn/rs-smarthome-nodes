@@ -147,11 +147,19 @@ reading, Wi-Fi association, a DHCP address, and the MQTT publish, e.g.:
 ```
 rs-bird-scale booted, taking a measurement
 HX711 raw reading: 8402193
+DS18B20 raw reading: 401
 Wi-Fi link up, waiting for DHCP...
 Got IP: 192.168.1.42/24
 Published 8402193 to birds/scale/state
+Published 25.1 to birds/scale/temperature
 Entering deep sleep for 300s
 ```
+
+The `DS18B20 raw reading` / temperature publish only appear on cycles where a
+weight reading is sent (a bird is on, or has just left the scale); empty
+idle-poll cycles skip both the radio and the temperature conversion. A
+`DS18B20 not responding` line means the probe didn't answer — check the DATA
+wiring and that the 4.7 kΩ pull-up to 3V3 is present.
 
 Subscribe on the broker side to confirm the payload:
 
