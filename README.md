@@ -26,6 +26,23 @@ sampling faster while the bird is present.
 | Battery          | 2000 mAh LiPo via the XIAO's onboard charger       |
 | Sensor           | 1 kg straight-bar load cell (tension S-config)     |
 | Amplifier        | HX711 24-bit ADC                                   |
+| Temperature      | DS18B20 waterproof 1-Wire probe (stainless steel) |
+
+### Wiring (load cell → HX711)
+
+The four load-cell leads go to the HX711's **input** side. Colours follow the
+common straight-bar convention — verify against your cell's datasheet, as they
+do vary.
+
+| Load-cell lead | HX711 pin | Meaning        |
+| -------------- | --------- | -------------- |
+| Red            | E+        | excitation +   |
+| Black          | E−        | excitation −   |
+| Green          | A+        | signal +       |
+| White          | A−        | signal −       |
+
+> If loading the cell makes the reading go *down* instead of up, swap A+/A− (or
+> flip the comparison in firmware — see `PRESENCE_THRESHOLD` in `src/main.rs`).
 
 ### Wiring (HX711 → XIAO ESP32-C3)
 
@@ -36,12 +53,30 @@ sampling faster while the bird is present.
 | DT (data) | GPIO1 / D1   | input     |
 | SCK (clk) | GPIO0 / D0   | output    |
 
+### Wiring (DS18B20 → XIAO ESP32-C3)
+
+The probe's three leads are the usual DS18B20 colours. The data line is an
+**open-drain 1-Wire bus** and needs a **4.7 kΩ pull-up from DATA to 3V3**
+(the MCU's weak internal pull-up is enabled as a backup, but the external one
+is required for a reliable read over the ~1 m cable).
+
+| DS18B20 lead   | ESP32-C3 pin | Direction |
+| -------------- | ------------ | --------- |
+| Red (VCC)      | 3V3          | —         |
+| Black (GND)    | GND          | —         |
+| Yellow (DATA)  | GPIO2 / D2   | 1-Wire (+ 4.7 kΩ to 3V3) |
+
+The temperature is read only when a weight reading is being published (a bird
+is on / has just left the scale), so the ~750 ms conversion never runs on the
+low-power idle-poll cycles. It is published to `birds/scale/temperature` in °C.
+
 ## Firmware architecture
 
 | Concern            | Implementation                                                    |
 | ------------------ | ----------------------------------------------------------------- |
 | HAL / async runtime| `esp-hal` 0.22 + `esp-hal-embassy`, executor driven by **TIMG0**  |
 | Load-cell driver   | [`src/hx711.rs`](src/hx711.rs) — async `wait_ready()` with timeout, blocking 24+N clock read, two's-complement sign-extend to `i32` |
+| Temperature driver | [`src/ds18b20.rs`](src/ds18b20.rs) — bit-bang 1-Wire on an open-drain pin, blocking time slots, async 750 ms conversion wait, CRC-checked scratchpad |
 | Presence / tare    | [`src/state.rs`](src/state.rs) — baseline + presence edge in RTC-persistent RAM, threshold + drift tracking in `main` |
 | Wi-Fi + TCP/IP     | `esp-wifi` (STA + DHCP) + `embassy-net`, background `net_task`     |
 | MQTT               | `rust-mqtt` (embedded-async, MQTT v5) over an `embassy-net` socket |
