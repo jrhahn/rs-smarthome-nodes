@@ -146,14 +146,20 @@ reading, Wi-Fi association, a DHCP address, and the MQTT publish, e.g.:
 
 ```
 rs-bird-scale booted, taking a measurement
+config: offset=8388608 scale=420 threshold=10g idle=2s active=10s
 HX711 raw reading: 8402193
 DS18B20 raw reading: 401
 Wi-Fi link up, waiting for DHCP...
 Got IP: 192.168.1.42/24
-Published 8402193 to birds/scale/state
+Published 32.3 g to birds/scale/state
 Published 25.1 to birds/scale/temperature
-Entering deep sleep for 300s
+Entering deep sleep for 10s
 ```
+
+Weight is published in **grams** (converted on-device from the flash-stored
+calibration); the `config:` line shows the values loaded from flash (or
+built-in defaults on a blank device). Calibration and tuning are changed from
+Home Assistant — see the [README](README.md#configure--calibrate-from-home-assistant).
 
 The `DS18B20 raw reading` / temperature publish only appear on cycles where a
 weight reading is sent (a bird is on, or has just left the scale); empty

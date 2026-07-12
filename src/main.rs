@@ -23,6 +23,7 @@
 #![no_std]
 #![no_main]
 
+mod config;
 mod ds18b20;
 mod hx711;
 mod state;
@@ -56,6 +57,7 @@ use rust_mqtt::{
     utils::rng_generator::CountingRng,
 };
 
+use config::Config;
 use ds18b20::Ds18b20;
 use hx711::Hx711;
 
@@ -87,21 +89,22 @@ const MQTT_PORT: u16 = 1883;
 const MQTT_TOPIC: &str = "birds/scale/state";
 /// Ambient temperature from the DS18B20, published alongside a weight reading.
 const MQTT_TOPIC_TEMP: &str = "birds/scale/temperature";
+/// Prefix under which Home Assistant publishes retained tuning/calibration
+/// values (one key per topic); the firmware subscribes to the wildcard and
+/// reads them while it is already online for a publish. See [`config`].
+const MQTT_CONFIG_PREFIX: &str = "birds/scale/config/";
+const MQTT_CONFIG_WILDCARD: &str = "birds/scale/config/#";
 const MQTT_CLIENT_ID: &str = "rs-bird-scale";
 
 // --- Sampling / detection tuning -------------------------------------------
-/// Weight change from the baseline, in raw HX711 ticks, that counts as "a bird
-/// landed". Positive = the load cell reads *up* under load; flip the comparison
-/// if yours is wired the other way. Calibrate against a known mass.
-const PRESENCE_THRESHOLD: i32 = 50_000;
+// The presence threshold and the idle/active poll intervals are no longer
+// compile-time constants: they live in [`config::Config`], persisted in flash
+// and tunable live from Home Assistant. See `src/config.rs`.
 
-/// How long to deep-sleep between polls while the house is empty. Short enough
-/// to catch a brief visit; this is the dominant term in idle battery life.
-const IDLE_POLL_INTERVAL: CoreDuration = CoreDuration::from_secs(2);
-
-/// How long to deep-sleep between publishes while a bird is present, i.e. the
-/// sample cadence Home Assistant sees during a visit.
-const ACTIVE_POLL_INTERVAL: CoreDuration = CoreDuration::from_secs(10);
+/// How long to wait for the next retained config message after subscribing.
+/// Retained values arrive within tens of ms, so once a receive hits this
+/// timeout we assume the broker has sent them all and stop draining.
+const CONFIG_RECV_WINDOW: Duration = Duration::from_millis(400);
 
 /// Give up on a single HX711 conversion after this long. A disconnected sensor
 /// (with `DT` pulled up) never becomes ready, so this bounds the boot.
@@ -127,12 +130,12 @@ macro_rules! mk_static {
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
     // --- 1. HAL & async runtime --------------------------------------------
-    let config = {
+    let hal_config = {
         let mut c = esp_hal::Config::default();
         c.cpu_clock = CpuClock::max();
         c
     };
-    let peripherals = esp_hal::init(config);
+    let peripherals = esp_hal::init(hal_config);
 
     esp_println::logger::init_logger_from_env();
     esp_alloc::heap_allocator!(72 * 1024);
@@ -142,6 +145,15 @@ async fn main(spawner: Spawner) {
     esp_hal_embassy::init(timg0.timer0);
 
     info!("rs-bird-scale booted, taking a measurement");
+
+    // Runtime config from flash (calibration + tuning), or defaults on a blank
+    // sector. Read now, while the radio is still down. It may be updated from
+    // Home Assistant during the publish below and persisted before sleep.
+    let cfg = config::load();
+    info!(
+        "config: offset={} scale={} threshold={}g idle={}s active={}s",
+        cfg.offset, cfg.scale_factor, cfg.threshold_grams, cfg.idle_secs, cfg.active_secs
+    );
 
     // --- 2. Read the load cell ---------------------------------------------
     // `DT` is pulled up so a *disconnected* HX711 reads permanently "not ready"
@@ -157,7 +169,7 @@ async fn main(spawner: Spawner) {
         Some(v) => v,
         None => {
             warn!("HX711 not responding; skipping cycle");
-            enter_deep_sleep(peripherals.LPWR, IDLE_POLL_INTERVAL);
+            enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
         }
     };
     info!("HX711 raw reading: {}", raw);
@@ -167,7 +179,7 @@ async fn main(spawner: Spawner) {
         state::set_baseline(raw);
         state::mark_initialised();
         info!("tared baseline = {}", raw);
-        enter_deep_sleep(peripherals.LPWR, IDLE_POLL_INTERVAL);
+        enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
     }
 
     // --- 4. Presence decision ----------------------------------------------
@@ -175,12 +187,12 @@ async fn main(spawner: Spawner) {
     let delta = raw - baseline;
     let was_present = state::bird_present();
 
-    if delta >= PRESENCE_THRESHOLD {
+    if delta >= cfg.threshold_ticks() {
         // A bird is on the scale: publish and keep sampling at the active rate.
         info!("presence: raw={} baseline={} delta={}", raw, baseline, delta);
         state::set_bird_present(true);
         let temp = read_temperature(peripherals.GPIO2).await;
-        publish(
+        let cfg = publish(
             spawner,
             peripherals.TIMG1,
             peripherals.RNG,
@@ -188,9 +200,11 @@ async fn main(spawner: Spawner) {
             peripherals.WIFI,
             raw,
             temp,
+            baseline,
+            cfg,
         )
         .await;
-        enter_deep_sleep(peripherals.LPWR, ACTIVE_POLL_INTERVAL);
+        enter_deep_sleep(peripherals.LPWR, cfg.active_interval());
     }
 
     // Empty house from here on.
@@ -200,7 +214,7 @@ async fn main(spawner: Spawner) {
         info!("bird left; publishing final reading {}", raw);
         state::set_bird_present(false);
         let temp = read_temperature(peripherals.GPIO2).await;
-        publish(
+        let cfg = publish(
             spawner,
             peripherals.TIMG1,
             peripherals.RNG,
@@ -208,14 +222,17 @@ async fn main(spawner: Spawner) {
             peripherals.WIFI,
             raw,
             temp,
+            baseline,
+            cfg,
         )
         .await;
+        enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
     } else {
         // Steady empty: absorb slow drift into the baseline.
         state::set_baseline(baseline + (delta >> BASELINE_DRIFT_SHIFT));
     }
 
-    enter_deep_sleep(peripherals.LPWR, IDLE_POLL_INTERVAL);
+    enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
 }
 
 /// Read the DS18B20 once over its open-drain 1-Wire line. Only called on the
@@ -234,9 +251,13 @@ async fn read_temperature(
     temp
 }
 
-/// Bring up Wi-Fi + the network stack and publish `raw`, bounded by
-/// [`WIFI_BUDGET`]. All failures are logged and swallowed: the caller deep-sleeps
-/// straight after, which tears down the half-built stack regardless.
+/// Bring up Wi-Fi + the network stack, publish `raw` (as grams) and the
+/// temperature, and pull any retained config from Home Assistant — all bounded
+/// by [`WIFI_BUDGET`]. Returns the (possibly HA-updated) config and persists it
+/// to flash when it changed. All failures are logged and swallowed: the caller
+/// deep-sleeps straight after, which tears down the half-built stack regardless,
+/// and an unchanged config is simply returned untouched.
+#[allow(clippy::too_many_arguments)]
 async fn publish(
     spawner: Spawner,
     timg1: TIMG1,
@@ -245,20 +266,38 @@ async fn publish(
     wifi: WIFI,
     raw: i32,
     temp: Option<i16>,
-) {
-    match with_timeout(
+    baseline: i32,
+    cfg: Config,
+) -> Config {
+    let updated = match with_timeout(
         WIFI_BUDGET,
-        connect_and_publish(spawner, timg1, rng, radio_clk, wifi, raw, temp),
+        connect_and_publish(spawner, timg1, rng, radio_clk, wifi, raw, temp, baseline, cfg),
     )
     .await
     {
-        Ok(Ok(())) => info!("Published {} to {}", raw, MQTT_TOPIC),
-        Ok(Err(e)) => warn!("publish failed: {}", e),
-        Err(_) => warn!("Wi-Fi/publish exceeded {:?}, giving up", WIFI_BUDGET),
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            warn!("publish failed: {}", e);
+            cfg
+        }
+        Err(_) => {
+            warn!("Wi-Fi/publish exceeded {:?}, giving up", WIFI_BUDGET);
+            cfg
+        }
+    };
+
+    // Only touch flash when a value actually changed (slow, finite-wear).
+    if updated != cfg {
+        match config::store(&updated) {
+            Ok(()) => info!("config updated from Home Assistant and saved"),
+            Err(e) => warn!("config save failed: {}", e),
+        }
     }
+    updated
 }
 
 /// Join Wi-Fi (STA + DHCP) and push a single reading to the broker.
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_publish(
     spawner: Spawner,
     timg1: TIMG1,
@@ -267,7 +306,9 @@ async fn connect_and_publish(
     wifi: WIFI,
     raw: i32,
     temp: Option<i16>,
-) -> Result<(), &'static str> {
+    baseline: i32,
+    cfg: Config,
+) -> Result<Config, &'static str> {
     // esp-wifi needs its own timer; TIMG0 is already owned by the executor, so
     // hand it TIMG1.
     let mut rng = Rng::new(rng);
@@ -299,11 +340,11 @@ async fn connect_and_publish(
     // Wait for the link and a DHCP lease.
     wait_for_network(stack).await;
 
-    publish_reading(stack, raw, temp).await?;
+    let updated = publish_reading(stack, raw, temp, baseline, cfg).await?;
 
     // Give the TCP stack a moment to flush the FIN before we cut power.
     Timer::after(Duration::from_millis(200)).await;
-    Ok(())
+    Ok(updated)
 }
 
 /// Enter RTC-timer deep sleep for `interval`. Never returns — the chip resets
@@ -334,13 +375,17 @@ async fn wait_for_network(stack: &'static WifiStack) {
     }
 }
 
-/// Open a TCP connection to the broker and publish the raw weight reading (as
-/// ASCII), plus the DS18B20 temperature in °C when a valid one was read.
+/// Open a TCP connection to the broker, publish the weight in grams (converted
+/// on-device from `cfg`) plus the DS18B20 temperature, then drain any retained
+/// `birds/scale/config/*` values from Home Assistant. Returns the config with
+/// those updates applied (unchanged if none were waiting).
 async fn publish_reading(
     stack: &'static WifiStack,
     raw: i32,
     temp: Option<i16>,
-) -> Result<(), &'static str> {
+    baseline: i32,
+    cfg: Config,
+) -> Result<Config, &'static str> {
     let mut rx_buffer = [0u8; 1536];
     let mut tx_buffer = [0u8; 1536];
     let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
@@ -380,19 +425,14 @@ async fn publish_reading(
         .await
         .map_err(|_| "mqtt connect")?;
 
-    // Encode the raw i32 as a decimal ASCII string for the HA template.
+    // Convert the raw reading to grams on-device and publish as ASCII.
     let mut payload = heapless::String::<16>::new();
-    write_i32(&mut payload, raw);
-
+    cfg.write_grams(&mut payload, raw);
     client
-        .send_message(
-            MQTT_TOPIC,
-            payload.as_bytes(),
-            QualityOfService::QoS0,
-            false,
-        )
+        .send_message(MQTT_TOPIC, payload.as_bytes(), QualityOfService::QoS0, false)
         .await
         .map_err(|_| "mqtt publish")?;
+    info!("Published {} g to {}", payload, MQTT_TOPIC);
 
     // Publish the temperature (°C, one decimal) when the probe answered.
     if let Some(raw_temp) = temp {
@@ -410,15 +450,34 @@ async fn publish_reading(
         info!("Published {} to {}", temp_payload, MQTT_TOPIC_TEMP);
     }
 
-    Ok(())
-}
+    // Pull retained config from Home Assistant. We're already online, so this is
+    // the cheap moment to pick up any tuning/calibration the user changed.
+    // Retained messages arrive right after the SUBACK, so we read with a short
+    // per-message window and stop on the first timeout (nothing more waiting),
+    // capped by a hard message count as a backstop. Best-effort: config sync
+    // failures never fail the publish.
+    let mut updated = cfg;
+    if client.subscribe_to_topic(MQTT_CONFIG_WILDCARD).await.is_ok() {
+        for _ in 0..12 {
+            match with_timeout(CONFIG_RECV_WINDOW, client.receive_message()).await {
+                Ok(Ok((topic, payload))) => {
+                    if let (Some(key), Ok(value)) = (
+                        topic.strip_prefix(MQTT_CONFIG_PREFIX),
+                        core::str::from_utf8(payload),
+                    ) {
+                        if updated.apply(key, value.trim(), baseline) {
+                            info!("config: {} = {}", key, value.trim());
+                        }
+                    }
+                }
+                // Broker error/disconnect, or no more retained messages in the
+                // window: either way, done draining.
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+    }
 
-/// Minimal `i32 -> String` formatting (avoids pulling in `core::fmt` write on
-/// the hot path; `heapless` supports `write!` but this keeps intent explicit).
-fn write_i32(buf: &mut heapless::String<16>, value: i32) {
-    use core::fmt::Write;
-    // Infallible for i32 into a 16-byte buffer (max "-2147483648" = 11 chars).
-    let _ = write!(buf, "{}", value);
+    Ok(updated)
 }
 
 /// Background task: keeps the Wi-Fi controller connected, reconnecting on drop.

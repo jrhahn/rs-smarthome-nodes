@@ -52,6 +52,10 @@ static_cell = "2.1.0"
 heapless = "0.8.0"
 log = "0.4.22"
 
+# --- Config persistence (NVS flash) ---
+esp-storage = { version = "0.4.0", features = ["esp32c3"] }
+embedded-storage = "0.3"
+
 [profile.dev]
 # Rust debug builds are far too large/slow to run on-device; always optimise.
 opt-level = 3
