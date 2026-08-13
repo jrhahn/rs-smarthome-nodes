@@ -1,13 +1,13 @@
 [package]
-name = "rs-bird-scale"
+name = "rs-smarthome-nodes"
 version = "0.1.0"
 edition = "2021"
 authors = ["Jürgen Hahn"]
-description = "Async battery-powered bird feeder scale firmware for the Seeed XIAO ESP32-C3 (no_std, Embassy)"
+description = "Async no_std firmware for configurable ESP32-C3 smart-home sensor nodes (Embassy); started as a battery bird-feeder scale"
 license = "MIT"
 
 [[bin]]
-name = "rs-bird-scale"
+name = "rs-smarthome-nodes"
 path = "src/main.rs"
 
 [dependencies]
