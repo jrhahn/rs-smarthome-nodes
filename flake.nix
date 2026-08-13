@@ -1,5 +1,5 @@
 {
-  description = "Async ESP32-C3 bird-feeder scale firmware (no_std, Embassy)";
+  description = "Async no_std ESP32-C3 smart-home sensor node firmware (Embassy); started as a bird-feeder scale";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -28,7 +28,17 @@
           packages = [
             rustToolchain
             pkgs.espflash # flash + serial monitor over USB-C
+            pkgs.gitleaks # secret scanning (see .githooks/pre-commit)
           ];
+
+          # Route git at the tracked hooks so the gitleaks secret scan runs on
+          # every commit made from inside the dev shell. `core.hooksPath` is a
+          # local setting, so this (re)applies it on shell entry.
+          shellHook = ''
+            if [ -d .git ]; then
+              git config --local core.hooksPath .githooks
+            fi
+          '';
         };
       });
 }
