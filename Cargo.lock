@@ -1117,7 +1117,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rs-bird-scale"
+name = "rs-smarthome-nodes"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",

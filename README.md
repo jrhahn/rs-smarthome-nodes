@@ -116,8 +116,11 @@ cargo install espflash          # for flashing/monitoring over USB
 
 ## Build & flash
 
-Credentials are baked in at compile time; the broker IP is a constant in
-[`src/main.rs`](src/main.rs) (`MQTT_BROKER`).
+Credentials **and** the broker address are baked in at compile time from env
+vars (see [`.env.example`](.env.example)): `SSID`, `PASSWORD`, optional
+`MQTT_USER` / `MQTT_PASSWORD`, and `MQTT_BROKER` (a private LAN IP, not a
+secret, kept out of source). `MQTT_PORT` is still a constant in
+[`src/main.rs`](src/main.rs).
 
 ```bash
 # Build only
@@ -127,7 +130,8 @@ cargo build --release
 SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
 ```
 
-Adjust `MQTT_BROKER` / `MQTT_PORT` in `src/main.rs` to point at your broker.
+Point it at your broker by setting `MQTT_BROKER` in `.env` (or on the command
+line); adjust `MQTT_PORT` in `src/main.rs` if it isn't the default 1883.
 
 📖 **Full build/flash walkthrough — including flashing with a Raspberry Pi Pico
 probe — is in [FLASHING.md](FLASHING.md).**

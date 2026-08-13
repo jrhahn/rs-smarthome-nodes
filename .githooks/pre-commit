@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Block commits that introduce secrets: scan the *staged* changes with gitleaks.
+#
+# gitleaks is provided by the nix dev shell (see flake.nix); `core.hooksPath` is
+# pointed here automatically on shell entry. If gitleaks cannot be found at all
+# the commit is blocked rather than silently unscanned — this repo is public.
+set -euo pipefail
+
+if command -v gitleaks >/dev/null 2>&1; then
+  exec gitleaks git --staged --redact
+elif command -v nix >/dev/null 2>&1; then
+  exec nix run nixpkgs#gitleaks -- git --staged --redact
+else
+  echo "pre-commit: gitleaks not found — enter the nix dev shell (direnv) or install gitleaks." >&2
+  exit 1
+fi

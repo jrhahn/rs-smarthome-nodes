@@ -26,6 +26,9 @@
 mod config;
 mod ds18b20;
 mod hx711;
+// Scaffolding for the configurable multi-sensor base platform (epic #11). Not
+// wired into the bird-scale flow yet; see `docs/base-platform.md`.
+mod sensors;
 mod state;
 
 use core::time::Duration as CoreDuration;
@@ -82,9 +85,57 @@ const PASSWORD: &str = match option_env!("PASSWORD") {
 const MQTT_USER: Option<&str> = option_env!("MQTT_USER");
 const MQTT_PASSWORD: Option<&str> = option_env!("MQTT_PASSWORD");
 
-/// Home Assistant / Mosquitto broker on the LAN.
-const MQTT_BROKER: Ipv4Address = Ipv4Address::new(192, 168, 1, 67);
+/// Home Assistant / Mosquitto broker on the LAN. Baked in at compile time from
+/// the `MQTT_BROKER` env var (see `.env` / `.env.example`), like the Wi-Fi
+/// credentials. It is a private LAN IP, not a secret, but keeping it out of
+/// source is cleaner; the default keeps a plain `cargo build` working.
+const MQTT_BROKER: Ipv4Address = parse_ipv4(match option_env!("MQTT_BROKER") {
+    Some(s) => s,
+    None => "192.168.1.67",
+});
 const MQTT_PORT: u16 = 1883;
+
+/// Const-parse a dotted-decimal IPv4 string (e.g. `"192.168.1.67"`) into an
+/// [`Ipv4Address`] at compile time, so `MQTT_BROKER` can come from an env var.
+const fn parse_ipv4(s: &str) -> Ipv4Address {
+    let o = parse_octets(s);
+    Ipv4Address::new(o[0], o[1], o[2], o[3])
+}
+
+/// The dotted-decimal → four-octet core, split out so it can be checked at
+/// compile time. Lenient by design: extra separators are clamped rather than
+/// panicking, so a malformed override yields a wrong (but harmless) address,
+/// never a build that fails deep inside const-eval.
+const fn parse_octets(s: &str) -> [u8; 4] {
+    let b = s.as_bytes();
+    let mut octets = [0u8; 4];
+    let mut idx = 0;
+    let mut cur = 0u16;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'.' {
+            if idx < 3 {
+                octets[idx] = cur as u8;
+                idx += 1;
+            }
+            cur = 0;
+        } else {
+            cur = cur * 10 + (c - b'0') as u16;
+        }
+        i += 1;
+    }
+    if idx < 4 {
+        octets[idx] = cur as u8;
+    }
+    octets
+}
+
+// Pin the parser against the default broker address at compile time.
+const _: () = {
+    let o = parse_octets("192.168.1.67");
+    assert!(o[0] == 192 && o[1] == 168 && o[2] == 1 && o[3] == 67);
+};
 const MQTT_TOPIC: &str = "birds/scale/state";
 /// Ambient temperature from the DS18B20, published alongside a weight reading.
 const MQTT_TOPIC_TEMP: &str = "birds/scale/temperature";
@@ -220,7 +271,10 @@ async fn main(spawner: Spawner) {
 
     if delta >= cfg.threshold_ticks() {
         // A bird is on the scale: publish and keep sampling at the active rate.
-        info!("presence: raw={} baseline={} delta={}", raw, baseline, delta);
+        info!(
+            "presence: raw={} baseline={} delta={}",
+            raw, baseline, delta
+        );
         state::set_bird_present(true);
         let temp = read_temperature(&mut temp_sensor).await;
         let cfg = publish(
@@ -424,7 +478,9 @@ async fn publish(
 ) -> Config {
     let updated = match with_timeout(
         WIFI_BUDGET,
-        connect_and_publish(spawner, timg1, rng, radio_clk, wifi, raw, temp, baseline, cfg),
+        connect_and_publish(
+            spawner, timg1, rng, radio_clk, wifi, raw, temp, baseline, cfg,
+        ),
     )
     .await
     {
@@ -461,8 +517,9 @@ async fn bring_up_wifi(
         esp_wifi::init(timg1.timer0, rng, radio_clk).map_err(|_| "wifi init")?
     );
 
-    let (wifi_interface, controller) = esp_wifi::wifi::new_with_mode(esp_wifi_ctrl, wifi, WifiStaDevice)
-        .map_err(|_| "wifi mode")?;
+    let (wifi_interface, controller) =
+        esp_wifi::wifi::new_with_mode(esp_wifi_ctrl, wifi, WifiStaDevice)
+            .map_err(|_| "wifi mode")?;
 
     let net_config = NetConfig::dhcpv4(Default::default());
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
@@ -589,7 +646,12 @@ async fn publish_reading(
     let mut payload = heapless::String::<16>::new();
     cfg.write_grams(&mut payload, raw);
     client
-        .send_message(MQTT_TOPIC, payload.as_bytes(), QualityOfService::QoS0, false)
+        .send_message(
+            MQTT_TOPIC,
+            payload.as_bytes(),
+            QualityOfService::QoS0,
+            false,
+        )
         .await
         .map_err(|_| "mqtt publish")?;
     info!("Published {} g to {}", payload, MQTT_TOPIC);
@@ -617,7 +679,11 @@ async fn publish_reading(
     // capped by a hard message count as a backstop. Best-effort: config sync
     // failures never fail the publish.
     let mut updated = cfg;
-    if client.subscribe_to_topic(MQTT_CONFIG_WILDCARD).await.is_ok() {
+    if client
+        .subscribe_to_topic(MQTT_CONFIG_WILDCARD)
+        .await
+        .is_ok()
+    {
         for _ in 0..12 {
             match with_timeout(CONFIG_RECV_WINDOW, client.receive_message()).await {
                 Ok(Ok((topic, payload))) => {
