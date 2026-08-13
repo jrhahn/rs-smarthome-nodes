@@ -26,6 +26,9 @@
 mod config;
 mod ds18b20;
 mod hx711;
+// Scaffolding for the configurable multi-sensor base platform (epic #11). Not
+// wired into the bird-scale flow yet; see `docs/base-platform.md`.
+mod sensors;
 mod state;
 
 use core::time::Duration as CoreDuration;
@@ -220,7 +223,10 @@ async fn main(spawner: Spawner) {
 
     if delta >= cfg.threshold_ticks() {
         // A bird is on the scale: publish and keep sampling at the active rate.
-        info!("presence: raw={} baseline={} delta={}", raw, baseline, delta);
+        info!(
+            "presence: raw={} baseline={} delta={}",
+            raw, baseline, delta
+        );
         state::set_bird_present(true);
         let temp = read_temperature(&mut temp_sensor).await;
         let cfg = publish(
@@ -424,7 +430,9 @@ async fn publish(
 ) -> Config {
     let updated = match with_timeout(
         WIFI_BUDGET,
-        connect_and_publish(spawner, timg1, rng, radio_clk, wifi, raw, temp, baseline, cfg),
+        connect_and_publish(
+            spawner, timg1, rng, radio_clk, wifi, raw, temp, baseline, cfg,
+        ),
     )
     .await
     {
@@ -461,8 +469,9 @@ async fn bring_up_wifi(
         esp_wifi::init(timg1.timer0, rng, radio_clk).map_err(|_| "wifi init")?
     );
 
-    let (wifi_interface, controller) = esp_wifi::wifi::new_with_mode(esp_wifi_ctrl, wifi, WifiStaDevice)
-        .map_err(|_| "wifi mode")?;
+    let (wifi_interface, controller) =
+        esp_wifi::wifi::new_with_mode(esp_wifi_ctrl, wifi, WifiStaDevice)
+            .map_err(|_| "wifi mode")?;
 
     let net_config = NetConfig::dhcpv4(Default::default());
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
@@ -589,7 +598,12 @@ async fn publish_reading(
     let mut payload = heapless::String::<16>::new();
     cfg.write_grams(&mut payload, raw);
     client
-        .send_message(MQTT_TOPIC, payload.as_bytes(), QualityOfService::QoS0, false)
+        .send_message(
+            MQTT_TOPIC,
+            payload.as_bytes(),
+            QualityOfService::QoS0,
+            false,
+        )
         .await
         .map_err(|_| "mqtt publish")?;
     info!("Published {} g to {}", payload, MQTT_TOPIC);
@@ -617,7 +631,11 @@ async fn publish_reading(
     // capped by a hard message count as a backstop. Best-effort: config sync
     // failures never fail the publish.
     let mut updated = cfg;
-    if client.subscribe_to_topic(MQTT_CONFIG_WILDCARD).await.is_ok() {
+    if client
+        .subscribe_to_topic(MQTT_CONFIG_WILDCARD)
+        .await
+        .is_ok()
+    {
         for _ in 0..12 {
             match with_timeout(CONFIG_RECV_WINDOW, client.receive_message()).await {
                 Ok(Ok((topic, payload))) => {
