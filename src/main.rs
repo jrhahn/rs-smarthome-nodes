@@ -85,9 +85,57 @@ const PASSWORD: &str = match option_env!("PASSWORD") {
 const MQTT_USER: Option<&str> = option_env!("MQTT_USER");
 const MQTT_PASSWORD: Option<&str> = option_env!("MQTT_PASSWORD");
 
-/// Home Assistant / Mosquitto broker on the LAN.
-const MQTT_BROKER: Ipv4Address = Ipv4Address::new(192, 168, 1, 67);
+/// Home Assistant / Mosquitto broker on the LAN. Baked in at compile time from
+/// the `MQTT_BROKER` env var (see `.env` / `.env.example`), like the Wi-Fi
+/// credentials. It is a private LAN IP, not a secret, but keeping it out of
+/// source is cleaner; the default keeps a plain `cargo build` working.
+const MQTT_BROKER: Ipv4Address = parse_ipv4(match option_env!("MQTT_BROKER") {
+    Some(s) => s,
+    None => "192.168.1.67",
+});
 const MQTT_PORT: u16 = 1883;
+
+/// Const-parse a dotted-decimal IPv4 string (e.g. `"192.168.1.67"`) into an
+/// [`Ipv4Address`] at compile time, so `MQTT_BROKER` can come from an env var.
+const fn parse_ipv4(s: &str) -> Ipv4Address {
+    let o = parse_octets(s);
+    Ipv4Address::new(o[0], o[1], o[2], o[3])
+}
+
+/// The dotted-decimal → four-octet core, split out so it can be checked at
+/// compile time. Lenient by design: extra separators are clamped rather than
+/// panicking, so a malformed override yields a wrong (but harmless) address,
+/// never a build that fails deep inside const-eval.
+const fn parse_octets(s: &str) -> [u8; 4] {
+    let b = s.as_bytes();
+    let mut octets = [0u8; 4];
+    let mut idx = 0;
+    let mut cur = 0u16;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'.' {
+            if idx < 3 {
+                octets[idx] = cur as u8;
+                idx += 1;
+            }
+            cur = 0;
+        } else {
+            cur = cur * 10 + (c - b'0') as u16;
+        }
+        i += 1;
+    }
+    if idx < 4 {
+        octets[idx] = cur as u8;
+    }
+    octets
+}
+
+// Pin the parser against the default broker address at compile time.
+const _: () = {
+    let o = parse_octets("192.168.1.67");
+    assert!(o[0] == 192 && o[1] == 168 && o[2] == 1 && o[3] == 67);
+};
 const MQTT_TOPIC: &str = "birds/scale/state";
 /// Ambient temperature from the DS18B20, published alongside a weight reading.
 const MQTT_TOPIC_TEMP: &str = "birds/scale/temperature";
