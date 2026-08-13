@@ -79,6 +79,29 @@ mqtt:
       mode: box
       retain: true
 
+    # How often to publish temperature + weight even without a visitor, so HA
+    # keeps a fresh reading. Realised as a whole number of idle intervals.
+    - name: "Meisenknödel Heartbeat-Intervall"
+      unique_id: birdscale_heartbeat_interval
+      command_topic: "birds/scale/config/heartbeat_interval"
+      unit_of_measurement: "s"
+      min: 10
+      max: 86400
+      step: 10
+      mode: box
+      retain: true
+
+  # Deep sleep switch. OFF keeps the device awake with Wi-Fi up (bench testing
+  # on USB — the serial monitor stays connected and readings stream live). ON is
+  # the normal battery behaviour. Takes effect on the device's next online cycle.
+  switch:
+    - name: "Meisenknödel Deep Sleep"
+      unique_id: birdscale_deep_sleep
+      command_topic: "birds/scale/config/deep_sleep"
+      payload_on: "1"
+      payload_off: "0"
+      retain: true
+
 # --- Tare button ------------------------------------------------------------
 # The device re-zeros by adopting a *new* token published to
 # `birds/scale/config/tare`, so each press must publish a fresh value. An MQTT

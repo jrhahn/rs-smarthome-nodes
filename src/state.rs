@@ -20,6 +20,14 @@ static mut BASELINE: i32 = 0;
 #[ram(rtc_fast, persistent)]
 static mut FLAGS: u32 = 0;
 
+/// Empty-house idle wake-ups accumulated since the last publish. Drives the
+/// periodic heartbeat: once it reaches `Config::heartbeat_wakes()` the firmware
+/// publishes temperature + weight even without a visitor, then resets it. Any
+/// real publish (bird arrived / left) also resets it, so the heartbeat clock
+/// restarts from the last time Home Assistant already got a fresh reading.
+#[ram(rtc_fast, persistent)]
+static mut IDLE_WAKES: u32 = 0;
+
 /// Set once the baseline has been tared at least once.
 const FLAG_INIT: u32 = 1 << 0;
 /// Set while weight is above the presence threshold (edge detection).
@@ -68,4 +76,15 @@ pub fn bird_present() -> bool {
 /// Record whether weight is currently on the scale.
 pub fn set_bird_present(present: bool) {
     set_flag(FLAG_PRESENT, present);
+}
+
+/// Idle wake-ups accumulated since the last publish.
+pub fn idle_wakes() -> u32 {
+    unsafe { core::ptr::addr_of!(IDLE_WAKES).read() }
+}
+
+/// Overwrite the idle wake-up counter (e.g. bump on an empty poll, or reset to
+/// zero right after a publish).
+pub fn set_idle_wakes(value: u32) {
+    unsafe { core::ptr::addr_of_mut!(IDLE_WAKES).write(value) }
 }

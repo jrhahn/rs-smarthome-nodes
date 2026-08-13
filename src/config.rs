@@ -26,9 +26,9 @@ const FLASH_OFFSET: u32 = 0x9000;
 /// `"BIRD"` little-endian — marks an initialised blob.
 const MAGIC: u32 = 0x4449_5242;
 /// Bump when the on-flash layout changes; an old version reverts to defaults.
-const VERSION: u8 = 1;
-/// Serialised length: magic(4) + version(1) + pad(3) + six 4-byte fields + crc(4).
-const BLOB_LEN: usize = 4 + 4 + 4 * 6 + 4;
+const VERSION: u8 = 3;
+/// Serialised length: magic(4) + version(1) + pad(3) + eight 4-byte fields + crc(4).
+const BLOB_LEN: usize = 4 + 4 + 4 * 8 + 4;
 
 /// All runtime-tunable settings. `f32` calibration fields are compared bitwise
 /// for change detection, which is exactly what we want (a re-sent identical
@@ -47,6 +47,15 @@ pub struct Config {
     pub active_secs: u32,
     /// Monotonic tare token; a new value from HA triggers a re-zero.
     pub tare_token: u32,
+    /// When `false`, the firmware never deep-sleeps: it stays awake and keeps
+    /// Wi-Fi up in a loop. Meant for bench testing on USB where deep sleep just
+    /// churns the serial monitor. Default `true` (battery behaviour).
+    pub deep_sleep: bool,
+    /// Seconds between periodic "heartbeat" publishes: even with no visitor, the
+    /// firmware brings Wi-Fi up this often and publishes temperature + weight so
+    /// Home Assistant keeps a fresh reading. Realised as a whole number of idle
+    /// wake-ups (see [`Config::heartbeat_wakes`]).
+    pub heartbeat_secs: u32,
 }
 
 impl Config {
@@ -60,6 +69,10 @@ impl Config {
         idle_secs: 2,
         active_secs: 10,
         tare_token: 0,
+        // TEMPORARY (bench/HA test session): stay awake so it streams HX711 and
+        // publishes every cycle. Revert to `true` before the final commit.
+        deep_sleep: false,
+        heartbeat_secs: 600, // 10 min
     };
 
     /// The presence threshold expressed in raw HX711 ticks, i.e. what `main`
@@ -80,6 +93,14 @@ impl Config {
 
     pub fn active_interval(&self) -> CoreDuration {
         CoreDuration::from_secs(self.active_secs.max(1) as u64)
+    }
+
+    /// Number of idle wake-ups that make up one heartbeat period: after this
+    /// many empty-poll cycles, bring Wi-Fi up and publish temperature + weight
+    /// even without a visitor. At least 1, so a misconfigured (tiny) interval
+    /// still fires every cycle rather than never.
+    pub fn heartbeat_wakes(&self) -> u32 {
+        (self.heartbeat_secs / self.idle_secs.max(1)).max(1)
     }
 
     /// Convert a raw HX711 reading to grams using the stored calibration, and
@@ -146,6 +167,11 @@ impl Config {
                     self.active_secs = v;
                 }
             }
+            "heartbeat_interval" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.heartbeat_secs = v;
+                }
+            }
             "tare" => {
                 if let Ok(token) = value.parse::<u32>() {
                     if token != self.tare_token {
@@ -154,6 +180,11 @@ impl Config {
                     }
                 }
             }
+            "deep_sleep" => match value {
+                "1" | "true" | "on" | "ON" => self.deep_sleep = true,
+                "0" | "false" | "off" | "OFF" => self.deep_sleep = false,
+                _ => {}
+            },
             _ => {}
         }
         *self != before
@@ -171,8 +202,10 @@ impl Config {
         b[20..24].copy_from_slice(&self.idle_secs.to_le_bytes());
         b[24..28].copy_from_slice(&self.active_secs.to_le_bytes());
         b[28..32].copy_from_slice(&self.tare_token.to_le_bytes());
-        let crc = crc32(&b[0..32]);
-        b[32..36].copy_from_slice(&crc.to_le_bytes());
+        b[32..36].copy_from_slice(&(self.deep_sleep as u32).to_le_bytes());
+        b[36..40].copy_from_slice(&self.heartbeat_secs.to_le_bytes());
+        let crc = crc32(&b[0..40]);
+        b[40..44].copy_from_slice(&crc.to_le_bytes());
         b
     }
 
@@ -180,7 +213,7 @@ impl Config {
         if u32::from_le_bytes(b[0..4].try_into().ok()?) != MAGIC || b[4] != VERSION {
             return None;
         }
-        if u32::from_le_bytes(b[32..36].try_into().ok()?) != crc32(&b[0..32]) {
+        if u32::from_le_bytes(b[40..44].try_into().ok()?) != crc32(&b[0..40]) {
             return None;
         }
         Some(Config {
@@ -190,6 +223,8 @@ impl Config {
             idle_secs: u32::from_le_bytes(b[20..24].try_into().ok()?),
             active_secs: u32::from_le_bytes(b[24..28].try_into().ok()?),
             tare_token: u32::from_le_bytes(b[28..32].try_into().ok()?),
+            deep_sleep: u32::from_le_bytes(b[32..36].try_into().ok()?) != 0,
+            heartbeat_secs: u32::from_le_bytes(b[36..40].try_into().ok()?),
         })
     }
 }

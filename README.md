@@ -9,9 +9,11 @@ it against a tare baseline kept in RTC RAM. While the feeder is empty it just
 drops back into deep sleep for a couple of seconds — no radio — so it can catch
 short visits cheaply. Only when weight crosses a threshold does it bring up
 Wi-Fi and publish the weight (converted to grams on-device) to MQTT (Home
-Assistant / Mosquitto), sampling faster while the bird is present. While online
-it also pulls any retained calibration/tuning back from Home Assistant and
-persists it to flash.
+Assistant / Mosquitto), sampling faster while the bird is present. On top of
+that a periodic **heartbeat** (default every 10 min) brings Wi-Fi up and
+publishes temperature + weight even with no visitor, so Home Assistant always
+has a fresh reading. While online it also pulls any retained calibration/tuning
+back from Home Assistant and persists it to flash.
 
 ```
 ┌──────────┐  bit-bang   ┌────────┐    Wi-Fi/MQTT (grams, °C)   ┌────────────────┐
@@ -49,12 +51,15 @@ do vary.
 
 ### Wiring (HX711 → XIAO ESP32-C3)
 
+On the XIAO ESP32-C3 the silkscreen pads map **D0 = GPIO2, D1 = GPIO3,
+D2 = GPIO4** (GPIO0/GPIO1 are *not* broken out on this board).
+
 | HX711 pin | ESP32-C3 pin | Direction |
 | --------- | ------------ | --------- |
 | VCC       | 3V3          | —         |
 | GND       | GND          | —         |
-| DT (data) | GPIO1 / D1   | input     |
-| SCK (clk) | GPIO0 / D0   | output    |
+| SCK (clk) | GPIO2 / D0   | output    |
+| DT (data) | GPIO3 / D1   | input     |
 
 ### Wiring (DS18B20 → XIAO ESP32-C3)
 
@@ -67,11 +72,12 @@ is required for a reliable read over the ~1 m cable).
 | -------------- | ------------ | --------- |
 | Red (VCC)      | 3V3          | —         |
 | Black (GND)    | GND          | —         |
-| Yellow (DATA)  | GPIO2 / D2   | 1-Wire (+ 4.7 kΩ to 3V3) |
+| Yellow (DATA)  | GPIO4 / D2   | 1-Wire (+ 4.7 kΩ to 3V3) |
 
-The temperature is read only when a weight reading is being published (a bird
-is on / has just left the scale), so the ~750 ms conversion never runs on the
-low-power idle-poll cycles. It is published to `birds/scale/temperature` in °C.
+The temperature is read whenever a weight reading is being published — on a bird
+visit, and on the periodic **heartbeat** (see below) — so the ~750 ms conversion
+never runs on the low-power idle-poll cycles. It is published to
+`birds/scale/temperature` in °C.
 
 ## Firmware architecture
 
@@ -149,11 +155,13 @@ on / has just left the scale) and persists them. Changes therefore apply with a
 | `threshold`         | grams that count as "a bird landed" |
 | `idle_interval`     | deep-sleep seconds while empty |
 | `active_interval`   | deep-sleep seconds while a bird is present |
+| `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) |
 | `tare` (button/script) | re-zero: adopts the current empty baseline as `offset` |
+| `deep_sleep` (switch)  | `0` = stay awake with Wi-Fi up (bench testing on USB), `1` = normal battery deep sleep |
 
 On a blank flash the firmware falls back to built-in defaults
 (`src/config.rs` — `offset` mid-scale, `scale_factor` 420, `threshold` 10 g,
-2 s / 10 s intervals).
+2 s / 10 s idle/active intervals, 600 s heartbeat).
 
 **Calibrating `scale_factor`:**
 1. **Tare** with the pan empty (sets `offset`). The empty-pan raw value is also
