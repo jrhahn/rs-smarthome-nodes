@@ -1,4 +1,4 @@
-# Building & flashing `rs-bird-scale`
+# Building & flashing `rs-smarthome-nodes`
 
 Preparing the firmware and getting it onto a Seeed XIAO ESP32-C3.
 
@@ -28,23 +28,47 @@ cargo install espflash
 
 ## 2. Configure the build
 
-Two things are baked in at compile time:
+Everything below is baked in at compile time (see [`.env.example`](.env.example);
+`direnv` exports a local `.env` automatically):
 
-| Setting            | Where                                   |
-| ------------------ | --------------------------------------- |
-| Wi-Fi SSID / pass  | `SSID` / `PASSWORD` env vars at build   |
-| MQTT broker IP/port| `MQTT_BROKER` / `MQTT_PORT` in `src/main.rs` |
+| Setting             | Where                                          |
+| ------------------- | ---------------------------------------------- |
+| **Which node**      | `NODE` env var — decides the sensors, topics and power profile |
+| Wi-Fi SSID / pass   | `SSID` / `PASSWORD` env vars at build          |
+| MQTT broker         | `MQTT_BROKER` env var (dotted IPv4)            |
+| MQTT credentials    | optional `MQTT_USER` / `MQTT_PASSWORD` env vars |
+| MQTT port           | `MQTT_PORT` in [`src/main.rs`](src/main.rs)    |
 
-Edit `MQTT_BROKER` in [`src/main.rs`](src/main.rs) to your broker's LAN address,
-then pass credentials on the command line (below).
+`NODE` is the important one — one image serves the whole fleet:
+
+| `NODE=` | Sensors | Power |
+| --- | --- | --- |
+| `draussen` (default) | HX711 + DS18B20 + SHT31-D | battery, deep sleep |
+| `schlafzimmer`, `wohnzimmer` | SCD41 | mains |
+| `kueche` | SDS011 | mains |
+| `bad` | SHT31-D | mains |
+
+A typo fails the build rather than flashing the wrong personality onto a board:
+
+```
+error[E0080]: evaluation of constant value failed
+  = the evaluated program panicked at 'unknown NODE; expected one of:
+    draussen, schlafzimmer, wohnzimmer, kueche, bad'
+```
 
 ## 3. Compile
 
 ```bash
-# Just build the ELF
+# Just build the ELF (defaults to NODE=draussen)
 cargo build --release
-# -> target/riscv32imc-unknown-none-elf/release/rs-bird-scale
+# -> target/riscv32imc-unknown-none-elf/release/rs-smarthome-nodes
+
+# …or build for another node
+NODE=kueche cargo build --release
 ```
+
+> Each node is a **separate build**, so rebuild before flashing a different
+> board — the ELF path is the same for all of them.
 
 `espflash` reads that ELF directly; there's no separate objcopy/bin step.
 
@@ -61,9 +85,12 @@ your computer, no probe or adapter involved.
 # (`cargo run` uses the `espflash flash --monitor` runner from .cargo/config.toml)
 SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
 
+# …for one of the other nodes
+NODE=kueche SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
+
 # …or flash an already-built ELF explicitly:
 espflash flash --monitor \
-  target/riscv32imc-unknown-none-elf/release/rs-bird-scale
+  target/riscv32imc-unknown-none-elf/release/rs-smarthome-nodes
 ```
 
 Useful checks:
@@ -72,8 +99,9 @@ Useful checks:
 espflash board-info          # confirm the chip is detected
 ```
 
-> **Getting into download mode:** this firmware enters deep sleep a few seconds
-> after boot, which can interrupt a flash. If `espflash` can't sync, force the
+> **Getting into download mode:** a battery node (`NODE=draussen`) enters deep
+> sleep a couple of seconds after boot, which can interrupt a flash — mains
+> nodes stay awake. If `espflash` can't sync, force the
 > ROM bootloader: **hold the `B` (BOOT / GPIO9) button, tap `R` (RESET), release
 > `B`.** Then re-run the flash command.
 
@@ -131,7 +159,7 @@ SSID="MyNetwork" PASSWORD="s3cret" \
 espflash flash --monitor \
   --port /dev/ttyACM1 \
   --baud 460800 \
-  target/riscv32imc-unknown-none-elf/release/rs-bird-scale
+  target/riscv32imc-unknown-none-elf/release/rs-smarthome-nodes
 ```
 
 If sync fails, drop the baud to `115200` (long/loose jumper wires limit rate)
@@ -141,19 +169,49 @@ and confirm TX/RX aren't swapped.
 
 ## 6. Verifying it works
 
-After a successful flash the monitor should show the boot banner, a raw HX711
-reading, Wi-Fi association, a DHCP address, and the MQTT publish, e.g.:
+The first line names the node the image was built for — check it before anything
+else, it is the one mistake that produces a board that looks perfectly healthy
+while publishing to the wrong room.
+
+**Outdoor scale (`NODE=draussen`, battery)** — a publish cycle:
 
 ```
-rs-bird-scale booted, taking a measurement
+node 'scale' (Draußen) booted, battery profile
 config: offset=8388608 scale=420 threshold=10g idle=2s active=10s
 HX711 raw reading: 8402193
-DS18B20 raw reading: 401
+presence: raw=8402193 baseline=8388608 delta=13585
+weight = 32.3 g
+DS18B20 = 25.1 °C
+SHT31-D found at 0x44
+SHT31-D: air_temperature = 21.4
+SHT31-D: air_humidity = 47.2
 Wi-Fi link up, waiting for DHCP...
 Got IP: 192.168.1.42/24
-Published 32.3 g to birds/scale/state
+published Home Assistant discovery for node 'scale'
+Published 32.3 to birds/scale/weight
 Published 25.1 to birds/scale/temperature
 Entering deep sleep for 10s
+```
+
+Idle cycles are much quieter — an empty feeder skips the radio, the DS18B20 and
+the I²C sensors entirely, which is the whole point of the battery profile:
+
+```
+node 'scale' (Draußen) booted, battery profile
+HX711 raw reading: 8388601
+Entering deep sleep for 2s
+```
+
+**An air-quality node (`NODE=kueche`, mains)** stays associated and loops:
+
+```
+node 'kueche' (Küche) booted, mains profile
+Wi-Fi link up, waiting for DHCP...
+Got IP: 192.168.1.51/24
+SDS011: pm25 = 8.3
+SDS011: pm10 = 12.1
+published Home Assistant discovery for node 'kueche'
+Published 8.3 to smarthome/kueche/pm25
 ```
 
 Weight is published in **grams** (converted on-device from the flash-stored
@@ -161,18 +219,42 @@ calibration); the `config:` line shows the values loaded from flash (or
 built-in defaults on a blank device). Calibration and tuning are changed from
 Home Assistant — see the [README](README.md#configure--calibrate-from-home-assistant).
 
-The `DS18B20 raw reading` / temperature publish only appear on cycles where a
-weight reading is sent (a bird is on, or has just left the scale); empty
-idle-poll cycles skip both the radio and the temperature conversion. A
-`DS18B20 not responding` line means the probe didn't answer — check the DATA
-wiring and that the 4.7 kΩ pull-up to 3V3 is present.
+### If a sensor is quiet
+
+Every sensor is optional at runtime: one that does not answer is logged and
+omitted, never fatal. What the log says, and what it usually means:
+
+| Log line | Check |
+| --- | --- |
+| `HX711 not responding` | DT/SCK on D1/D0, and that the amp has power |
+| `DS18B20 not responding; skipping temperature` | DATA on D2 **and the 4.7 kΩ pull-up to 3V3** |
+| `no SHT31-D at 0x44 or 0x45 — check SDA/SCL and the pull-ups` | nothing ACKed on the bus: SDA=D4, SCL=D5, pull-ups present, sensor powered |
+| `SHT31-D found at 0x45 (ADDR strapped high); using it` | nothing — the breakout straps ADDR high and the firmware adopted it |
+| `no SCD41 at 0x62 …` | same bus checks; the SCD41 also needs a solid 3V3 supply, it draws ~200 mA in bursts |
+| `SCD41 found …` but no readings on the first round | expected: the first periodic measurement needs ~5 s, it arrives next round |
+| `SDS011 not responding; skipping its readings` | UART RX on D3 ← sensor TX, TX on D10 → sensor RX (not swapped), and the sensor on **5 V** |
+
+The `found at 0x…` lines come from a one-shot I²C probe on the first measurement
+of each boot, so a bus problem is visible before the first reading is even
+attempted.
 
 Subscribe on the broker side to confirm the payload:
 
 ```bash
-mosquitto_sub -h <broker-ip> -t 'birds/scale/state' -v
+# One node
+mosquitto_sub -h <broker-ip> -t 'birds/scale/#' -v
+
+# Everything the fleet publishes, including the discovery configs
+mosquitto_sub -h <broker-ip> -t 'smarthome/#' -t 'birds/#' -t 'homeassistant/#' -v
 ```
 
-Then wire up the Home Assistant sensor from
-[`home-assistant/configuration.yaml`](home-assistant/configuration.yaml) and
-calibrate (see the [README](README.md#home-assistant-integration)).
+The entities appear in Home Assistant by themselves — each node publishes
+retained discovery configs on its first connect after a power-up. Only the
+calibration/tuning controls are declared by hand, in
+[`home-assistant/configuration.yaml`](home-assistant/configuration.yaml); see
+the [README](README.md#home-assistant-integration) for calibrating the scale.
+
+> Re-flashing clears RTC RAM, so the next boot re-announces discovery. If you
+> ever need to force it without a reflash, clear the retained configs with
+> `mosquitto_pub -h <broker-ip> -t 'homeassistant/sensor/<node>/<key>/config' -r -n`
+> and power-cycle the board.

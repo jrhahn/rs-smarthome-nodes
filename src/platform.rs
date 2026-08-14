@@ -37,7 +37,7 @@ use log::{info, warn};
 use static_cell::StaticCell;
 
 use crate::node::{Slot, NODE};
-use crate::sensors::{scd41::Scd41, sds011::Sds011, sht31::Sht31, Reading, Sensor};
+use crate::sensors::{scd41, scd41::Scd41, sds011::Sds011, sht31, sht31::Sht31, Reading, Sensor};
 
 /// SDS011 baud rate (fixed in hardware).
 const SDS011_BAUD: u32 = 9600;
@@ -101,9 +101,12 @@ pub struct Peripherals {
 /// The drivers populated on this node. Absent sensors are simply `None`, so the
 /// publish path is the same code for every node in the fleet.
 pub struct Sensors {
+    bus: Option<SharedI2c>,
     sht31: Option<Sht31<SharedI2c>>,
     scd41: Option<Scd41<SharedI2c>>,
     sds011: Option<Sds011<Uart<'static, Async>>>,
+    /// Whether the I²C bring-up probe has already run this boot.
+    probed: bool,
 }
 
 impl Sensors {
@@ -148,9 +151,53 @@ impl Sensors {
         };
 
         Self {
+            bus,
             sht31,
             scd41,
             sds011,
+            probed: false,
+        }
+    }
+
+    /// Ask each expected I²C address whether anything is there, and say so in
+    /// the log. Without this a wiring fault, a missing pull-up and a strapped
+    /// address all look identical from the outside: "not responding".
+    ///
+    /// The probe commands are side-effect-free reads, and an SHT31-D found only
+    /// at the alternate address is adopted rather than reported as missing —
+    /// breakouts differ on how they strap ADDR.
+    async fn probe_i2c(&mut self) {
+        let Some(bus) = self.bus else { return };
+
+        if self.sht31.is_some() {
+            let primary = acks(bus, sht31::ADDR, sht31::CMD_READ_STATUS).await;
+            let alt = acks(bus, sht31::ADDR_ALT, sht31::CMD_READ_STATUS).await;
+            match (primary, alt) {
+                (true, _) => info!("SHT31-D found at 0x{:02X}", sht31::ADDR),
+                (false, true) => {
+                    info!(
+                        "SHT31-D found at 0x{:02X} (ADDR strapped high); using it",
+                        sht31::ADDR_ALT
+                    );
+                    self.sht31 = Some(Sht31::with_address(bus, sht31::ADDR_ALT));
+                }
+                (false, false) => warn!(
+                    "no SHT31-D at 0x{:02X} or 0x{:02X} — check SDA/SCL and the pull-ups",
+                    sht31::ADDR,
+                    sht31::ADDR_ALT
+                ),
+            }
+        }
+
+        if self.scd41.is_some() {
+            if acks(bus, scd41::ADDR, scd41::CMD_GET_DATA_READY).await {
+                info!("SCD41 found at 0x{:02X}", scd41::ADDR);
+            } else {
+                warn!(
+                    "no SCD41 at 0x{:02X} — check SDA/SCL and the pull-ups",
+                    scd41::ADDR
+                );
+            }
         }
     }
 
@@ -160,6 +207,14 @@ impl Sensors {
     /// fatal, matching the DS18B20 contract. This is only called on publish
     /// cycles: the SDS011 in particular spends ~20 s spinning its fan here.
     pub async fn measure_all(&mut self, out: &mut Samples) {
+        // Once per boot, ahead of the first reading, so the log says *why* a
+        // sensor is quiet before it is quiet. A few I²C transactions; the
+        // battery node's cheap idle wakes never get here at all.
+        if !self.probed {
+            self.probed = true;
+            self.probe_i2c().await;
+        }
+
         if let Some(s) = self.sht31.as_mut() {
             collect(s, NODE.sht31, out).await;
         }
@@ -170,6 +225,12 @@ impl Sensors {
             collect(s, NODE.sds011, out).await;
         }
     }
+}
+
+/// Does a device acknowledge `addr`? `probe_cmd` must be a command with no side
+/// effects — we only care whether the address is ACKed, not what comes back.
+async fn acks(mut bus: SharedI2c, addr: u8, probe_cmd: u16) -> bool {
+    bus.write(addr, &probe_cmd.to_be_bytes()).await.is_ok()
 }
 
 /// Run one sensor and fold its readings into the round's samples.

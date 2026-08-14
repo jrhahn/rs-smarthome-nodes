@@ -28,6 +28,9 @@ pub const ADDR_ALT: u8 = 0x45;
 pub const CMD_SINGLE_HIGH: u16 = 0x2400;
 /// Soft reset; clears a sensor left in a weird state by a hot restart.
 pub const CMD_SOFT_RESET: u16 = 0x30A2;
+/// Read the status register. Side-effect-free, so it doubles as the "are you
+/// there?" probe when working out which address the breakout is strapped to.
+pub const CMD_READ_STATUS: u16 = 0xF32D;
 /// Datasheet conversion time for high repeatability (ms); wait before reading.
 pub const CONVERSION_MS: u64 = 15;
 
