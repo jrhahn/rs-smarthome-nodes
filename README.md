@@ -247,9 +247,10 @@ death). Battery nodes get no will — they are supposed to be offline between
 readings — so every node also carries `expire_after` in its discovery config:
 three missed publish rounds and Home Assistant invalidates the values.
 
-The tuning/calibration entities are *commands*, not readings, so they are still
-declared once in
-[`home-assistant/configuration.yaml`](home-assistant/configuration.yaml).
+The tuning/calibration knobs are *commands* rather than readings, but they are
+discovered too — as `number`, `switch` and `button` entities in the device's
+*Configuration* section — so a node needs no hand-written Home Assistant YAML at
+all. See [`home-assistant/README.md`](home-assistant/README.md).
 
 ### Configure & calibrate from Home Assistant
 
@@ -261,16 +262,22 @@ the firmware reads them the next time it is online for a publish (while a bird i
 on / has just left the scale) and persists them. Changes therefore apply with a
 **short delay**, not instantly.
 
-| HA entity → topic (`birds/scale/config/…`) | Meaning |
-| ------------------------------------------ | ------- |
-| `offset`            | raw HX711 value at 0 g (tare zero) |
-| `scale_factor`      | raw ticks per gram |
-| `threshold`         | grams that count as "a bird landed" |
-| `idle_interval`     | deep-sleep seconds while empty |
-| `active_interval`   | deep-sleep seconds while a bird is present |
-| `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) |
-| `tare` (button/script) | re-zero: adopts the current empty baseline as `offset` |
-| `deep_sleep` (switch)  | `0` = stay awake with Wi-Fi up (bench testing on USB), `1` = normal battery deep sleep |
+| HA entity → topic (`birds/scale/config/…`) | Meaning | Node |
+| ------------------------------------------ | ------- | ---- |
+| `offset`            | raw HX711 value at 0 g (tare zero) | with load cell |
+| `scale_factor`      | raw ticks per gram | with load cell |
+| `threshold`         | grams that count as "a bird landed" | with load cell |
+| `tare` (button)     | re-zero: adopts the current empty baseline as `offset` | with load cell |
+| `idle_interval`     | deep-sleep seconds while empty | battery |
+| `active_interval`   | deep-sleep seconds while a bird is present | battery |
+| `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) | battery |
+| `deep_sleep` (switch)  | `0` = stay awake with Wi-Fi up (bench testing on USB), `1` = normal battery deep sleep | battery |
+
+Only the knobs that do something on a given node are announced: a mains node
+samples on its build-time cadence and never sleeps, so it gets none of them.
+Pressing **Tarieren** publishes a retained press (the node may be asleep) which
+the firmware deletes once it has re-zeroed, so it is never replayed as a second
+tare.
 
 On a blank flash the firmware falls back to built-in defaults
 (`src/config.rs` — `offset` mid-scale, `scale_factor` 420, `threshold` 10 g,

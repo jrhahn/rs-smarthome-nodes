@@ -159,6 +159,10 @@ const _: () = {
 /// timeout we assume the broker has sent them all and stop draining.
 const CONFIG_RECV_WINDOW: Duration = Duration::from_millis(400);
 
+/// Config key carrying a tare request. Called out because, unlike every other
+/// key, acting on it means deleting the retained message afterwards.
+const TARE_KEY: &str = "tare";
+
 /// Give up on a single HX711 conversion after this long. A disconnected sensor
 /// (with `DT` pulled up) never becomes ready, so this bounds the boot.
 const HX711_TIMEOUT: Duration = Duration::from_millis(500);
@@ -754,6 +758,26 @@ async fn publish_samples(
                 break;
             }
         }
+        // The tuning knobs are discovered the same way, as `number` / `switch` /
+        // `button` entities pointing back at the config topics we subscribe to
+        // below.
+        for control in discovery::controls() {
+            if !ok {
+                break;
+            }
+            let topic = discovery::control_topic(control);
+            let Some(payload) = discovery::control_payload(control, &availability) else {
+                warn!("discovery payload too long for {}; skipping", topic);
+                continue;
+            };
+            if client
+                .send_message(&topic, payload.as_bytes(), QualityOfService::QoS0, true)
+                .await
+                .is_err()
+            {
+                ok = false;
+            }
+        }
         if ok {
             state::mark_discovery_published();
             info!("published Home Assistant discovery for node '{}'", node.id);
@@ -799,6 +823,7 @@ async fn publish_samples(
     // backstop. Best-effort: a failed sync never fails the publish.
     let mut updated = cfg;
     let mut reprovision = None;
+    let mut tare_pressed = false;
     let config_prefix = node.config_prefix();
     let provision_topic = node::provision_topic(Efuse::read_base_mac_address());
 
@@ -821,6 +846,10 @@ async fn publish_samples(
                     if topic == provision_topic {
                         reprovision = provision_request(value);
                     } else if let Some(key) = topic.strip_prefix(config_prefix.as_str()) {
+                        // Tracked separately from `apply`'s "did anything
+                        // change" answer: taring an already-zeroed scale changes
+                        // nothing, but the press still has to be consumed.
+                        tare_pressed |= key == TARE_KEY && !value.is_empty();
                         if updated.apply(key, value, baseline) {
                             info!("config: {} = {}", key, value);
                         }
@@ -830,6 +859,23 @@ async fn publish_samples(
                 // window: either way, done draining.
                 Ok(Err(_)) | Err(_) => break,
             }
+        }
+    }
+
+    // Consume the tare press. The button's payload is a constant and the message
+    // has to be retained (the node is asleep when it is pressed), so the only
+    // thing distinguishing a press from its own echo is whether it is still on
+    // the broker: an empty retained payload deletes it. If this fails we simply
+    // tare again next time, which on an empty scale lands on the same zero.
+    if tare_pressed {
+        let mut tare_topic = config_prefix.clone();
+        if tare_topic.push_str(TARE_KEY).is_ok()
+            && client
+                .send_message(&tare_topic, &[], QualityOfService::QoS0, true)
+                .await
+                .is_err()
+        {
+            warn!("could not clear retained tare; it may be applied again");
         }
     }
 
@@ -924,9 +970,11 @@ fn apply_provisioning(request: Provision) {
 }
 
 /// MQTT read/write buffer size. Sized for the largest packet the node sends —
-/// a Home Assistant discovery config (topic ≤96 B + payload ≤384 B + MQTT v5
-/// headers) — with room to spare.
+/// a Home Assistant discovery config (topic ≤96 B + payload ≤`PAYLOAD_MAX` +
+/// MQTT v5 headers) — with room to spare.
 const MQTT_BUFFER: usize = 640;
+
+const _: () = assert!(MQTT_BUFFER >= discovery::PAYLOAD_MAX + 96 + 64);
 
 /// Background task: keeps the Wi-Fi controller connected, reconnecting on drop.
 #[embassy_executor::task]
