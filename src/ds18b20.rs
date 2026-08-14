@@ -20,6 +20,19 @@
 use embassy_time::{Duration, Timer};
 use esp_hal::{delay::Delay, gpio::OutputOpenDrain};
 
+use crate::sensors::EntityDescriptor;
+
+/// Home Assistant discovery metadata (#16). Like the HX711 the probe keeps its
+/// own read path — its 750 ms conversion is only worth spending on the publish
+/// cycles — so it contributes just the descriptor here.
+pub const DESCRIPTORS: &[EntityDescriptor] = &[EntityDescriptor {
+    key: "temperature",
+    name: "Temperatur",
+    unit: "°C",
+    device_class: "temperature",
+    state_class: "measurement",
+}];
+
 /// 12-bit (default) conversions take up to 750 ms per the datasheet. Wait a hair
 /// longer to be safe before clocking the result out.
 const CONVERSION_TIME: Duration = Duration::from_millis(760);

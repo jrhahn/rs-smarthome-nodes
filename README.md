@@ -1,27 +1,50 @@
-# rs-bird-scale
+# rs-smarthome-nodes
 
-Async, battery-powered **bird-feeder scale** firmware for the
-**Seeed Studio XIAO ESP32-C3**, written in `no_std` Rust on the
-[Embassy](https://embassy.dev) async framework.
+Async `no_std` Rust ([Embassy](https://embassy.dev)) firmware for a fleet of
+**Seeed Studio XIAO ESP32-C3** smart-home sensor nodes. One image serves every
+node: `NODE=<name>` at build time selects which sensors are populated, what the
+node is called, and whether it runs on battery (deep sleep) or mains (always
+on). Home Assistant picks the nodes up automatically over **MQTT
+auto-discovery** — no hand-declared entities.
 
-On each wake-up the device reads a load cell via an HX711 amplifier and compares
-it against a tare baseline kept in RTC RAM. While the feeder is empty it just
-drops back into deep sleep for a couple of seconds — no radio — so it can catch
-short visits cheaply. Only when weight crosses a threshold does it bring up
-Wi-Fi and publish the weight (converted to grams on-device) to MQTT (Home
-Assistant / Mosquitto), sampling faster while the bird is present. On top of
-that a periodic **heartbeat** (default every 10 min) brings Wi-Fi up and
-publishes temperature + weight even with no visitor, so Home Assistant always
-has a fresh reading. While online it also pulls any retained calibration/tuning
-back from Home Assistant and persists it to flash.
+It started as a battery bird-feeder scale, which is still the default node
+(`NODE=draussen`): on each wake-up it reads a load cell via an HX711 amplifier
+and compares it against a tare baseline kept in RTC RAM. While the feeder is
+empty it drops back into deep sleep for a couple of seconds — no radio — so it
+catches short visits cheaply. Only when weight crosses a threshold does it bring
+up Wi-Fi and publish (grams converted on-device), sampling faster while the bird
+is present. A periodic **heartbeat** (default every 10 min) publishes anyway, so
+Home Assistant always has a fresh reading. While online it also pulls any
+retained calibration/tuning back from Home Assistant and persists it to flash.
 
 ```
 ┌──────────┐  bit-bang   ┌────────┐    Wi-Fi/MQTT (grams, °C)   ┌────────────────┐
 │  Load    │────────────▶│ HX711  │──▶ ESP32-C3 ───────────────▶│ Home Assistant │
-│  Cell    │  DT / SCK   │ 24-bit │        birds/scale/state    │                │
+│  Cell    │  DT / SCK   │ 24-bit │       birds/scale/weight    │                │
 └──────────┘             └────────┘   ◀── config/* (retained) ──│  (calibration) │
    DS18B20 ─ 1-Wire ─────────────────▶     grams + tuning       └────────────────┘
+   SHT31-D / SCD41 ─ I²C ────────────▶  homeassistant/… (discovery, retained)
+   SDS011 ─ UART ────────────────────▶
 ```
+
+## The fleet
+
+Pick a node with `NODE=` at build time (`src/node.rs`); an unknown name fails
+the build rather than flashing the wrong personality onto a board.
+
+| `NODE=` | Room | Sensors | Power |
+| --- | --- | --- | --- |
+| `draussen` (default) | Draußen | HX711 load cell + DS18B20 + SHT31-D | battery, deep sleep |
+| `schlafzimmer` | Schlafzimmer | SCD41 | mains |
+| `wohnzimmer` | Wohnzimmer | SCD41 | mains |
+| `kueche` | Küche | SDS011 | mains (fan) |
+| `bad` | Bad | SHT31-D | mains |
+
+**Power profiles** decide the loop: *battery* nodes cold-boot out of deep sleep,
+measure, publish only when there is something to say, and sleep again. *Mains*
+nodes stay associated and sample on a fixed per-node cadence — CO₂ continuity
+and the SDS011's duty-cycled fan both rule out deep sleep. On a battery node the
+`config/deep_sleep` switch can still hold it awake for bench testing.
 
 ## Hardware
 
@@ -32,6 +55,25 @@ back from Home Assistant and persists it to flash.
 | Sensor           | 1 kg straight-bar load cell (tension S-config)     |
 | Amplifier        | HX711 24-bit ADC                                   |
 | Temperature      | DS18B20 waterproof 1-Wire probe (stainless steel) |
+| T / RH           | SHT31-D breakout, I²C `0x44`                       |
+| CO₂ / T / RH     | SCD41 breakout, I²C `0x62`                         |
+| PM2.5 / PM10     | SDS011, UART 9600 8N1, **5 V supply** (fan)        |
+
+### Pin map (XIAO ESP32-C3 silkscreen → GPIO)
+
+| Pad | GPIO | Use |
+| --- | --- | --- |
+| D0  | 2  | HX711 SCK |
+| D1  | 3  | HX711 DT |
+| D2  | 4  | DS18B20 1-Wire (4.7 kΩ pull-up to 3V3) |
+| D3  | 5  | SDS011 UART RX ← sensor TX |
+| D4  | 6  | I²C SDA (SHT31-D + SCD41) |
+| D5  | 7  | I²C SCL |
+| D10 | 10 | SDS011 UART TX → sensor RX |
+
+The two I²C sensors share one bus (their addresses do not clash). The SDS011
+deliberately avoids D6/D7 (GPIO21/20), which are the console UART pads the log
+output uses.
 
 ### Wiring (load cell → HX711)
 
@@ -47,7 +89,8 @@ do vary.
 | White          | A−        | signal −       |
 
 > If loading the cell makes the reading go *down* instead of up, swap A+/A− (or
-> flip the comparison in firmware — see `PRESENCE_THRESHOLD` in `src/main.rs`).
+> flip the comparison in firmware — the threshold itself is the runtime
+> `threshold` config value, see below).
 
 ### Wiring (HX711 → XIAO ESP32-C3)
 
@@ -84,8 +127,14 @@ never runs on the low-power idle-poll cycles. It is published to
 | Concern            | Implementation                                                    |
 | ------------------ | ----------------------------------------------------------------- |
 | HAL / async runtime| `esp-hal` 0.22 + `esp-hal-embassy`, executor driven by **TIMG0**  |
+| Node selection     | [`src/node.rs`](src/node.rs) — sensor set, identity, topics and power profile per node, chosen by `NODE=` at build time |
+| Sensor abstraction | [`src/sensors/`](src/sensors) — HAL-agnostic `Sensor` trait (`measure()` + `descriptors()`), drivers generic over `embedded-hal-async` / `embedded-io-async` |
+| Board wiring       | [`src/platform.rs`](src/platform.rs) — concrete buses; one shared I²C handle so both I²C drivers can own their bus |
 | Load-cell driver   | [`src/hx711.rs`](src/hx711.rs) — async `wait_ready()` with timeout, blocking 24+N clock read, two's-complement sign-extend to `i32` |
 | Temperature driver | [`src/ds18b20.rs`](src/ds18b20.rs) — bit-bang 1-Wire on an open-drain pin, blocking time slots, async 750 ms conversion wait, CRC-checked scratchpad |
+| SHT31-D / SCD41    | [`sht31.rs`](src/sensors/sht31.rs) / [`scd41.rs`](src/sensors/scd41.rs) — single-shot and periodic I²C reads, every word CRC-checked (Sensirion CRC-8), fixed-point conversions |
+| SDS011             | [`sds011.rs`](src/sensors/sds011.rs) — 10-byte UART frames with checksum + resync, fan woken only for the measurement and parked again on every exit path |
+| HA discovery       | [`src/discovery.rs`](src/discovery.rs) — retained `homeassistant/sensor/<node>/<key>/config` per reading, all entities grouped under one device |
 | Presence / tare    | [`src/state.rs`](src/state.rs) — baseline + presence edge in RTC-persistent RAM, threshold + drift tracking in `main` |
 | Config / calibration | [`src/config.rs`](src/config.rs) — calibration + tuning in a CRC-guarded flash blob (`esp-storage`), loaded at boot, updated from retained MQTT while online |
 | Wi-Fi + TCP/IP     | `esp-wifi` (STA + DHCP) + `embassy-net`, background `net_task`     |
@@ -123,11 +172,14 @@ secret, kept out of source). `MQTT_PORT` is still a constant in
 [`src/main.rs`](src/main.rs).
 
 ```bash
-# Build only
+# Build only (defaults to NODE=draussen, the bird scale)
 cargo build --release
 
 # Flash + serial monitor over the XIAO's USB-C (device on /dev/ttyACM0)
 SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
+
+# Flash one of the other nodes
+NODE=kueche SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
 ```
 
 Point it at your broker by setting `MQTT_BROKER` in `.env` (or on the command
@@ -138,16 +190,40 @@ probe — is in [FLASHING.md](FLASHING.md).**
 
 ## Home Assistant integration
 
-The device publishes ready-to-use **grams** to `birds/scale/state` and **°C** to
-`birds/scale/temperature` — no template maths needed. Add the sensor + config
-entities from
+Each node **announces itself**: on the first connect after a power-up it
+publishes one retained config message per reading to
+`homeassistant/sensor/<node>/<key>/config`, so Home Assistant creates the device
+and its entities without any YAML. Values are ready to use — grams, °C, %, ppm,
+µg/m³ — with no template maths.
+
+| Node | State topics |
+| --- | --- |
+| `draussen` | `birds/scale/weight`, `birds/scale/temperature` (DS18B20), `birds/scale/air_temperature`, `birds/scale/air_humidity` (SHT31-D) |
+| `schlafzimmer` / `wohnzimmer` | `smarthome/<node>/co2`, `/temperature`, `/humidity` |
+| `kueche` | `smarthome/kueche/pm25`, `/pm10` |
+| `bad` | `smarthome/bad/temperature`, `/humidity` |
+
+The weight is also mirrored to the pre-discovery `birds/scale/state` topic so an
+existing hand-declared entity keeps working during the migration.
+
+**Availability.** A mains node registers an MQTT last will, so the broker
+publishes retained `offline` to `<namespace>/<node>/status` the moment its
+connection breaks (and the node publishes `online` on connect, disconnecting
+cleanly at the end of a round so a normal publish is never mistaken for a
+death). Battery nodes get no will — they are supposed to be offline between
+readings — so every node also carries `expire_after` in its discovery config:
+three missed publish rounds and Home Assistant invalidates the values.
+
+The tuning/calibration entities are *commands*, not readings, so they are still
+declared once in
 [`home-assistant/configuration.yaml`](home-assistant/configuration.yaml).
 
 ### Configure & calibrate from Home Assistant
 
 Calibration (`offset`, `scale_factor`) and tuning (`threshold`, poll intervals)
 are **stored on the controller in flash** and set from Home Assistant — no
-reflashing. HA publishes each value **retained** to `birds/scale/config/<key>`;
+reflashing. HA publishes each value **retained** to
+`<namespace>/<node>/config/<key>` (`birds/scale/config/<key>` for the scale);
 the firmware reads them the next time it is online for a publish (while a bird is
 on / has just left the scale) and persists them. Changes therefore apply with a
 **short delay**, not instantly.

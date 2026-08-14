@@ -49,7 +49,8 @@ pub struct Config {
     pub tare_token: u32,
     /// When `false`, the firmware never deep-sleeps: it stays awake and keeps
     /// Wi-Fi up in a loop. Meant for bench testing on USB where deep sleep just
-    /// churns the serial monitor. Default `true` (battery behaviour).
+    /// churns the serial monitor. Only consulted on battery nodes — a mains node
+    /// stays awake regardless (see [`crate::node::PowerProfile`]).
     pub deep_sleep: bool,
     /// Seconds between periodic "heartbeat" publishes: even with no visitor, the
     /// firmware brings Wi-Fi up this often and publishes temperature + weight so
@@ -69,9 +70,8 @@ impl Config {
         idle_secs: 2,
         active_secs: 10,
         tare_token: 0,
-        // TEMPORARY (bench/HA test session): stay awake so it streams HX711 and
-        // publishes every cycle. Revert to `true` before the final commit.
-        deep_sleep: false,
+        // Battery nodes sleep by default; mains nodes ignore this flag anyway.
+        deep_sleep: crate::node::NODE.power.is_battery(),
         heartbeat_secs: 600, // 10 min
     };
 

@@ -2,19 +2,19 @@
 
 Tracking: **#11** (epic) with sub-issues #12–#17.
 
-The firmware started as a single-purpose bird-feeder scale. This is the plan to
-turn it into one configurable base for several ESP32-C3 nodes, each carrying a
-different subset of sensors.
+The firmware started as a single-purpose bird-feeder scale. It is now one
+configurable base for several ESP32-C3 nodes, each carrying a different subset
+of sensors, selected with `NODE=<name>` at build time.
 
 ## Fleet
 
-| Node | Sensors | Power profile |
-| --- | --- | --- |
-| Draußen | load cell (HX711) + DS18B20 + SHT31-D | battery, deep-sleep |
-| Schlafzimmer | SCD41 | mains, always-on |
-| Wohnzimmer (+ kitchen zone) | SCD41 | mains |
-| Küche | SDS011 | mains (fan) |
-| Bad | SHT31-D | mains or battery |
+| `NODE=` | Node | Sensors | Power profile |
+| --- | --- | --- | --- |
+| `draussen` (default) | Draußen | load cell (HX711) + DS18B20 + SHT31-D | battery, deep-sleep |
+| `schlafzimmer` | Schlafzimmer | SCD41 | mains, always-on |
+| `wohnzimmer` | Wohnzimmer (+ kitchen zone) | SCD41 | mains |
+| `kueche` | Küche | SDS011 | mains (fan) |
+| `bad` | Bad | SHT31-D | mains |
 
 ## Sensor set
 
@@ -22,12 +22,16 @@ different subset of sensors.
 | --- | --- | --- | --- |
 | HX711 load cell | bit-bang | force → grams | done (`hx711.rs`) |
 | DS18B20 | 1-Wire | temperature | done (`ds18b20.rs`) |
-| SHT31-D | I²C 0x44 | temperature, humidity | scaffold (`sensors/sht31.rs`, #13) |
-| SCD41 | I²C 0x62 | CO₂, temperature, humidity | scaffold (`sensors/scd41.rs`, #14) |
-| SDS011 | UART 9600 | PM2.5, PM10 | scaffold (`sensors/sds011.rs`, #15) |
+| SHT31-D | I²C 0x44 | temperature, humidity | done (`sensors/sht31.rs`, #13) |
+| SCD41 | I²C 0x62 | CO₂, temperature, humidity | done (`sensors/scd41.rs`, #14) |
+| SDS011 | UART 9600 | PM2.5, PM10 | done (`sensors/sds011.rs`, #15) |
 
-I²C addresses do not clash, so SHT31-D + SCD41 can share one bus. SDS011 is the
-only UART sensor. HX711 stays a blocking bit-bang critical section.
+I²C addresses do not clash, so SHT31-D + SCD41 share one bus. SDS011 is the only
+UART sensor. HX711 stays a blocking bit-bang critical section.
+
+> **Bench status:** every driver is implemented and the whole fleet builds, but
+> the I²C/UART drivers have not yet been run against real hardware — the bus
+> timing and the SDS011 warm-up in particular want a session on the bench.
 
 ## Abstraction (#12)
 
@@ -38,35 +42,88 @@ only UART sensor. HX711 stays a blocking bit-bang critical section.
 
 `Reading` carries a `key` (topic suffix) + a pre-formatted, float-free `value`,
 matching the existing on-device formatting. Shared helpers live in
-`sensors/mod.rs`: `crc8_sensirion` (SHT31/SCD41), `write_tenths`, `write_int`.
+`sensors/mod.rs`: `crc8_sensirion` + `crc_word` (SHT31/SCD41), `write_tenths`,
+`write_int`.
 
-Each node selects which sensors are enabled + its identity (name/room, MQTT
-topic namespace). Start with cargo features / build-time config; move to NVS
-later. The publish path iterates the enabled sensors instead of the current
-hard-coded HX711 + DS18B20 calls; the bird-scale weight/presence logic becomes
-one sensor's specialisation.
+The drivers are generic over the `embedded-hal-async` (I²C) and
+`embedded-io-async` (UART) bus traits, so they name no esp-hal type.
+`platform.rs` is the one place that does: it brings up only the buses this node
+needs, wraps the single I²C peripheral in a `SharedI2c` handle (a
+`NoopRawMutex` — everything is sequential on one executor) so both I²C drivers
+can *own* their bus as the trait wants, and exposes one `measure_all()`.
+
+`node.rs` holds the per-node table: identity (id/name/namespace), the sensor
+slots, the power profile and the mains sampling cadence. A slot can rename its
+readings (`prefix` / `label`) so two sensors emitting the same quantity don't
+collide — the outdoor node's DS18B20 keeps `temperature` while its SHT31-D
+publishes `air_temperature` / `air_humidity`. An unknown `NODE` value fails the
+build in const-eval.
+
+The publish path iterates whatever the node produced (`Samples`) instead of
+hard-coded HX711/DS18B20 calls. The HX711 and DS18B20 keep their own read paths
+— the first because its reading drives the tare baseline and presence edge, the
+second because its 750 ms conversion is only worth spending on publish cycles —
+and contribute their readings and discovery descriptors to the same pipeline.
 
 ## MQTT auto-discovery (#16)
 
-Publish retained `homeassistant/<component>/<node>/<key>/config` per reading so
-Home Assistant creates the device + entities automatically — no more
-hand-declaring entities in the home-server nix. State topics:
-`<namespace>/<node>/<key>`. Group a node's entities under one HA device
-(identifiers = node id). Migrate the existing bird scale onto discovery.
+On the first connect after a power-up, each node publishes one retained
+`homeassistant/sensor/<node>/<key>/config` per reading, so Home Assistant creates
+the device (identifiers = node id) and all its entities. State topics are
+`<namespace>/<node>/<prefix><key>`; the config/command topics stay
+`<namespace>/<node>/config/<key>`.
+
+"Once per power cycle" is a flag in RTC RAM: the messages are retained, so
+re-sending them on every deep-sleep wake would only cost battery, while a cold
+power-on (or a reflash) re-announces exactly when the broker may have lost them.
+
+The bird scale keeps its historical `birds/scale/…` namespace, and its weight is
+still mirrored to the pre-discovery `birds/scale/state` topic, so the migration
+of the hand-declared Home Assistant entities can happen at leisure.
+
+### Availability
+
+Two mechanisms, because neither alone covers a fleet that is half asleep:
+
+| | Mains node | Battery node |
+| --- | --- | --- |
+| Last will (`avty_t` → `<ns>/<node>/status`) | yes | **no** |
+| `expire_after` | 3 × `sample_secs` | 3 × `heartbeat_secs` |
+
+A last will catches the node that dies *while connected*: the broker publishes
+retained `offline` and Home Assistant greys the entities out at once. The node
+publishes retained `online` right after each connect, and — importantly — sends
+a proper MQTT `DISCONNECT` when a round is done, which tells the broker to
+discard the will. Without that, a mains node that reconnects per round would be
+declared dead after every single publish.
+
+Battery nodes get **no** will at all: they are legitimately disconnected almost
+all the time, so a will would mark them offline seconds after every reading.
+They rely on `expire_after` instead, which is also what catches a mains node
+that dies *between* rounds (a clean disconnect discards the will, so nothing
+else would notice). Three missed rounds is the threshold — one miss is a lost
+packet or a failed join, three is a node that stopped — with a 120 s floor.
+
+`expire_after` is derived from the live config, so changing the heartbeat
+interval clears the "discovery published" flag and re-announces the entities
+with the new expiry.
 
 ## Power profiles (#17)
 
-- **battery**: deep-sleep between samples (current bird-scale behaviour).
-- **mains**: stay awake / modem-light-sleep, sample+publish periodically;
-  continuous is required for CO₂/PM value and for the SDS011 fan.
+- **battery**: deep-sleep between samples (the bird-scale behaviour).
+- **mains**: stay awake with Wi-Fi up, sample + publish every
+  `NodeConfig::sample_secs` (60 s indoors, 900 s in the kitchen so the SDS011
+  fan is only spun 4×/h). Continuous operation is required for CO₂ value and for
+  the fan.
 
-The live `birds/scale/config/deep_sleep` switch already toggles this at runtime;
-the per-node default is a build/flash-time choice.
+The profile is a per-node build-time choice. The live `config/deep_sleep` switch
+still works, but only on a battery node — a mains node has nothing to gain from
+sleeping and CO₂/PM continuity to lose, so it ignores it. The SCD41 follows the
+profile too: periodic measurement on mains (what its self-calibration expects),
+single-shot on battery.
 
-## Scaffolding status
+## Known gaps
 
-`sensors/` contains the trait, shared helpers, and one stub per new sensor with
-the datasheet constants, conversion math (compile-time checked at the endpoints)
-and discovery descriptors in place. The bus I/O in each `measure()` is a
-`todo!()` to fill in with hardware on the bench. `main.rs` still runs the
-untouched bird-scale path — the scaffold only compiles alongside it.
+- Node selection is build-time only (issue #12 explicitly starts there); moving
+  it to NVS would let one image be provisioned per board without a rebuild.
+- The SDS011 warm-up (20 s) is a fixed constant rather than adaptive.

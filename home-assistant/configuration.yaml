@@ -1,33 +1,29 @@
-# Home Assistant entities for the rs-bird-scale.
+# Home Assistant entities for the rs-smarthome-nodes fleet.
 #
-# The firmware now converts the load-cell reading to grams **on-device** using
-# calibration stored in flash, so `birds/scale/state` carries a ready-to-use
-# gram value (no template maths here anymore). Temperature is published in °C.
+# **Readings are no longer declared here.** Every node publishes retained MQTT
+# discovery configs (`homeassistant/sensor/<node>/<key>/config`) on its first
+# connect after a power-up, so Home Assistant creates the device and all its
+# sensor entities by itself — weight, temperature, humidity, CO₂, PM. Adding a
+# node to the fleet needs no change to this file.
 #
-# Calibration and tuning are done from Home Assistant: the `number`/`button`
-# entities below publish **retained** values to `birds/scale/config/<key>`, and
-# the device reads them the next time it is online for a publish (i.e. while a
-# bird is on / has just left the scale), then persists them to flash. Changes
-# therefore take effect with a short delay, not instantly.
+# What is left here are the *command* entities: calibration and tuning knobs the
+# firmware cannot discover because they flow the other way. They publish
+# **retained** values to `<namespace>/<node>/config/<key>` — `birds/scale/…` for
+# the outdoor scale — and the device reads them the next time it is online for a
+# publish (i.e. while a bird is on / has just left the scale), then persists them
+# to flash. Changes therefore take effect with a short delay, not instantly.
+#
+# The scale's own thresholds/intervals are the only tunables today; the mains
+# nodes' sampling cadence is a build-time per-node value (see `src/node.rs`).
 #
 # Merge this into your existing `configuration.yaml`.
+#
+# Migrating from the pre-discovery setup: delete the old hand-declared
+# `birds/scale/state` + `birds/scale/temperature` sensors once the discovered
+# entities show up. The firmware keeps mirroring the weight to
+# `birds/scale/state` in the meantime, so nothing breaks mid-migration.
 
 mqtt:
-  sensor:
-    - name: "Meisenknödel Gewicht"
-      unique_id: birdscale_weight
-      state_topic: "birds/scale/state"
-      unit_of_measurement: "g"
-      device_class: weight
-      state_class: measurement
-
-    - name: "Meisenknödel Temperatur"
-      unique_id: birdscale_temperature
-      state_topic: "birds/scale/temperature"
-      unit_of_measurement: "°C"
-      device_class: temperature
-      state_class: measurement
-
   # --- Calibration & tuning (retained -> stored on the controller) ----------
   # These are "optimistic" (no state_topic): HA shows the last value you set.
   number:
