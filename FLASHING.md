@@ -251,10 +251,10 @@ mosquitto_sub -h <broker-ip> -t 'smarthome/#' -t 'birds/#' -t 'homeassistant/#' 
 ```
 
 The entities appear in Home Assistant by themselves — each node publishes
-retained discovery configs on its first connect after a power-up. Only the
-calibration/tuning controls are declared by hand, in
-[`home-assistant/configuration.yaml`](home-assistant/configuration.yaml); see
-the [README](README.md#home-assistant-integration) for calibrating the scale.
+retained discovery configs on its first connect after a power-up, for its
+readings *and* for its calibration/tuning controls. Nothing is declared by hand;
+see [`home-assistant/README.md`](home-assistant/README.md) for the entity list
+and for calibrating the scale.
 
 > Re-flashing clears RTC RAM, so the next boot re-announces discovery. If you
 > ever need to force it without a reflash, clear the retained configs with

@@ -52,7 +52,9 @@ pub struct Config {
     pub idle_secs: u32,
     /// Deep-sleep seconds between publishes while a bird is present.
     pub active_secs: u32,
-    /// Monotonic tare token; a new value from HA triggers a re-zero.
+    /// Last numeric tare token seen, so a replayed one is not mistaken for a
+    /// second press. `0` for the discovered button, which has no token (see
+    /// [`Config::apply`]).
     pub tare_token: u32,
     /// When `false`, the firmware never deep-sleeps: it stays awake and keeps
     /// Wi-Fi up in a loop. Meant for bench testing on USB where deep sleep just
@@ -142,9 +144,8 @@ impl Config {
     /// Apply one `key=value` pair received from a `birds/scale/config/<key>`
     /// topic. Returns `true` if it parsed and actually changed a field.
     ///
-    /// `tare` is special: any *new* token re-zeros the scale by adopting
-    /// `tare_ref` (the caller passes the current empty-house baseline) as the
-    /// gram offset.
+    /// `tare` is special: it re-zeros the scale by adopting `tare_ref` (the
+    /// caller passes the current empty-house baseline) as the gram offset.
     pub fn apply(&mut self, key: &str, value: &str, tare_ref: i32) -> bool {
         let before = *self;
         match key {
@@ -183,8 +184,19 @@ impl Config {
                 }
             }
             "tare" => {
-                if let Ok(token) = value.parse::<u32>() {
-                    if token != self.tare_token {
+                if !value.is_empty() {
+                    // Two ways to ask for a re-zero, both landing here:
+                    //
+                    // * a discovered Home Assistant *button*, whose payload is a
+                    //   constant — every press looks identical, so the caller
+                    //   deletes the retained message once we have acted on it;
+                    // * a numeric token (the older automation that published a
+                    //   timestamp), where a repeat of the same value is a
+                    //   replay, not a new press. Remembering the token means
+                    //   that keeps working, and doubles as a backstop if the
+                    //   button's retained message ever fails to clear.
+                    let token = value.parse::<u32>().unwrap_or(0);
+                    if token == 0 || token != self.tare_token {
                         self.tare_token = token;
                         self.offset = tare_ref;
                     }

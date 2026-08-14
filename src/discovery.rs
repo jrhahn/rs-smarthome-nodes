@@ -6,6 +6,12 @@
 //! node id) and remembers them across restarts — so adding a node to the fleet
 //! no longer means hand-declaring entities in the home-server nix config.
 //!
+//! Both directions are discovered. The readings become `sensor` entities; the
+//! calibration and tuning knobs the firmware reads back off
+//! `<namespace>/<node>/config/<key>` become `number` / `switch` / `button`
+//! entities (see [`controls`]), so the Home Assistant side of a node needs no
+//! hand-written YAML at all.
+//!
 //! This module only *builds* the topic/payload pairs; `main` owns the MQTT
 //! client and does the publishing, which keeps the rust-mqtt types out of here.
 //!
@@ -25,6 +31,17 @@ use crate::sensors::{scale, scd41, sds011, sht31, EntityDescriptor};
 /// Upper bound on entities a node can expose (weight, probe temperature,
 /// SHT31 ×2, SCD41 ×3, SDS011 ×2), with headroom.
 pub const MAX_ENTITIES: usize = 12;
+/// Upper bound on command entities (the calibration and tuning knobs).
+pub const MAX_CONTROLS: usize = 12;
+
+/// Room for one discovery payload. The longest today is ~390 B (a `number`
+/// control on a node with a last will and a long name); the headroom is for the
+/// device block, which grows with the node's name. An over-long payload is
+/// dropped rather than truncated, so this only ever costs an entity.
+pub const PAYLOAD_MAX: usize = 448;
+
+/// A rendered discovery payload.
+pub type Payload = String<PAYLOAD_MAX>;
 
 /// Discovery prefix Home Assistant listens on (its default).
 pub const PREFIX: &str = "homeassistant";
@@ -118,7 +135,7 @@ pub fn config_topic(entity: &Entity) -> String<96> {
 /// The retained discovery payload for one entity, or `None` if it would not fit
 /// the buffer. Truncated JSON would be worse than no entity at all: Home
 /// Assistant would keep re-reading a broken retained config on every restart.
-pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<String<384>> {
+pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<Payload> {
     let node = node::active();
     let (slot, desc) = (entity.slot, entity.desc);
     let mut p = String::new();
@@ -131,8 +148,7 @@ pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<String<38
          \"unit_of_meas\":\"{unit}\",\
          \"dev_cla\":\"{dev_cla}\",\
          \"stat_cla\":\"{stat_cla}\",\
-         \"exp_aft\":{expire},{avty}\
-         \"dev\":{{\"ids\":[\"{id}\"],\"name\":\"{dev_name}\",\"mf\":\"{mf}\",\"mdl\":\"{mdl}\"}}}}",
+         \"exp_aft\":{expire},{avty}",
         expire = avail.expire_after,
         // The availability topic is relative to `~`, and only exists on a node
         // whose last-will keeps it honest.
@@ -153,10 +169,197 @@ pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<String<38
         unit = desc.unit,
         dev_cla = desc.device_class,
         stat_cla = desc.state_class,
-        dev_name = node.name,
-        mf = MANUFACTURER,
-        mdl = MODEL,
     )
     .ok()?;
+    write_device(&mut p).ok()?;
     Some(p)
 }
+
+/// The device block every entity of this node carries, plus the payload's
+/// closing brace. Identical across entities — that sameness is exactly what
+/// makes Home Assistant group them all under one device card — so it is written
+/// in one place rather than repeated in each format string.
+fn write_device(p: &mut Payload) -> core::fmt::Result {
+    let node = node::active();
+    write!(
+        p,
+        "\"dev\":{{\"ids\":[\"{}\"],\"name\":\"{}\",\"mf\":\"{}\",\"mdl\":\"{}\"}}}}",
+        node.id, node.name, MANUFACTURER, MODEL
+    )
+}
+
+// --- Command entities --------------------------------------------------------
+
+/// A knob that flows the *other* way: Home Assistant publishes to
+/// `<namespace>/<node>/config/<key>` and the firmware picks it up the next time
+/// it is online (see [`crate::config::Config::apply`]).
+///
+/// These used to be hand-declared in `home-assistant/configuration.yaml`, which
+/// meant every node in the fleet needed its own copy-pasted block. Discovering
+/// them keeps the whole Home Assistant side of a node generated.
+///
+/// All command topics are published **retained**: a battery node is asleep when
+/// the slider moves, so the broker has to hold the value until it next connects.
+pub struct Control {
+    /// Home Assistant component — `number`, `switch` or `button`.
+    pub component: &'static str,
+    /// Config-topic suffix, i.e. the key [`crate::config::Config::apply`]
+    /// matches on.
+    pub key: &'static str,
+    /// Entity name. Home Assistant prefixes the device name, so this is just the
+    /// knob ("Auslöseschwelle", not "Meisenknödel Auslöseschwelle").
+    pub name: &'static str,
+    /// Whether the entity reads its state back off its own command topic.
+    ///
+    /// The node never echoes its stored config, so without this the sliders
+    /// would sit at "unknown" until someone moved them. Since the commands are
+    /// retained, the command topic already *is* the last value set — pointing
+    /// `stat_t` at it makes the controls show that value again after a Home
+    /// Assistant restart. A button has no state, so it opts out.
+    pub reads_back: bool,
+    /// Component-specific JSON members, each with a trailing comma. Pre-rendered
+    /// because they are pure constants: building `"step":0.1` at runtime would
+    /// pull in float formatting for no gain, and this way the ranges read like
+    /// the YAML they replace.
+    pub spec: &'static str,
+}
+
+/// Knobs that only exist on a node carrying a load cell.
+const SCALE_CONTROLS: &[Control] = &[
+    Control {
+        component: "number",
+        key: "threshold",
+        name: "Auslöseschwelle",
+        reads_back: true,
+        spec: "\"min\":0,\"max\":500,\"step\":1,\"unit_of_meas\":\"g\",\"mode\":\"box\",",
+    },
+    Control {
+        component: "number",
+        key: "scale_factor",
+        name: "Kalibrierfaktor",
+        reads_back: true,
+        spec: "\"min\":1,\"max\":100000,\"step\":0.1,\"mode\":\"box\",",
+    },
+    Control {
+        component: "number",
+        key: "offset",
+        name: "Tara-Offset",
+        reads_back: true,
+        spec: "\"min\":-8388608,\"max\":8388607,\"step\":1,\"mode\":\"box\",",
+    },
+    // A button's payload is a constant, so the firmware cannot use it to tell
+    // one press from the next; instead it *consumes* the retained message after
+    // taring (see `main`). Any non-empty payload means "tare now".
+    Control {
+        component: "button",
+        key: "tare",
+        name: "Tarieren",
+        reads_back: false,
+        spec: "\"pl_prs\":\"tare\",",
+    },
+];
+
+/// Knobs that only do anything on a battery node. A mains node samples on its
+/// build-time cadence and never sleeps, so exposing these would put four dead
+/// controls on its device card.
+const BATTERY_CONTROLS: &[Control] = &[
+    Control {
+        component: "number",
+        key: "idle_interval",
+        name: "Idle-Intervall",
+        reads_back: true,
+        spec: "\"min\":1,\"max\":3600,\"step\":1,\"unit_of_meas\":\"s\",\"mode\":\"box\",",
+    },
+    Control {
+        component: "number",
+        key: "active_interval",
+        name: "Aktiv-Intervall",
+        reads_back: true,
+        spec: "\"min\":1,\"max\":3600,\"step\":1,\"unit_of_meas\":\"s\",\"mode\":\"box\",",
+    },
+    Control {
+        component: "number",
+        key: "heartbeat_interval",
+        name: "Heartbeat-Intervall",
+        reads_back: true,
+        spec: "\"min\":10,\"max\":86400,\"step\":10,\"unit_of_meas\":\"s\",\"mode\":\"box\",",
+    },
+    Control {
+        component: "switch",
+        key: "deep_sleep",
+        name: "Deep Sleep",
+        reads_back: true,
+        spec: "\"pl_on\":\"1\",\"pl_off\":\"0\",",
+    },
+];
+
+/// Every command entity this node exposes.
+pub fn controls() -> Vec<&'static Control, MAX_CONTROLS> {
+    let node = node::active();
+    let mut out = Vec::new();
+    for control in SCALE_CONTROLS
+        .iter()
+        .filter(|_| node.scale.enabled)
+        .chain(BATTERY_CONTROLS.iter().filter(|_| node.power.is_battery()))
+    {
+        let _ = out.push(control);
+    }
+    out
+}
+
+/// `homeassistant/<component>/<node>/<key>/config`.
+pub fn control_topic(control: &Control) -> String<96> {
+    let node = node::active();
+    let mut t = String::new();
+    let _ = write!(
+        t,
+        "{}/{}/{}/{}/config",
+        PREFIX, control.component, node.id, control.key
+    );
+    t
+}
+
+/// The retained discovery payload for one command entity, or `None` if it would
+/// not fit (same reasoning as [`config_payload`]).
+///
+/// Command entities carry no `exp_aft` — they have no state to expire — but they
+/// do follow the node's availability, so the controls grey out along with the
+/// readings when a mains node drops off.
+pub fn control_payload(control: &Control, avail: &Availability) -> Option<Payload> {
+    let node = node::active();
+    let mut p = String::new();
+    write!(
+        p,
+        "{{\"~\":\"{ns}/{id}\",\
+         \"name\":\"{name}\",\
+         \"uniq_id\":\"{id}_{key}\",\
+         \"cmd_t\":\"~/config/{key}\",",
+        ns = node.namespace,
+        id = node.id,
+        name = control.name,
+        key = control.key,
+    )
+    .ok()?;
+    // Written separately rather than as one format string, because the state
+    // topic is conditional *and* interpolated.
+    if control.reads_back {
+        write!(p, "\"stat_t\":\"~/config/{}\",", control.key).ok()?;
+    }
+    write!(
+        p,
+        "\"ret\":true,\"ent_cat\":\"config\",{spec}{avty}",
+        spec = control.spec,
+        avty = if avail.lwt {
+            "\"avty_t\":\"~/status\","
+        } else {
+            ""
+        },
+    )
+    .ok()?;
+    write_device(&mut p).ok()?;
+    Some(p)
+}
+
+const _: () = {
+    assert!(SCALE_CONTROLS.len() + BATTERY_CONTROLS.len() <= MAX_CONTROLS);
+};

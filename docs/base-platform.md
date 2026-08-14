@@ -108,6 +108,33 @@ The bird scale keeps its historical `birds/scale/…` namespace, and its weight 
 still mirrored to the pre-discovery `birds/scale/state` topic, so the migration
 of the hand-declared Home Assistant entities can happen at leisure.
 
+### Command entities
+
+The knobs that flow the other way — the ones Home Assistant publishes to
+`<namespace>/<node>/config/<key>` — are discovered as well, as `number`,
+`switch` and `button` entities under the device's *Configuration* category. They
+used to be the one thing still hand-declared in YAML, which meant each node in
+the fleet needed its own copy-pasted block.
+
+Which knobs a node gets follows from what it *is*: the calibration ones only on
+a node with a load cell, the sleep/interval ones only on a battery node, since a
+mains node samples on its build-time cadence and never sleeps. A dead control on
+a device card is worse than a missing one.
+
+Two details that are not obvious:
+
+- **The button consumes its own message.** A button's payload is a constant, so
+  the firmware cannot tell one press from the next; and the message must be
+  retained, because a battery node is asleep when the button is pressed. So the
+  node deletes the retained message (empty retained payload) once it has
+  re-zeroed. The older timestamp-token scheme still works and is still
+  remembered, which doubles as a backstop if a delete is ever lost.
+- **`stat_t` points back at the command topic.** The node never echoes its
+  stored config, so the sliders would otherwise sit at "unknown" until moved.
+  Since commands are retained, the command topic already holds the last value
+  set — which is exactly the state an optimistic control would show, except this
+  one survives a Home Assistant restart.
+
 ### Availability
 
 Two mechanisms, because neither alone covers a fleet that is half asleep:
