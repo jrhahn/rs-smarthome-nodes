@@ -10,10 +10,11 @@
 //! Home Assistant discovery (#16). The concrete drivers own their bus handle
 //! (I²C / UART / 1-Wire / bit-bang) and are wired in per node.
 //!
-//! Status: type + trait + datasheet constants are in place and compile-checked;
-//! the actual bus I/O in each driver's `measure()` is a `todo!()` to fill in
-//! once the hardware is on the bench. `main.rs` does **not** use this yet — the
-//! working bird-scale path is untouched.
+//! Drivers are generic over the `embedded-hal-async` / `embedded-io-async` bus
+//! traits rather than over esp-hal types, so they can be exercised against any
+//! implementation. `platform.rs` supplies the concrete ESP32-C3 buses (a shared
+//! I²C bus for SHT31-D + SCD41, a UART for the SDS011) and decides which
+//! drivers exist on this node (see `node.rs`).
 #![allow(dead_code)]
 // The trait uses `async fn`; we don't need `Send` futures on this single-core,
 // single-executor target, so silence the auto-bound lint.
@@ -23,6 +24,7 @@ use core::fmt::Write as _;
 
 use heapless::{String, Vec};
 
+pub mod scale;
 pub mod scd41;
 pub mod sds011;
 pub mod sht31;
@@ -93,6 +95,16 @@ pub const fn crc8_sensirion(data: &[u8]) -> u8 {
         i += 1;
     }
     crc
+}
+
+/// Decode one Sensirion data word: `MSB LSB CRC`. Returns `None` when the CRC
+/// does not match, so a noisy bus is dropped rather than published.
+pub fn crc_word(chunk: &[u8]) -> Option<u16> {
+    let [msb, lsb, crc] = chunk else { return None };
+    if crc8_sensirion(&[*msb, *lsb]) != *crc {
+        return None;
+    }
+    Some(u16::from_be_bytes([*msb, *lsb]))
 }
 
 /// Format a value given in **tenths** as a one-decimal ASCII string

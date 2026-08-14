@@ -1,33 +1,41 @@
-//! rs-bird-scale — async battery bird-feeder scale firmware.
+//! rs-smarthome-nodes — async firmware for a fleet of ESP32-C3 sensor nodes.
 //!
-//! To catch short bird visits without keeping the radio awake, the firmware
-//! polls by cold-booting out of deep sleep on a short interval and only spends
-//! Wi-Fi energy when weight is actually on the scale.
+//! One image serves every node; `NODE=<name>` at build time picks which sensors
+//! are populated, what the node is called, and how it is powered (see
+//! [`node`]). It started life as a battery bird-feeder scale, and that node
+//! (`NODE=draussen`, the default) still drives the flow described below.
 //!
-//! Flow on each wake-up:
+//! **Battery profile** — to catch short bird visits without keeping the radio
+//! awake, the firmware polls by cold-booting out of deep sleep on a short
+//! interval and only spends Wi-Fi energy when weight is actually on the scale:
 //!   1. Bring up the HAL + Embassy executor (TIMG0).
 //!   2. Read a raw weight sample from the HX711 (with a timeout, so a missing
 //!      sensor can't wedge the boot).
 //!   3. Compare against the tare baseline persisted in RTC RAM across sleep:
 //!        - empty house  -> drift-correct the baseline, skip Wi-Fi, deep-sleep
 //!          a short *idle* interval to catch the next visit;
-//!        - weight present -> join Wi-Fi (STA + DHCP), publish the raw `i32`
-//!          over MQTT to `birds/scale/state`, deep-sleep a longer *active*
-//!          interval to keep tracking. A final reading is published on the
-//!          falling edge when the bird leaves.
+//!        - weight present -> join Wi-Fi (STA + DHCP), publish every populated
+//!          sensor over MQTT, deep-sleep a longer *active* interval to keep
+//!          tracking. A final reading is published on the falling edge when the
+//!          bird leaves.
 //!
-//! Calibration (tare offset + ticks-per-gram) is intentionally *not* done on
-//! the MCU; it lives in the Home Assistant sensor template so it can be tuned
-//! without reflashing. See `README.md`.
+//! **Mains profile** — indoor air-quality nodes stay associated and sample on a
+//! fixed cadence instead, because CO₂ continuity and the SDS011's duty-cycled
+//! fan both rule out deep sleep.
+//!
+//! Home Assistant discovers every node's entities over retained MQTT config
+//! messages (see [`discovery`]); calibration and tuning live in flash and are
+//! updated live from Home Assistant (see [`config`]).
 
 #![no_std]
 #![no_main]
 
 mod config;
+mod discovery;
 mod ds18b20;
 mod hx711;
-// Scaffolding for the configurable multi-sensor base platform (epic #11). Not
-// wired into the bird-scale flow yet; see `docs/base-platform.md`.
+mod node;
+mod platform;
 mod sensors;
 mod state;
 
@@ -62,6 +70,8 @@ use rust_mqtt::{
 use config::Config;
 use ds18b20::Ds18b20;
 use hx711::Hx711;
+use node::NODE;
+use platform::{Samples, Sensors};
 
 /// The concrete network-stack type used throughout the firmware.
 type WifiStack = Stack<WifiDevice<'static, WifiStaDevice>>;
@@ -136,20 +146,11 @@ const _: () = {
     let o = parse_octets("192.168.1.67");
     assert!(o[0] == 192 && o[1] == 168 && o[2] == 1 && o[3] == 67);
 };
-const MQTT_TOPIC: &str = "birds/scale/state";
-/// Ambient temperature from the DS18B20, published alongside a weight reading.
-const MQTT_TOPIC_TEMP: &str = "birds/scale/temperature";
-/// Prefix under which Home Assistant publishes retained tuning/calibration
-/// values (one key per topic); the firmware subscribes to the wildcard and
-/// reads them while it is already online for a publish. See [`config`].
-const MQTT_CONFIG_PREFIX: &str = "birds/scale/config/";
-const MQTT_CONFIG_WILDCARD: &str = "birds/scale/config/#";
-const MQTT_CLIENT_ID: &str = "rs-bird-scale";
 
 // --- Sampling / detection tuning -------------------------------------------
-// The presence threshold and the idle/active poll intervals are no longer
-// compile-time constants: they live in [`config::Config`], persisted in flash
-// and tunable live from Home Assistant. See `src/config.rs`.
+// Topics, the client id and the sensor set come from [`node::NODE`]; the
+// presence threshold and the idle/active poll intervals live in
+// [`config::Config`], persisted in flash and tunable live from Home Assistant.
 
 /// How long to wait for the next retained config message after subscribing.
 /// Retained values arrive within tens of ms, so once a receive hits this
@@ -161,7 +162,8 @@ const CONFIG_RECV_WINDOW: Duration = Duration::from_millis(400);
 const HX711_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Upper bound on the whole Wi-Fi join + MQTT publish. Without it a failed join
-/// would spin in the high-power state and drain the battery.
+/// would spin in the high-power state and drain the battery. Sensor sampling
+/// happens before this window, so a slow sensor never eats into it.
 const WIFI_BUDGET: Duration = Duration::from_secs(20);
 
 /// Exponential-decay shift for empty-house baseline drift tracking. Each idle
@@ -175,6 +177,23 @@ macro_rules! mk_static {
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
         STATIC_CELL.init($val)
     }};
+}
+
+/// Everything this node can measure. Absent hardware is `None`, so both power
+/// profiles run the same sampling code.
+struct Board<'d> {
+    scale: Option<Hx711<'d>>,
+    probe: Option<Ds18b20<'d>>,
+    sensors: Sensors,
+}
+
+/// The peripherals needed to bring the radio up, bundled so they can be handed
+/// down the call chain in one piece.
+struct Radio {
+    timg1: TIMG1,
+    rng: RNG,
+    radio_clk: RADIO_CLK,
+    wifi: WIFI,
 }
 
 #[esp_hal_embassy::main]
@@ -194,7 +213,16 @@ async fn main(spawner: Spawner) {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
 
-    info!("rs-bird-scale booted, taking a measurement");
+    info!(
+        "node '{}' ({}) booted, {} profile",
+        NODE.id,
+        NODE.name,
+        if NODE.power.is_battery() {
+            "battery"
+        } else {
+            "mains"
+        }
+    );
 
     // Runtime config from flash (calibration + tuning), or defaults on a blank
     // sector. Read now, while the radio is still down. It may be updated from
@@ -210,48 +238,79 @@ async fn main(spawner: Spawner) {
     // silkscreen pads map D0=GPIO2, D1=GPIO3, D2=GPIO4 (GPIO0/GPIO1 are *not*
     // broken out). So:
     //   HX711 SCK -> D0 (GPIO2)   HX711 DT -> D1 (GPIO3)   DS18B20 -> D2 (GPIO4)
+    // The I²C and UART pins live in `platform.rs` alongside their drivers.
     // `DT` is pulled up so a *disconnected* amp reads permanently "not ready"
     // and times out cleanly instead of returning floating garbage.
-    let dt = Input::new(peripherals.GPIO3, Pull::Up);
-    let sck = Output::new(peripherals.GPIO2, Level::Low);
-    let mut scale = Hx711::new(dt, sck);
+    let scale = NODE.scale.enabled.then(|| {
+        let dt = Input::new(peripherals.GPIO3, Pull::Up);
+        let sck = Output::new(peripherals.GPIO2, Level::Low);
+        Hx711::new(dt, sck)
+    });
 
     // DS18B20 open-drain 1-Wire line on D2 / GPIO4 (internal pull-up backs the
-    // external 4.7 kΩ). Built once so both modes can reuse it.
-    let ds_io = OutputOpenDrain::new(peripherals.GPIO4, Level::High, Pull::Up);
-    let mut temp_sensor = Ds18b20::new(ds_io);
+    // external 4.7 kΩ).
+    let probe = NODE.ds18b20.enabled.then(|| {
+        Ds18b20::new(OutputOpenDrain::new(
+            peripherals.GPIO4,
+            Level::High,
+            Pull::Up,
+        ))
+    });
 
-    // --- 3. Stay-awake mode (deep sleep disabled) --------------------------
-    // Bench testing on USB: keep Wi-Fi up and loop in place so the serial
-    // monitor stays connected and readings stream continuously. Toggled live
-    // from Home Assistant via `birds/scale/config/deep_sleep`. `run_awake`
-    // diverges, so on the normal (deep-sleep) path the peripherals below are
-    // untouched and reused.
-    if !cfg.deep_sleep {
-        info!("deep sleep disabled — staying awake");
-        run_awake(
-            spawner,
-            peripherals.TIMG1,
-            peripherals.RNG,
-            peripherals.RADIO_CLK,
-            peripherals.WIFI,
-            peripherals.LPWR,
-            &mut scale,
-            &mut temp_sensor,
-            cfg,
-        )
-        .await;
+    let mut board = Board {
+        scale,
+        probe,
+        sensors: Sensors::new(platform::Peripherals {
+            i2c0: peripherals.I2C0,
+            sda: peripherals.GPIO6,
+            scl: peripherals.GPIO7,
+            uart1: peripherals.UART1,
+            uart_rx: peripherals.GPIO5,
+            uart_tx: peripherals.GPIO10,
+        }),
+    };
+
+    let radio = Radio {
+        timg1: peripherals.TIMG1,
+        rng: peripherals.RNG,
+        radio_clk: peripherals.RADIO_CLK,
+        wifi: peripherals.WIFI,
+    };
+
+    // --- 3. Hand over to the power profile ---------------------------------
+    // Mains nodes never deep-sleep. Battery nodes normally do, but Home
+    // Assistant can hold one awake (`config/deep_sleep`) for bench testing on
+    // USB, where deep sleep just churns the serial monitor. Both branches
+    // diverge, so exactly one of them runs per boot.
+    if !NODE.power.is_battery() || !cfg.deep_sleep {
+        run_awake(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
     }
 
-    // --- 4. Deep-sleep cycle: one measurement, then back to sleep ----------
-    // The first sample after power-up settles the internal filter; throw it
-    // away and take a clean reading.
-    let _ = scale.read(HX711_TIMEOUT).await;
-    let raw = match scale.read(HX711_TIMEOUT).await {
+    run_battery(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
+}
+
+/// Battery profile: one measurement per cold boot, then straight back to deep
+/// sleep. Never returns.
+async fn run_battery(
+    spawner: Spawner,
+    radio: Radio,
+    lpwr: LPWR,
+    board: &mut Board<'_>,
+    cfg: Config,
+) -> ! {
+    // A node with no load cell has no presence logic to run: sample everything
+    // it does have, publish, and go back to sleep.
+    if !NODE.scale.enabled {
+        let samples = collect_samples(None, &cfg, board).await;
+        let cfg = publish(spawner, radio, &samples, state::baseline(), cfg).await;
+        enter_deep_sleep(lpwr, cfg.idle_interval());
+    }
+
+    let raw = match read_scale(board).await {
         Some(v) => v,
         None => {
             warn!("HX711 not responding; skipping cycle");
-            enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
+            enter_deep_sleep(lpwr, cfg.idle_interval());
         }
     };
     info!("HX711 raw reading: {}", raw);
@@ -261,7 +320,7 @@ async fn main(spawner: Spawner) {
         state::set_baseline(raw);
         state::mark_initialised();
         info!("tared baseline = {}", raw);
-        enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
+        enter_deep_sleep(lpwr, cfg.idle_interval());
     }
 
     // Presence decision.
@@ -276,21 +335,10 @@ async fn main(spawner: Spawner) {
             raw, baseline, delta
         );
         state::set_bird_present(true);
-        let temp = read_temperature(&mut temp_sensor).await;
-        let cfg = publish(
-            spawner,
-            peripherals.TIMG1,
-            peripherals.RNG,
-            peripherals.RADIO_CLK,
-            peripherals.WIFI,
-            raw,
-            temp,
-            baseline,
-            cfg,
-        )
-        .await;
+        let samples = collect_samples(Some(raw), &cfg, board).await;
+        let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
         state::set_idle_wakes(0);
-        enter_deep_sleep(peripherals.LPWR, cfg.active_interval());
+        enter_deep_sleep(lpwr, cfg.active_interval());
     }
 
     // Empty house from here on.
@@ -299,71 +347,46 @@ async fn main(spawner: Spawner) {
         // Assistant returns to baseline, then resume idle polling.
         info!("bird left; publishing final reading {}", raw);
         state::set_bird_present(false);
-        let temp = read_temperature(&mut temp_sensor).await;
-        let cfg = publish(
-            spawner,
-            peripherals.TIMG1,
-            peripherals.RNG,
-            peripherals.RADIO_CLK,
-            peripherals.WIFI,
-            raw,
-            temp,
-            baseline,
-            cfg,
-        )
-        .await;
+        let samples = collect_samples(Some(raw), &cfg, board).await;
+        let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
         state::set_idle_wakes(0);
-        enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
+        enter_deep_sleep(lpwr, cfg.idle_interval());
     } else {
         // Steady empty: absorb slow drift into the baseline.
         state::set_baseline(baseline + (delta >> BASELINE_DRIFT_SHIFT));
 
         // Periodic heartbeat: once enough empty polls have elapsed, bring Wi-Fi
-        // up and publish temperature + weight anyway, so Home Assistant keeps a
-        // fresh reading even with no visitor. The counter lives in RTC RAM so it
-        // survives the deep-sleep cold boots between polls.
+        // up and publish anyway, so Home Assistant keeps a fresh reading even
+        // with no visitor. The counter lives in RTC RAM so it survives the
+        // deep-sleep cold boots between polls.
         let wakes = state::idle_wakes() + 1;
         if wakes >= cfg.heartbeat_wakes() {
-            info!("heartbeat: publishing periodic temperature + weight");
+            info!("heartbeat: publishing periodic readings");
             state::set_idle_wakes(0);
-            let temp = read_temperature(&mut temp_sensor).await;
-            let cfg = publish(
-                spawner,
-                peripherals.TIMG1,
-                peripherals.RNG,
-                peripherals.RADIO_CLK,
-                peripherals.WIFI,
-                raw,
-                temp,
-                baseline,
-                cfg,
-            )
-            .await;
-            enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
+            let samples = collect_samples(Some(raw), &cfg, board).await;
+            let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
+            enter_deep_sleep(lpwr, cfg.idle_interval());
         }
         state::set_idle_wakes(wakes);
     }
 
-    enter_deep_sleep(peripherals.LPWR, cfg.idle_interval());
+    enter_deep_sleep(lpwr, cfg.idle_interval());
 }
 
-/// Stay-awake loop for bench testing (deep sleep disabled): bring Wi-Fi up once
-/// and keep it, then measure + publish + drain config on a fixed cadence,
-/// streaming to the still-connected serial monitor. Never returns — it either
-/// loops forever or, if Home Assistant re-enables deep sleep, drops into it.
-#[allow(clippy::too_many_arguments)]
+/// Stay-awake loop: bring Wi-Fi up once and keep it, then sample + publish +
+/// drain config on a fixed cadence. This is the normal mode for mains nodes
+/// (#17) and the bench-testing mode for a battery node with `deep_sleep` off,
+/// where it streams to the still-connected serial monitor. Never returns — it
+/// either loops forever or, if Home Assistant re-enables deep sleep on a battery
+/// node, drops into it.
 async fn run_awake(
     spawner: Spawner,
-    timg1: TIMG1,
-    rng: RNG,
-    radio_clk: RADIO_CLK,
-    wifi: WIFI,
+    radio: Radio,
     lpwr: LPWR,
-    scale: &mut Hx711<'_>,
-    temp_sensor: &mut Ds18b20<'_>,
+    board: &mut Board<'_>,
     mut cfg: Config,
 ) -> ! {
-    let stack = match bring_up_wifi(spawner, timg1, rng, radio_clk, wifi).await {
+    let stack = match bring_up_wifi(spawner, radio).await {
         Ok(s) => s,
         Err(e) => {
             warn!("Wi-Fi bring-up failed ({}); falling back to deep sleep", e);
@@ -372,36 +395,37 @@ async fn run_awake(
     };
 
     loop {
-        // Discard the settling sample, then take a clean reading.
-        let _ = scale.read(HX711_TIMEOUT).await;
-        let raw = match scale.read(HX711_TIMEOUT).await {
-            Some(v) => v,
-            None => {
-                warn!("HX711 not responding");
-                Timer::after(Duration::from_secs(cfg.idle_secs.max(1) as u64)).await;
-                continue;
+        // Track presence/drift when this node has a load cell, so a mains-powered
+        // scale behaves like the battery one minus the sleeping.
+        let raw = read_scale(board).await;
+        if let Some(raw) = raw {
+            if !state::is_initialised() {
+                state::set_baseline(raw);
+                state::mark_initialised();
+                info!("tared baseline = {}", raw);
             }
-        };
-
-        if !state::is_initialised() {
-            state::set_baseline(raw);
-            state::mark_initialised();
-            info!("tared baseline = {}", raw);
+            let baseline = state::baseline();
+            let delta = raw - baseline;
+            let present = delta >= cfg.threshold_ticks();
+            info!(
+                "HX711 raw={} baseline={} delta={} present={}",
+                raw, baseline, delta, present
+            );
+            state::set_bird_present(present);
+            if !present {
+                state::set_baseline(baseline + (delta >> BASELINE_DRIFT_SHIFT));
+            }
+        } else if NODE.scale.enabled {
+            warn!("HX711 not responding");
         }
-        let baseline = state::baseline();
-        let delta = raw - baseline;
-        let present = delta >= cfg.threshold_ticks();
-        info!(
-            "HX711 raw={} baseline={} delta={} present={}",
-            raw, baseline, delta, present
-        );
 
-        let temp = read_temperature(temp_sensor).await;
+        let baseline = state::baseline();
+        let samples = collect_samples(raw, &cfg, board).await;
 
         // Publish every cycle for a live view; this also drains retained config.
         let updated = match with_timeout(
             WIFI_BUDGET,
-            publish_reading(stack, raw, temp, baseline, cfg),
+            publish_samples(stack, &samples, baseline, cfg),
         )
         .await
         {
@@ -417,33 +441,67 @@ async fn run_awake(
         };
         cfg = persist_if_changed(cfg, updated);
 
-        // Honour a live switch back to deep sleep immediately.
-        if cfg.deep_sleep {
+        // Honour a live switch back to deep sleep immediately (battery only —
+        // a mains node has nothing to gain and CO₂/PM continuity to lose).
+        if NODE.power.is_battery() && cfg.deep_sleep {
             info!("deep sleep re-enabled — sleeping");
             enter_deep_sleep(lpwr, cfg.idle_interval());
         }
 
-        // Track presence edge + absorb drift, mirroring the deep-sleep path.
-        state::set_bird_present(present);
-        if !present {
-            state::set_baseline(baseline + (delta >> BASELINE_DRIFT_SHIFT));
-        }
-
-        Timer::after(Duration::from_secs(cfg.idle_secs.max(1) as u64)).await;
+        Timer::after(Duration::from_secs(sample_period_secs(&cfg))).await;
     }
 }
 
-/// Read the DS18B20 once. Only called on the publish paths (bird present /
-/// just-left, or each awake-loop iteration), so the ~750 ms conversion never
-/// runs on the cheap deep-sleep idle-poll cycles. A missing/faulty probe yields
-/// `None` and simply omits the temperature from the publish.
-async fn read_temperature(sensor: &mut Ds18b20<'_>) -> Option<i16> {
-    let temp = sensor.read().await;
-    match temp {
-        Some(raw) => info!("DS18B20 raw reading: {}", raw),
-        None => warn!("DS18B20 not responding; skipping temperature"),
+/// Seconds between rounds in the stay-awake loop: a mains node follows its
+/// per-node cadence, a battery node kept awake for bench testing follows the
+/// live-tunable idle interval so it still feels like the sleeping one.
+fn sample_period_secs(cfg: &Config) -> u64 {
+    if NODE.power.is_battery() {
+        cfg.idle_secs.max(1) as u64
+    } else {
+        NODE.sample_secs.max(1)
     }
-    temp
+}
+
+/// One clean HX711 reading, or `None` if this node has no load cell or the amp
+/// stayed silent. The first sample after power-up settles the internal filter,
+/// so it is discarded.
+async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
+    let scale = board.scale.as_mut()?;
+    let _ = scale.read(HX711_TIMEOUT).await;
+    scale.read(HX711_TIMEOUT).await
+}
+
+/// Measure everything this node has and format the readings for MQTT.
+///
+/// Called on publish cycles only, so the DS18B20's 750 ms conversion and the
+/// SDS011's ~20 s fan warm-up never run on the cheap idle polls. `raw` is the
+/// load-cell reading already taken by the caller (it drives the presence logic),
+/// converted to grams here with the stored calibration.
+async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) -> Samples {
+    let mut samples = Samples::new();
+
+    if let Some(raw) = raw {
+        let mut grams = heapless::String::new();
+        cfg.write_grams(&mut grams, raw);
+        info!("weight = {} g", grams);
+        platform::push_sample(&mut samples, NODE.scale, "weight", grams);
+    }
+
+    if let Some(probe) = board.probe.as_mut() {
+        match probe.read().await {
+            Some(raw_temp) => {
+                let mut value = heapless::String::new();
+                ds18b20::write_temp_c(&mut value, raw_temp);
+                info!("DS18B20 = {} °C", value);
+                platform::push_sample(&mut samples, NODE.ds18b20, "temperature", value);
+            }
+            None => warn!("DS18B20 not responding; skipping temperature"),
+        }
+    }
+
+    board.sensors.measure_all(&mut samples).await;
+    samples
 }
 
 /// Persist `new` to flash if it differs from `old`, and return `new`. Flash
@@ -458,29 +516,22 @@ fn persist_if_changed(old: Config, new: Config) -> Config {
     new
 }
 
-/// Bring up Wi-Fi + the network stack, publish `raw` (as grams) and the
-/// temperature, and pull any retained config from Home Assistant — all bounded
-/// by [`WIFI_BUDGET`]. Returns the (possibly HA-updated) config and persists it
-/// to flash when it changed. All failures are logged and swallowed: the caller
-/// deep-sleeps straight after, which tears down the half-built stack regardless,
-/// and an unchanged config is simply returned untouched.
-#[allow(clippy::too_many_arguments)]
+/// Bring up Wi-Fi + the network stack, publish `samples`, and pull any retained
+/// config from Home Assistant — all bounded by [`WIFI_BUDGET`]. Returns the
+/// (possibly HA-updated) config and persists it to flash when it changed. All
+/// failures are logged and swallowed: the caller deep-sleeps straight after,
+/// which tears down the half-built stack regardless, and an unchanged config is
+/// simply returned untouched.
 async fn publish(
     spawner: Spawner,
-    timg1: TIMG1,
-    rng: RNG,
-    radio_clk: RADIO_CLK,
-    wifi: WIFI,
-    raw: i32,
-    temp: Option<i16>,
+    radio: Radio,
+    samples: &Samples,
     baseline: i32,
     cfg: Config,
 ) -> Config {
     let updated = match with_timeout(
         WIFI_BUDGET,
-        connect_and_publish(
-            spawner, timg1, rng, radio_clk, wifi, raw, temp, baseline, cfg,
-        ),
+        connect_and_publish(spawner, radio, samples, baseline, cfg),
     )
     .await
     {
@@ -501,24 +552,18 @@ async fn publish(
 /// link + lease. Returns the `'static` network stack. Both the one-shot
 /// deep-sleep publish and the stay-awake loop bring Wi-Fi up through here; only
 /// one runs per boot, so the `mk_static!` cells are initialised exactly once.
-async fn bring_up_wifi(
-    spawner: Spawner,
-    timg1: TIMG1,
-    rng: RNG,
-    radio_clk: RADIO_CLK,
-    wifi: WIFI,
-) -> Result<&'static WifiStack, &'static str> {
+async fn bring_up_wifi(spawner: Spawner, radio: Radio) -> Result<&'static WifiStack, &'static str> {
     // esp-wifi needs its own timer; TIMG0 is already owned by the executor, so
     // hand it TIMG1.
-    let mut rng = Rng::new(rng);
-    let timg1 = TimerGroup::new(timg1);
+    let mut rng = Rng::new(radio.rng);
+    let timg1 = TimerGroup::new(radio.timg1);
     let esp_wifi_ctrl = &*mk_static!(
         EspWifiController<'static>,
-        esp_wifi::init(timg1.timer0, rng, radio_clk).map_err(|_| "wifi init")?
+        esp_wifi::init(timg1.timer0, rng, radio.radio_clk).map_err(|_| "wifi init")?
     );
 
     let (wifi_interface, controller) =
-        esp_wifi::wifi::new_with_mode(esp_wifi_ctrl, wifi, WifiStaDevice)
+        esp_wifi::wifi::new_with_mode(esp_wifi_ctrl, radio.wifi, WifiStaDevice)
             .map_err(|_| "wifi mode")?;
 
     let net_config = NetConfig::dhcpv4(Default::default());
@@ -542,22 +587,17 @@ async fn bring_up_wifi(
     Ok(stack)
 }
 
-/// Join Wi-Fi (STA + DHCP) and push a single reading to the broker.
-#[allow(clippy::too_many_arguments)]
+/// Join Wi-Fi (STA + DHCP) and push one round of readings to the broker.
 async fn connect_and_publish(
     spawner: Spawner,
-    timg1: TIMG1,
-    rng: RNG,
-    radio_clk: RADIO_CLK,
-    wifi: WIFI,
-    raw: i32,
-    temp: Option<i16>,
+    radio: Radio,
+    samples: &Samples,
     baseline: i32,
     cfg: Config,
 ) -> Result<Config, &'static str> {
-    let stack = bring_up_wifi(spawner, timg1, rng, radio_clk, wifi).await?;
+    let stack = bring_up_wifi(spawner, radio).await?;
 
-    let updated = publish_reading(stack, raw, temp, baseline, cfg).await?;
+    let updated = publish_samples(stack, samples, baseline, cfg).await?;
 
     // Give the TCP stack a moment to flush the FIN before we cut power.
     Timer::after(Duration::from_millis(200)).await;
@@ -592,14 +632,13 @@ async fn wait_for_network(stack: &'static WifiStack) {
     }
 }
 
-/// Open a TCP connection to the broker, publish the weight in grams (converted
-/// on-device from `cfg`) plus the DS18B20 temperature, then drain any retained
-/// `birds/scale/config/*` values from Home Assistant. Returns the config with
-/// those updates applied (unchanged if none were waiting).
-async fn publish_reading(
+/// Open a TCP connection to the broker, announce this node to Home Assistant
+/// (once per power cycle), publish every reading of this round, then drain any
+/// retained `<namespace>/<node>/config/*` values. Returns the config with those
+/// updates applied (unchanged if none were waiting).
+async fn publish_samples(
     stack: &'static WifiStack,
-    raw: i32,
-    temp: Option<i16>,
+    samples: &Samples,
     baseline: i32,
     cfg: Config,
 ) -> Result<Config, &'static str> {
@@ -613,27 +652,30 @@ async fn publish_reading(
         .await
         .map_err(|_| "tcp connect")?;
 
+    // Declared before the client config it is borrowed by, so it outlives it.
+    let client_id = NODE.client_id();
     let mut mqtt_config: ClientConfig<'_, 5, _> = ClientConfig::new(
         rust_mqtt::client::client_config::MqttVersion::MQTTv5,
         CountingRng(20_000),
     );
-    mqtt_config.add_client_id(MQTT_CLIENT_ID);
+    mqtt_config.add_client_id(&client_id);
     if let Some(user) = MQTT_USER {
         mqtt_config.add_username(user);
     }
     if let Some(password) = MQTT_PASSWORD {
         mqtt_config.add_password(password);
     }
-    mqtt_config.max_packet_size = 100;
+    // Large enough for a discovery config message (the biggest thing we send).
+    mqtt_config.max_packet_size = MQTT_BUFFER as u32;
 
-    let mut recv_buffer = [0u8; 256];
-    let mut write_buffer = [0u8; 256];
+    let mut recv_buffer = [0u8; MQTT_BUFFER];
+    let mut write_buffer = [0u8; MQTT_BUFFER];
     let mut client = MqttClient::new(
         socket,
         &mut write_buffer,
-        256,
+        MQTT_BUFFER,
         &mut recv_buffer,
-        256,
+        MQTT_BUFFER,
         mqtt_config,
     );
 
@@ -642,34 +684,61 @@ async fn publish_reading(
         .await
         .map_err(|_| "mqtt connect")?;
 
-    // Convert the raw reading to grams on-device and publish as ASCII.
-    let mut payload = heapless::String::<16>::new();
-    cfg.write_grams(&mut payload, raw);
-    client
-        .send_message(
-            MQTT_TOPIC,
-            payload.as_bytes(),
-            QualityOfService::QoS0,
-            false,
-        )
-        .await
-        .map_err(|_| "mqtt publish")?;
-    info!("Published {} g to {}", payload, MQTT_TOPIC);
+    // --- Home Assistant discovery (#16) ------------------------------------
+    // Retained, so the broker replays it to Home Assistant on its next restart;
+    // hence once per power cycle is enough (the flag lives in RTC RAM).
+    if !state::discovery_published() {
+        let mut ok = true;
+        for entity in discovery::entities() {
+            let topic = discovery::config_topic(&entity);
+            let Some(payload) = discovery::config_payload(&entity) else {
+                warn!("discovery payload too long for {}; skipping", topic);
+                continue;
+            };
+            if client
+                .send_message(&topic, payload.as_bytes(), QualityOfService::QoS0, true)
+                .await
+                .is_err()
+            {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            state::mark_discovery_published();
+            info!("published Home Assistant discovery for node '{}'", NODE.id);
+        } else {
+            warn!("discovery publish failed; will retry on the next connect");
+        }
+    }
 
-    // Publish the temperature (°C, one decimal) when the probe answered.
-    if let Some(raw_temp) = temp {
-        let mut temp_payload = heapless::String::<16>::new();
-        ds18b20::write_temp_c(&mut temp_payload, raw_temp);
+    // --- State ---------------------------------------------------------------
+    for sample in samples {
+        let topic = NODE.state_topic(sample.prefix, sample.reading.key);
         client
             .send_message(
-                MQTT_TOPIC_TEMP,
-                temp_payload.as_bytes(),
+                &topic,
+                sample.reading.value.as_bytes(),
                 QualityOfService::QoS0,
                 false,
             )
             .await
-            .map_err(|_| "mqtt publish temp")?;
-        info!("Published {} to {}", temp_payload, MQTT_TOPIC_TEMP);
+            .map_err(|_| "mqtt publish")?;
+        info!("Published {} to {}", sample.reading.value, topic);
+
+        // Mirror the weight to the pre-discovery topic while the hand-declared
+        // Home Assistant entity is still around.
+        if let (Some(legacy), "weight") = (NODE.legacy_weight_topic, sample.reading.key) {
+            client
+                .send_message(
+                    legacy,
+                    sample.reading.value.as_bytes(),
+                    QualityOfService::QoS0,
+                    false,
+                )
+                .await
+                .map_err(|_| "mqtt publish legacy")?;
+        }
     }
 
     // Pull retained config from Home Assistant. We're already online, so this is
@@ -679,8 +748,9 @@ async fn publish_reading(
     // capped by a hard message count as a backstop. Best-effort: config sync
     // failures never fail the publish.
     let mut updated = cfg;
+    let config_prefix = NODE.config_prefix();
     if client
-        .subscribe_to_topic(MQTT_CONFIG_WILDCARD)
+        .subscribe_to_topic(&NODE.config_wildcard())
         .await
         .is_ok()
     {
@@ -688,7 +758,7 @@ async fn publish_reading(
             match with_timeout(CONFIG_RECV_WINDOW, client.receive_message()).await {
                 Ok(Ok((topic, payload))) => {
                     if let (Some(key), Ok(value)) = (
-                        topic.strip_prefix(MQTT_CONFIG_PREFIX),
+                        topic.strip_prefix(config_prefix.as_str()),
                         core::str::from_utf8(payload),
                     ) {
                         if updated.apply(key, value.trim(), baseline) {
@@ -705,6 +775,11 @@ async fn publish_reading(
 
     Ok(updated)
 }
+
+/// MQTT read/write buffer size. Sized for the largest packet the node sends —
+/// a Home Assistant discovery config (topic ≤96 B + payload ≤384 B + MQTT v5
+/// headers) — with room to spare.
+const MQTT_BUFFER: usize = 640;
 
 /// Background task: keeps the Wi-Fi controller connected, reconnecting on drop.
 #[embassy_executor::task]

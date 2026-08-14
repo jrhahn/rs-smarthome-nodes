@@ -32,6 +32,10 @@ static mut IDLE_WAKES: u32 = 0;
 const FLAG_INIT: u32 = 1 << 0;
 /// Set while weight is above the presence threshold (edge detection).
 const FLAG_PRESENT: u32 = 1 << 1;
+/// Set once the Home Assistant discovery configs have been published in this
+/// power cycle. They are retained on the broker, so re-sending them on every
+/// deep-sleep wake would just spend battery on airtime.
+const FLAG_DISCOVERY: u32 = 1 << 2;
 
 fn flags() -> u32 {
     // Single-word reads/writes of a `Persistable` primitive; no other execution
@@ -76,6 +80,18 @@ pub fn bird_present() -> bool {
 /// Record whether weight is currently on the scale.
 pub fn set_bird_present(present: bool) {
     set_flag(FLAG_PRESENT, present);
+}
+
+/// Whether Home Assistant discovery has already been published since the last
+/// cold power-on. A fresh power-up (battery swap, reflash) clears RTC RAM, so
+/// the configs are re-announced exactly when the broker might have lost them.
+pub fn discovery_published() -> bool {
+    flags() & FLAG_DISCOVERY != 0
+}
+
+/// Record that the discovery configs went out.
+pub fn mark_discovery_published() {
+    set_flag(FLAG_DISCOVERY, true);
 }
 
 /// Idle wake-ups accumulated since the last publish.
