@@ -1,7 +1,7 @@
 //! Concrete ESP32-C3 wiring for the sensor abstraction (#12).
 //!
 //! `sensors/` is HAL-agnostic; this module is where it meets the board. It
-//! brings up the buses this node actually needs (per [`node::NODE`]),
+//! brings up the buses this node actually needs (per [`node::active`]),
 //! constructs the enabled drivers, and offers one `measure_all()` that the
 //! publish path can call without knowing what is populated.
 //!
@@ -36,7 +36,7 @@ use heapless::Vec;
 use log::{info, warn};
 use static_cell::StaticCell;
 
-use crate::node::{Slot, NODE};
+use crate::node::{self, Slot};
 use crate::sensors::{scd41, scd41::Scd41, sds011::Sds011, sht31, sht31::Sht31, Reading, Sensor};
 
 /// SDS011 baud rate (fixed in hardware).
@@ -88,7 +88,7 @@ impl I2cTrait for SharedI2c {
 // --- Peripherals this module may claim ---------------------------------------
 
 /// The peripherals the sensor platform can take over. `main` hands these across
-/// wholesale; which of them are actually touched depends on [`NODE`].
+/// wholesale; which of them are actually touched depends on the identity.
 pub struct Peripherals {
     pub i2c0: I2C0,
     pub sda: GpioPin<6>,
@@ -111,8 +111,11 @@ pub struct Sensors {
 
 impl Sensors {
     /// Bring up only the buses this node needs and construct its drivers.
+    /// [`node::init`] must have run first — the identity decides what exists.
     pub fn new(p: Peripherals) -> Self {
-        let bus = if NODE.uses_i2c() {
+        let node = node::active();
+
+        let bus = if node.uses_i2c() {
             let i2c = I2c::new(p.i2c0, I2cConfig::default())
                 .with_sda(p.sda)
                 .with_scl(p.scl)
@@ -122,16 +125,16 @@ impl Sensors {
             None
         };
 
-        let sht31 = match (bus, NODE.sht31.enabled) {
+        let sht31 = match (bus, node.sht31.enabled) {
             (Some(bus), true) => Some(Sht31::new(bus)),
             _ => None,
         };
-        let scd41 = match (bus, NODE.scd41.enabled) {
-            (Some(bus), true) => Some(Scd41::new(bus, NODE.scd41_mode())),
+        let scd41 = match (bus, node.scd41.enabled) {
+            (Some(bus), true) => Some(Scd41::new(bus, node.scd41_mode())),
             _ => None,
         };
 
-        let sds011 = if NODE.uses_uart() {
+        let sds011 = if node.uses_uart() {
             // A UART that fails to configure is a wiring/build mistake, not a
             // runtime condition, so log it and carry on without the sensor.
             match Uart::new_with_config(
@@ -207,6 +210,8 @@ impl Sensors {
     /// fatal, matching the DS18B20 contract. This is only called on publish
     /// cycles: the SDS011 in particular spends ~20 s spinning its fan here.
     pub async fn measure_all(&mut self, out: &mut Samples) {
+        let node = node::active();
+
         // Once per boot, ahead of the first reading, so the log says *why* a
         // sensor is quiet before it is quiet. A few I²C transactions; the
         // battery node's cheap idle wakes never get here at all.
@@ -216,13 +221,13 @@ impl Sensors {
         }
 
         if let Some(s) = self.sht31.as_mut() {
-            collect(s, NODE.sht31, out).await;
+            collect(s, node.sht31, out).await;
         }
         if let Some(s) = self.scd41.as_mut() {
-            collect(s, NODE.scd41, out).await;
+            collect(s, node.scd41, out).await;
         }
         if let Some(s) = self.sds011.as_mut() {
-            collect(s, NODE.sds011, out).await;
+            collect(s, node.sds011, out).await;
         }
     }
 }

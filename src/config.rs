@@ -18,10 +18,17 @@ use core::time::Duration as CoreDuration;
 
 use embedded_storage::{ReadStorage, Storage};
 use esp_storage::FlashStorage;
+use heapless::String;
 
 /// Flash byte-offset of the config blob. Matches the `nvs` partition in
 /// espflash's default table; we only touch the first sector of it.
 const FLASH_OFFSET: u32 = 0x9000;
+
+/// Second sector of the same partition, holding the node-identity override
+/// (see [`crate::node`]). Deliberately a *separate* blob: provisioning a board
+/// must never be able to disturb the calibration, and the identity is written
+/// once in a board's life while the tuning changes all the time.
+const NODE_OFFSET: u32 = 0xA000;
 
 /// `"BIRD"` little-endian — marks an initialised blob.
 const MAGIC: u32 = 0x4449_5242;
@@ -70,8 +77,11 @@ impl Config {
         idle_secs: 2,
         active_secs: 10,
         tare_token: 0,
-        // Battery nodes sleep by default; mains nodes ignore this flag anyway.
-        deep_sleep: crate::node::NODE.power.is_battery(),
+        // Battery behaviour by default. A mains node ignores the flag entirely
+        // (see `node::PowerProfile`), so this needs no per-node value — which
+        // also keeps `DEFAULT` a plain constant now that the node identity is
+        // resolved at runtime from flash.
+        deep_sleep: true,
         heartbeat_secs: 600, // 10 min
     };
 
@@ -252,6 +262,70 @@ pub fn store(config: &Config) -> Result<(), &'static str> {
     flash
         .write(FLASH_OFFSET, &config.to_bytes())
         .map_err(|_| "nvs write")
+}
+
+// --- Node identity blob ------------------------------------------------------
+// A board is normally built for one node (`NODE=` at compile time), but it can
+// be *provisioned* to another without a rebuild; that override lives here. The
+// layout is magic + version + length + the name + CRC-32, same discipline as the
+// config blob above: anything that doesn't check out reads back as "no
+// override", so a blank or half-written sector simply falls back to the
+// build-time identity.
+
+/// `"NODE"` little-endian.
+const NODE_MAGIC: u32 = 0x4544_4F4E;
+const NODE_VERSION: u8 = 1;
+/// Longest node name we can store (`schlafzimmer` is 12).
+pub const NODE_NAME_MAX: usize = 16;
+/// magic(4) + version(1) + len(1) + pad(2) + name(16) + crc(4).
+const NODE_BLOB_LEN: usize = 4 + 4 + NODE_NAME_MAX + 4;
+
+/// The provisioned node name, or `None` when this board runs as the identity it
+/// was built with.
+pub fn load_node_name() -> Option<String<NODE_NAME_MAX>> {
+    let mut flash = FlashStorage::new();
+    let mut b = [0u8; NODE_BLOB_LEN];
+    flash.read(NODE_OFFSET, &mut b).ok()?;
+
+    if u32::from_le_bytes(b[0..4].try_into().ok()?) != NODE_MAGIC || b[4] != NODE_VERSION {
+        return None;
+    }
+    if u32::from_le_bytes(b[24..28].try_into().ok()?) != crc32(&b[0..24]) {
+        return None;
+    }
+    let len = b[5] as usize;
+    if len == 0 || len > NODE_NAME_MAX {
+        return None;
+    }
+    let name = core::str::from_utf8(&b[8..8 + len]).ok()?;
+    String::try_from(name).ok()
+}
+
+/// Persist a node name, so the next boot comes up as that node. Callers should
+/// have validated the name first — an unknown one would leave the board falling
+/// back to its build-time identity on every boot.
+pub fn store_node_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() || name.len() > NODE_NAME_MAX {
+        return Err("node name length");
+    }
+    let mut b = [0u8; NODE_BLOB_LEN];
+    b[0..4].copy_from_slice(&NODE_MAGIC.to_le_bytes());
+    b[4] = NODE_VERSION;
+    b[5] = name.len() as u8;
+    b[8..8 + name.len()].copy_from_slice(name.as_bytes());
+    let crc = crc32(&b[0..24]);
+    b[24..28].copy_from_slice(&crc.to_le_bytes());
+
+    FlashStorage::new()
+        .write(NODE_OFFSET, &b)
+        .map_err(|_| "node nvs write")
+}
+
+/// Drop the override, returning the board to its build-time identity.
+pub fn clear_node_name() -> Result<(), &'static str> {
+    FlashStorage::new()
+        .write(NODE_OFFSET, &[0u8; NODE_BLOB_LEN])
+        .map_err(|_| "node nvs erase")
 }
 
 /// Standard CRC-32 (IEEE, reflected, poly `0xEDB88820`).

@@ -2,26 +2,29 @@
 //!
 //! One firmware image serves the whole fleet: which sensors are populated, what
 //! the node is called, which MQTT namespace it publishes under and whether it
-//! runs on battery or mains are all picked here, at build time, from the `NODE`
-//! environment variable:
+//! runs on battery or mains all come from the table below.
 //!
-//! ```text
-//! NODE=kueche cargo run --release
-//! ```
+//! Which entry is used is decided in two steps, at boot:
 //!
-//! An unknown name fails the build (const-eval panic) rather than silently
-//! flashing the wrong personality onto a board. The default is `draussen`, the
-//! original bird-feeder scale, whose topics are kept byte-for-byte compatible
-//! with the pre-platform firmware.
+//! 1. the identity the image was **built** for — `NODE=kueche cargo run
+//!    --release`, defaulting to `draussen`, the original bird-feeder scale. An
+//!    unknown name fails the build (const-eval panic) rather than silently
+//!    flashing the wrong personality onto a board;
+//! 2. a **provisioned** name stored in flash, which overrides it. That is what
+//!    lets one generic image be flashed to every board and each one told what it
+//!    is afterwards, over MQTT, without a rebuild — see [`provision_topic`].
 //!
-//! Build-time selection is deliberate for now (issue #12: "cargo features to
-//! start; NVS later") — the sensor set decides which peripherals get
-//! initialised, so it is not something a running node can change anyway.
+//! Because the sensor set decides which peripherals get initialised, the
+//! identity is read once at boot ([`init`]) and then fixed for the run; a node
+//! that is re-provisioned while running reboots into its new self.
 
 use core::fmt::Write as _;
+use core::ptr::{addr_of, addr_of_mut};
 
 use heapless::String;
+use log::{info, warn};
 
+use crate::config;
 use crate::sensors::scd41::Mode as Scd41Mode;
 
 /// How a node is powered, which decides whether it deep-sleeps between samples
@@ -251,30 +254,110 @@ const BAD: NodeConfig = NodeConfig {
     legacy_weight_topic: None,
 };
 
-/// The node this image is built for.
-pub const NODE: NodeConfig = select(match option_env!("NODE") {
+/// Names accepted by `NODE=` and by provisioning, for error messages.
+pub const KNOWN_NODES: &str = "draussen, schlafzimmer, wohnzimmer, kueche, bad";
+
+/// The node this image was **built** for — the fallback when flash carries no
+/// provisioned identity. Use [`active`] for the identity actually in force.
+pub const BUILT_AS: NodeConfig = select(match option_env!("NODE") {
     Some(s) => s,
     None => "draussen",
 });
+
+/// Look a node up by name. Shared by the build-time selection and by runtime
+/// provisioning, so both accept exactly the same set of names.
+pub const fn by_name(id: &str) -> Option<NodeConfig> {
+    if str_eq(id, "draussen") {
+        Some(DRAUSSEN)
+    } else if str_eq(id, "schlafzimmer") {
+        Some(SCHLAFZIMMER)
+    } else if str_eq(id, "wohnzimmer") {
+        Some(WOHNZIMMER)
+    } else if str_eq(id, "kueche") {
+        Some(KUECHE)
+    } else if str_eq(id, "bad") {
+        Some(BAD)
+    } else {
+        None
+    }
+}
 
 /// Map the `NODE` build-time name onto a config. Unknown names panic during
 /// const-eval, i.e. the build fails with the typo instead of producing a
 /// plausible-looking image for the wrong room.
 const fn select(id: &str) -> NodeConfig {
-    if str_eq(id, "draussen") {
-        DRAUSSEN
-    } else if str_eq(id, "schlafzimmer") {
-        SCHLAFZIMMER
-    } else if str_eq(id, "wohnzimmer") {
-        WOHNZIMMER
-    } else if str_eq(id, "kueche") {
-        KUECHE
-    } else if str_eq(id, "bad") {
-        BAD
-    } else {
-        panic!("unknown NODE; expected one of: draussen, schlafzimmer, wohnzimmer, kueche, bad")
+    match by_name(id) {
+        Some(cfg) => cfg,
+        None => {
+            panic!("unknown NODE; expected one of: draussen, schlafzimmer, wohnzimmer, kueche, bad")
+        }
     }
 }
+
+// --- The identity in force ---------------------------------------------------
+
+/// The node this board is running as. Written once by [`init`] before anything
+/// reads it, then only read — the same single-context, single-word discipline
+/// [`crate::state`] uses for its RTC-RAM cells.
+static mut ACTIVE: NodeConfig = BUILT_AS;
+
+/// The identity in force. Cheap: [`NodeConfig`] is `Copy` and lives in RAM.
+pub fn active() -> NodeConfig {
+    unsafe { addr_of!(ACTIVE).read() }
+}
+
+/// Resolve the identity for this boot: a provisioned name in flash wins over
+/// the one the image was built with. Call once, early in `main`, before any
+/// peripheral is set up — the sensor set decides which buses come up at all.
+///
+/// A stored name that is not in the table is reported and ignored rather than
+/// obeyed, so a bad provisioning message degrades to the build-time identity
+/// instead of a board that does nothing.
+pub fn init() {
+    let Some(stored) = config::load_node_name() else {
+        return;
+    };
+    match by_name(&stored) {
+        Some(cfg) => {
+            unsafe { addr_of_mut!(ACTIVE).write(cfg) };
+            info!("provisioned as node '{}' (from flash)", stored);
+        }
+        None => warn!(
+            "flash names unknown node '{}'; falling back to build-time '{}'. Expected one of: {}",
+            stored, BUILT_AS.id, KNOWN_NODES
+        ),
+    }
+}
+
+/// Topic a board listens on to be told what it is:
+/// `smarthome/provision/<mac>`, with the MAC as lowercase hex, no separators.
+///
+/// Keyed by MAC rather than by node name for the obvious chicken-and-egg
+/// reason — a board that does not yet know which node it is still knows its own
+/// MAC. Publish **retained** so a node picks its identity up whenever it next
+/// comes online:
+///
+/// ```text
+/// mosquitto_pub -h <broker> -r -t smarthome/provision/a1b2c3d4e5f6 -m kueche
+/// ```
+///
+/// The payload `default` clears the override, returning the board to the
+/// identity it was flashed with.
+pub fn provision_topic(mac: [u8; 6]) -> String<64> {
+    let mut t = String::new();
+    let _ = write!(t, "{}", PROVISION_PREFIX);
+    for byte in mac {
+        let _ = write!(t, "{:02x}", byte);
+    }
+    t
+}
+
+/// Fleet-wide provisioning namespace — deliberately not per-node, since the
+/// point is to reach a board whose identity is not settled yet.
+pub const PROVISION_PREFIX: &str = "smarthome/provision/";
+
+/// Payload that clears a provisioned identity.
+pub const PROVISION_RESET: &str = "default";
 
 /// `str` equality usable in const context (`==` on `&str` is not const in 1.83).
 const fn str_eq(a: &str, b: &str) -> bool {
@@ -296,6 +379,12 @@ const _: () = {
     assert!(str_eq("bad", "bad"));
     assert!(!str_eq("bad", "bat"));
     assert!(!str_eq("bad", "bads"));
+    // Every name must round-trip through the lookup, and nothing else may.
+    assert!(by_name("kueche").is_some());
+    assert!(by_name("Kueche").is_none());
+    assert!(by_name("").is_none());
+    // Node names have to fit the flash slot they are provisioned into.
+    assert!("schlafzimmer".len() <= crate::config::NODE_NAME_MAX);
     // The fleet's power profiles decide which sensors are even legal: the
     // SDS011 fan and continuous CO₂ both need mains.
     assert!(!KUECHE.power.is_battery());

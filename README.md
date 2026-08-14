@@ -30,7 +30,9 @@ retained calibration/tuning back from Home Assistant and persists it to flash.
 ## The fleet
 
 Pick a node with `NODE=` at build time (`src/node.rs`); an unknown name fails
-the build rather than flashing the wrong personality onto a board.
+the build rather than flashing the wrong personality onto a board. A board can
+also be **provisioned** to another identity afterwards, without a rebuild — see
+[below](#provisioning-a-board).
 
 | `NODE=` | Room | Sensors | Power |
 | --- | --- | --- | --- |
@@ -39,6 +41,37 @@ the build rather than flashing the wrong personality onto a board.
 | `wohnzimmer` | Wohnzimmer | SCD41 | mains |
 | `kueche` | Küche | SDS011 | mains (fan) |
 | `bad` | Bad | SHT31-D | mains |
+
+### Provisioning a board
+
+The `NODE=` value is only the identity a board *starts* with. To repurpose one —
+or to flash the whole fleet with a single image and sort out which is which
+afterwards — publish its node name **retained** to the board's provisioning
+topic, which is keyed by MAC (the one name a board knows before it knows
+anything else) and printed on every boot:
+
+```
+node 'scale' (Draußen) booted, battery profile
+provision topic: smarthome/provision/a1b2c3d4e5f6
+```
+
+```bash
+# Tell that board it is the kitchen node
+mosquitto_pub -h <broker-ip> -r -t smarthome/provision/a1b2c3d4e5f6 -m kueche
+
+# …and back to whatever it was flashed as
+mosquitto_pub -h <broker-ip> -r -t smarthome/provision/a1b2c3d4e5f6 -m default
+```
+
+The node picks the message up the next time it is online for a publish, stores
+the name in flash and restarts into it — the sensor set decides which buses come
+up, so becoming a different node means a reboot. The message being retained is
+the point: a battery node that is asleep gets it whenever it next wakes. It is
+re-delivered on every connect, so the firmware only writes flash when the value
+actually changes, and an unknown name is logged and ignored rather than obeyed.
+
+The identity lives in its own flash sector, separate from the calibration blob —
+provisioning a board never disturbs its tare or scale factor.
 
 **Power profiles** decide the loop: *battery* nodes cold-boot out of deep sleep,
 measure, publish only when there is something to say, and sleep again. *Mains*

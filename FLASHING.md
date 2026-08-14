@@ -68,7 +68,9 @@ NODE=kueche cargo build --release
 ```
 
 > Each node is a **separate build**, so rebuild before flashing a different
-> board — the ELF path is the same for all of them.
+> board — the ELF path is the same for all of them. Or flash the same image
+> everywhere and tell each board what it is afterwards; see
+> [§7](#7-provisioning-a-board-without-reflashing).
 
 `espflash` reads that ELF directly; there's no separate objcopy/bin step.
 
@@ -258,3 +260,51 @@ the [README](README.md#home-assistant-integration) for calibrating the scale.
 > ever need to force it without a reflash, clear the retained configs with
 > `mosquitto_pub -h <broker-ip> -t 'homeassistant/sensor/<node>/<key>/config' -r -n`
 > and power-cycle the board.
+
+---
+
+## 7. Provisioning a board without reflashing
+
+`NODE=` is only the identity a board *starts* with. Any board can be told to
+become another node over MQTT — useful to repurpose one, to swap in a spare, or
+to flash the whole fleet with one image and sort out which is which afterwards.
+
+Every boot prints the topic to address that board on. It is keyed by MAC,
+because that is the only name a board is sure of before it knows anything else:
+
+```
+node 'scale' (Draußen) booted, battery profile
+provision topic: smarthome/provision/a1b2c3d4e5f6
+```
+
+```bash
+# Become the kitchen node
+mosquitto_pub -h <broker-ip> -r -t smarthome/provision/a1b2c3d4e5f6 -m kueche
+
+# Go back to the identity it was flashed with
+mosquitto_pub -h <broker-ip> -r -t smarthome/provision/a1b2c3d4e5f6 -m default
+```
+
+**Publish it retained** (`-r`). The node only looks while it is online for a
+publish, so for a sleeping battery node the retained message is what gets the
+change delivered on its next wake-up. Then:
+
+```
+provisioned as node 'kueche'; restarting
+…
+node 'kueche' (Küche) booted, mains profile
+provisioned as node 'kueche' (from flash)
+```
+
+Notes:
+
+- The restart is deliberate — the sensor set decides which buses are brought up,
+  which happens during boot.
+- A name the firmware doesn't know is logged and ignored, and the board carries
+  on as it was: `provisioning asked for unknown node 'kuche'; expected one of: …`
+- The retained message is re-delivered on every connect, so the firmware writes
+  flash only when the value actually changes.
+- The identity lives in its own flash sector, so provisioning a board never
+  disturbs a scale's stored tare/calibration.
+- Remember to clear the retained message (`-r -n`) if you later hand the board
+  to a different room by reflashing, or it will provision itself back.

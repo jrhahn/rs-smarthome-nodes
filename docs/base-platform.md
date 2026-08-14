@@ -59,6 +59,33 @@ collide — the outdoor node's DS18B20 keeps `temperature` while its SHT31-D
 publishes `air_temperature` / `air_humidity`. An unknown `NODE` value fails the
 build in const-eval.
 
+### Which node am I? (build-time default + NVS override)
+
+The identity is resolved once at boot, before any peripheral is touched, since
+the sensor set decides which buses come up at all:
+
+1. `BUILT_AS` — the `NODE=` the image was compiled with (default `draussen`);
+2. a name stored in flash, which overrides it.
+
+`node::active()` returns the result. It is a plain `Copy` struct read from a
+`static`, written once by `node::init()` — the same single-context discipline
+`state.rs` uses for its RTC-RAM cells, which is sound here because nothing runs
+before `init()` and nothing writes after it.
+
+The override is set over MQTT on `smarthome/provision/<mac>` (retained), keyed
+by MAC because that is the only name an unprovisioned board is sure of. A valid,
+*different* name is written to flash and the board restarts into it; anything
+else — an unknown name, or the name it already answers to — is ignored without
+touching flash, which matters because a retained message is re-delivered on
+every single connect.
+
+The identity blob lives in the **second** NVS sector (`0xA000`), separate from
+the calibration blob at `0x9000`: provisioning must never be able to disturb a
+scale's tare, and the two have completely different write frequencies. Same
+discipline as the config blob — magic, version, length, CRC-32 — so a blank,
+erased, corrupt or half-written sector reads back as "no override" and the board
+falls back to what it was built as.
+
 The publish path iterates whatever the node produced (`Samples`) instead of
 hard-coded HX711/DS18B20 calls. The HX711 and DS18B20 keep their own read paths
 — the first because its reading drives the tare baseline and presence edge, the
@@ -124,6 +151,6 @@ single-shot on battery.
 
 ## Known gaps
 
-- Node selection is build-time only (issue #12 explicitly starts there); moving
-  it to NVS would let one image be provisioned per board without a rebuild.
+- Provisioning needs the board to reach the broker, so a node with the wrong
+  Wi-Fi credentials still needs a reflash. Credentials remain build-time.
 - The SDS011 warm-up (20 s) is a fixed constant rather than adaptive.
