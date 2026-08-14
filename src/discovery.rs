@@ -19,7 +19,7 @@ use heapless::{String, Vec};
 
 use crate::config::Config;
 use crate::ds18b20;
-use crate::node::{Slot, NODE};
+use crate::node::{self, Slot};
 use crate::sensors::{scale, scd41, sds011, sht31, EntityDescriptor};
 
 /// Upper bound on entities a node can expose (weight, probe temperature,
@@ -62,14 +62,15 @@ pub struct Availability {
 /// The availability policy for this node, given the live config (a battery node
 /// publishes on its heartbeat, a mains node on its fixed cadence).
 pub fn availability(cfg: &Config) -> Availability {
-    let period = if NODE.power.is_battery() {
+    let node = node::active();
+    let period = if node.power.is_battery() {
         cfg.heartbeat_secs
     } else {
         // Clamped to u32 seconds; no node samples anywhere near that rarely.
-        NODE.sample_secs.min(u32::MAX as u64) as u32
+        node.sample_secs.min(u32::MAX as u64) as u32
     };
     Availability {
-        lwt: NODE.uses_lwt(),
+        lwt: node.uses_lwt(),
         expire_after: period.saturating_mul(MISSED_ROUNDS).max(MIN_EXPIRY_SECS),
     }
 }
@@ -83,13 +84,14 @@ pub struct Entity {
 
 /// Every entity this node exposes, in publish order.
 pub fn entities() -> Vec<Entity, MAX_ENTITIES> {
+    let node = node::active();
     let mut out = Vec::new();
     for (slot, descriptors) in [
-        (NODE.scale, scale::DESCRIPTORS),
-        (NODE.ds18b20, ds18b20::DESCRIPTORS),
-        (NODE.sht31, sht31::DESCRIPTORS),
-        (NODE.scd41, scd41::DESCRIPTORS),
-        (NODE.sds011, sds011::DESCRIPTORS),
+        (node.scale, scale::DESCRIPTORS),
+        (node.ds18b20, ds18b20::DESCRIPTORS),
+        (node.sht31, sht31::DESCRIPTORS),
+        (node.scd41, scd41::DESCRIPTORS),
+        (node.sds011, sds011::DESCRIPTORS),
     ] {
         if !slot.enabled {
             continue;
@@ -103,11 +105,12 @@ pub fn entities() -> Vec<Entity, MAX_ENTITIES> {
 
 /// `homeassistant/sensor/<node>/<prefix><key>/config`.
 pub fn config_topic(entity: &Entity) -> String<96> {
+    let node = node::active();
     let mut t = String::new();
     let _ = write!(
         t,
         "{}/sensor/{}/{}{}/config",
-        PREFIX, NODE.id, entity.slot.prefix, entity.desc.key
+        PREFIX, node.id, entity.slot.prefix, entity.desc.key
     );
     t
 }
@@ -116,6 +119,7 @@ pub fn config_topic(entity: &Entity) -> String<96> {
 /// the buffer. Truncated JSON would be worse than no entity at all: Home
 /// Assistant would keep re-reading a broken retained config on every restart.
 pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<String<384>> {
+    let node = node::active();
     let (slot, desc) = (entity.slot, entity.desc);
     let mut p = String::new();
     write!(
@@ -137,8 +141,8 @@ pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<String<38
         } else {
             ""
         },
-        ns = NODE.namespace,
-        id = NODE.id,
+        ns = node.namespace,
+        id = node.id,
         label = slot.label,
         // A slot label like "Luft" prefixes the entity name; an empty label must
         // not leave a leading space behind.
@@ -149,7 +153,7 @@ pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<String<38
         unit = desc.unit,
         dev_cla = desc.device_class,
         stat_cla = desc.state_class,
-        dev_name = NODE.name,
+        dev_name = node.name,
         mf = MANUFACTURER,
         mdl = MODEL,
     )

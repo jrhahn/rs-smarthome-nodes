@@ -1,9 +1,10 @@
 //! rs-smarthome-nodes — async firmware for a fleet of ESP32-C3 sensor nodes.
 //!
-//! One image serves every node; `NODE=<name>` at build time picks which sensors
-//! are populated, what the node is called, and how it is powered (see
-//! [`node`]). It started life as a battery bird-feeder scale, and that node
-//! (`NODE=draussen`, the default) still drives the flow described below.
+//! One image serves every node: which sensors are populated, what the node is
+//! called and how it is powered come from [`node`], picked by `NODE=<name>` at
+//! build time or by a provisioned identity in flash. It started life as a
+//! battery bird-feeder scale, and that node (`draussen`, the default) still
+//! drives the flow described below.
 //!
 //! **Battery profile** — to catch short bird visits without keeping the radio
 //! awake, the firmware polls by cold-booting out of deep sleep on a short
@@ -47,8 +48,10 @@ use embassy_time::{with_timeout, Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
+    efuse::Efuse,
     gpio::{Input, Level, Output, OutputOpenDrain, Pull},
     peripherals::{LPWR, RADIO_CLK, RNG, TIMG1, WIFI},
+    reset::software_reset,
     rng::Rng,
     rtc_cntl::{sleep::TimerWakeupSource, Rtc},
     timer::timg::TimerGroup,
@@ -70,7 +73,6 @@ use rust_mqtt::{
 use config::Config;
 use ds18b20::Ds18b20;
 use hx711::Hx711;
-use node::NODE;
 use platform::{Samples, Sensors};
 
 /// The concrete network-stack type used throughout the firmware.
@@ -148,7 +150,7 @@ const _: () = {
 };
 
 // --- Sampling / detection tuning -------------------------------------------
-// Topics, the client id and the sensor set come from [`node::NODE`]; the
+// Topics, the client id and the sensor set come from [`node::active`]; the
 // presence threshold and the idle/active poll intervals live in
 // [`config::Config`], persisted in flash and tunable live from Home Assistant.
 
@@ -213,15 +215,27 @@ async fn main(spawner: Spawner) {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
 
+    // Who am I? A provisioned identity in flash wins over the one this image was
+    // built with. Must happen before any peripheral is touched: the sensor set
+    // decides which buses come up at all.
+    node::init();
+    let node = node::active();
+
     info!(
         "node '{}' ({}) booted, {} profile",
-        NODE.id,
-        NODE.name,
-        if NODE.power.is_battery() {
+        node.id,
+        node.name,
+        if node.power.is_battery() {
             "battery"
         } else {
             "mains"
         }
+    );
+    // Say where to reach this board if it needs to be told what it is; the MAC
+    // is the only name it is sure of before provisioning.
+    info!(
+        "provision topic: {}",
+        node::provision_topic(Efuse::read_base_mac_address())
     );
 
     // Runtime config from flash (calibration + tuning), or defaults on a blank
@@ -241,7 +255,7 @@ async fn main(spawner: Spawner) {
     // The I²C and UART pins live in `platform.rs` alongside their drivers.
     // `DT` is pulled up so a *disconnected* amp reads permanently "not ready"
     // and times out cleanly instead of returning floating garbage.
-    let scale = NODE.scale.enabled.then(|| {
+    let scale = node.scale.enabled.then(|| {
         let dt = Input::new(peripherals.GPIO3, Pull::Up);
         let sck = Output::new(peripherals.GPIO2, Level::Low);
         Hx711::new(dt, sck)
@@ -249,7 +263,7 @@ async fn main(spawner: Spawner) {
 
     // DS18B20 open-drain 1-Wire line on D2 / GPIO4 (internal pull-up backs the
     // external 4.7 kΩ).
-    let probe = NODE.ds18b20.enabled.then(|| {
+    let probe = node.ds18b20.enabled.then(|| {
         Ds18b20::new(OutputOpenDrain::new(
             peripherals.GPIO4,
             Level::High,
@@ -282,7 +296,7 @@ async fn main(spawner: Spawner) {
     // Assistant can hold one awake (`config/deep_sleep`) for bench testing on
     // USB, where deep sleep just churns the serial monitor. Both branches
     // diverge, so exactly one of them runs per boot.
-    if !NODE.power.is_battery() || !cfg.deep_sleep {
+    if !node.power.is_battery() || !cfg.deep_sleep {
         run_awake(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
     }
 
@@ -298,9 +312,11 @@ async fn run_battery(
     board: &mut Board<'_>,
     cfg: Config,
 ) -> ! {
+    let node = node::active();
+
     // A node with no load cell has no presence logic to run: sample everything
     // it does have, publish, and go back to sleep.
-    if !NODE.scale.enabled {
+    if !node.scale.enabled {
         let samples = collect_samples(None, &cfg, board).await;
         let cfg = publish(spawner, radio, &samples, state::baseline(), cfg).await;
         enter_deep_sleep(lpwr, cfg.idle_interval());
@@ -386,6 +402,8 @@ async fn run_awake(
     board: &mut Board<'_>,
     mut cfg: Config,
 ) -> ! {
+    let node = node::active();
+
     let stack = match bring_up_wifi(spawner, radio).await {
         Ok(s) => s,
         Err(e) => {
@@ -415,7 +433,7 @@ async fn run_awake(
             if !present {
                 state::set_baseline(baseline + (delta >> BASELINE_DRIFT_SHIFT));
             }
-        } else if NODE.scale.enabled {
+        } else if node.scale.enabled {
             warn!("HX711 not responding");
         }
 
@@ -443,7 +461,7 @@ async fn run_awake(
 
         // Honour a live switch back to deep sleep immediately (battery only —
         // a mains node has nothing to gain and CO₂/PM continuity to lose).
-        if NODE.power.is_battery() && cfg.deep_sleep {
+        if node.power.is_battery() && cfg.deep_sleep {
             info!("deep sleep re-enabled — sleeping");
             enter_deep_sleep(lpwr, cfg.idle_interval());
         }
@@ -456,10 +474,11 @@ async fn run_awake(
 /// per-node cadence, a battery node kept awake for bench testing follows the
 /// live-tunable idle interval so it still feels like the sleeping one.
 fn sample_period_secs(cfg: &Config) -> u64 {
-    if NODE.power.is_battery() {
+    let node = node::active();
+    if node.power.is_battery() {
         cfg.idle_secs.max(1) as u64
     } else {
-        NODE.sample_secs.max(1)
+        node.sample_secs.max(1)
     }
 }
 
@@ -479,13 +498,14 @@ async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
 /// load-cell reading already taken by the caller (it drives the presence logic),
 /// converted to grams here with the stored calibration.
 async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) -> Samples {
+    let node = node::active();
     let mut samples = Samples::new();
 
     if let Some(raw) = raw {
         let mut grams = heapless::String::new();
         cfg.write_grams(&mut grams, raw);
         info!("weight = {} g", grams);
-        platform::push_sample(&mut samples, NODE.scale, "weight", grams);
+        platform::push_sample(&mut samples, node.scale, "weight", grams);
     }
 
     if let Some(probe) = board.probe.as_mut() {
@@ -494,7 +514,7 @@ async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) 
                 let mut value = heapless::String::new();
                 ds18b20::write_temp_c(&mut value, raw_temp);
                 info!("DS18B20 = {} °C", value);
-                platform::push_sample(&mut samples, NODE.ds18b20, "temperature", value);
+                platform::push_sample(&mut samples, node.ds18b20, "temperature", value);
             }
             None => warn!("DS18B20 not responding; skipping temperature"),
         }
@@ -649,6 +669,7 @@ async fn publish_samples(
     baseline: i32,
     cfg: Config,
 ) -> Result<Config, &'static str> {
+    let node = node::active();
     let mut rx_buffer = [0u8; 1536];
     let mut tx_buffer = [0u8; 1536];
     let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
@@ -660,8 +681,8 @@ async fn publish_samples(
         .map_err(|_| "tcp connect")?;
 
     // Declared before the client config that borrows them, so they outlive it.
-    let client_id = NODE.client_id();
-    let availability_topic = NODE.availability_topic();
+    let client_id = node.client_id();
+    let availability_topic = node.availability_topic();
     let mut mqtt_config: ClientConfig<'_, 5, _> = ClientConfig::new(
         rust_mqtt::client::client_config::MqttVersion::MQTTv5,
         CountingRng(20_000),
@@ -670,7 +691,7 @@ async fn publish_samples(
     // Last will: if this node drops off without saying goodbye, the broker tells
     // Home Assistant. Only mains nodes register one — a battery node spends most
     // of its life legitimately disconnected (see `NodeConfig::uses_lwt`).
-    if NODE.uses_lwt() {
+    if node.uses_lwt() {
         mqtt_config.add_will(&availability_topic, discovery::PAYLOAD_OFFLINE, true);
     }
     if let Some(user) = MQTT_USER {
@@ -700,7 +721,7 @@ async fn publish_samples(
 
     // Retract the will's `offline` now that we are back. Retained, so Home
     // Assistant sees the node as available even if it restarts meanwhile.
-    if NODE.uses_lwt() {
+    if node.uses_lwt() {
         client
             .send_message(
                 &availability_topic,
@@ -735,7 +756,7 @@ async fn publish_samples(
         }
         if ok {
             state::mark_discovery_published();
-            info!("published Home Assistant discovery for node '{}'", NODE.id);
+            info!("published Home Assistant discovery for node '{}'", node.id);
         } else {
             warn!("discovery publish failed; will retry on the next connect");
         }
@@ -743,7 +764,7 @@ async fn publish_samples(
 
     // --- State ---------------------------------------------------------------
     for sample in samples {
-        let topic = NODE.state_topic(sample.prefix, sample.reading.key);
+        let topic = node.state_topic(sample.prefix, sample.reading.key);
         client
             .send_message(
                 &topic,
@@ -757,7 +778,7 @@ async fn publish_samples(
 
         // Mirror the weight to the pre-discovery topic while the hand-declared
         // Home Assistant entity is still around.
-        if let (Some(legacy), "weight") = (NODE.legacy_weight_topic, sample.reading.key) {
+        if let (Some(legacy), "weight") = (node.legacy_weight_topic, sample.reading.key) {
             client
                 .send_message(
                     legacy,
@@ -770,28 +791,38 @@ async fn publish_samples(
         }
     }
 
-    // Pull retained config from Home Assistant. We're already online, so this is
-    // the cheap moment to pick up any tuning/calibration the user changed.
-    // Retained messages arrive right after the SUBACK, so we read with a short
-    // per-message window and stop on the first timeout (nothing more waiting),
-    // capped by a hard message count as a backstop. Best-effort: config sync
-    // failures never fail the publish.
+    // Pull retained config from Home Assistant, and the retained provisioning
+    // message if this board has been told what it is. We're already online, so
+    // this is the cheap moment for both. Retained messages arrive right after
+    // the SUBACK, so we read with a short per-message window and stop on the
+    // first timeout (nothing more waiting), capped by a hard message count as a
+    // backstop. Best-effort: a failed sync never fails the publish.
     let mut updated = cfg;
-    let config_prefix = NODE.config_prefix();
-    if client
-        .subscribe_to_topic(&NODE.config_wildcard())
+    let mut reprovision = None;
+    let config_prefix = node.config_prefix();
+    let provision_topic = node::provision_topic(Efuse::read_base_mac_address());
+
+    // Two separate `let`s so neither subscription can be short-circuited away;
+    // either one succeeding is reason enough to drain.
+    let config_sub = client
+        .subscribe_to_topic(&node.config_wildcard())
         .await
-        .is_ok()
-    {
+        .is_ok();
+    let provision_sub = client.subscribe_to_topic(&provision_topic).await.is_ok();
+
+    if config_sub || provision_sub {
         for _ in 0..12 {
             match with_timeout(CONFIG_RECV_WINDOW, client.receive_message()).await {
                 Ok(Ok((topic, payload))) => {
-                    if let (Some(key), Ok(value)) = (
-                        topic.strip_prefix(config_prefix.as_str()),
-                        core::str::from_utf8(payload),
-                    ) {
-                        if updated.apply(key, value.trim(), baseline) {
-                            info!("config: {} = {}", key, value.trim());
+                    let Ok(value) = core::str::from_utf8(payload) else {
+                        continue;
+                    };
+                    let value = value.trim();
+                    if topic == provision_topic {
+                        reprovision = provision_request(value);
+                    } else if let Some(key) = topic.strip_prefix(config_prefix.as_str()) {
+                        if updated.apply(key, value, baseline) {
+                            info!("config: {} = {}", key, value);
                         }
                     }
                 }
@@ -808,7 +839,88 @@ async fn publish_samples(
     // fails, the worst case is a spurious `offline` that the next round clears.
     let _ = client.disconnect().await;
 
+    // Becoming a different node means rebooting, so this is the last thing we
+    // do with the connection. Any tuning picked up in the loop above is dropped
+    // by the restart — it is retained on the broker and comes back on the next
+    // connect, whereas the identity is what the whole boot depends on.
+    if let Some(request) = reprovision {
+        apply_provisioning(request);
+    }
+
     Ok(updated)
+}
+
+/// What a retained provisioning message asks this board to become.
+enum Provision {
+    /// Run as this node from the next boot (already checked against the table).
+    Become(heapless::String<{ config::NODE_NAME_MAX }>),
+    /// Drop the stored override and go back to the built-in identity.
+    Reset,
+}
+
+/// Interpret a provisioning payload, or `None` if there is nothing to do.
+///
+/// "Nothing to do" is the common case and matters: the message is retained, so
+/// it is re-delivered on *every* connect. Only an actual change may reach flash,
+/// or a board would rewrite its identity sector for the rest of its life.
+fn provision_request(value: &str) -> Option<Provision> {
+    let node = node::active();
+
+    // A zero-length payload is how a retained message is cleared, not a request.
+    if value.is_empty() {
+        return None;
+    }
+
+    if value == node::PROVISION_RESET {
+        return config::load_node_name()
+            .is_some()
+            .then_some(Provision::Reset);
+    }
+
+    match node::by_name(value) {
+        // Compared by node id, not by name: the outdoor node answers to
+        // `draussen` but its id — and its topics — say `scale`.
+        Some(cfg) if cfg.id == node.id => None,
+        Some(_) => Some(Provision::Become(heapless::String::try_from(value).ok()?)),
+        None => {
+            warn!(
+                "provisioning asked for unknown node '{}'; expected one of: {}",
+                value,
+                node::KNOWN_NODES
+            );
+            None
+        }
+    }
+}
+
+/// Store the new identity and restart into it.
+///
+/// A reboot rather than an in-place switch: the sensor set decides which buses
+/// are initialised, which happens once during boot. Re-doing that at runtime
+/// would be a lot of machinery for something that happens once in a board's
+/// life. A failed flash write is logged and ignored — the board keeps running as
+/// whatever it currently is, and the retained message is still there to be
+/// applied on the next connect.
+fn apply_provisioning(request: Provision) {
+    let stored = match &request {
+        Provision::Become(name) => config::store_node_name(name),
+        Provision::Reset => config::clear_node_name(),
+    };
+
+    match (stored, &request) {
+        (Ok(()), Provision::Become(name)) => {
+            info!("provisioned as node '{}'; restarting", name);
+            software_reset();
+        }
+        (Ok(()), Provision::Reset) => {
+            info!(
+                "provisioning cleared; restarting as built-in node '{}'",
+                node::BUILT_AS.id
+            );
+            software_reset();
+        }
+        (Err(e), _) => warn!("provisioning write failed: {}; staying as is", e),
+    }
 }
 
 /// MQTT read/write buffer size. Sized for the largest packet the node sends —
