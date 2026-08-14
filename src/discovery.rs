@@ -17,6 +17,7 @@ use core::fmt::Write as _;
 
 use heapless::{String, Vec};
 
+use crate::config::Config;
 use crate::ds18b20;
 use crate::node::{Slot, NODE};
 use crate::sensors::{scale, scd41, sds011, sht31, EntityDescriptor};
@@ -30,6 +31,48 @@ pub const PREFIX: &str = "homeassistant";
 /// Manufacturer/model reported for the device card in Home Assistant.
 const MANUFACTURER: &str = "rs-smarthome-nodes";
 const MODEL: &str = "ESP32-C3";
+
+/// Availability payloads. These are Home Assistant's defaults, so the discovery
+/// config does not have to name them.
+pub const PAYLOAD_ONLINE: &[u8] = b"online";
+pub const PAYLOAD_OFFLINE: &[u8] = b"offline";
+
+/// Never let a node be declared missing sooner than this, however tight the
+/// configured publish interval is — one lost packet must not blank the entity.
+const MIN_EXPIRY_SECS: u32 = 120;
+/// Missed publish rounds tolerated before Home Assistant calls a node missing.
+/// One miss is routine (a lost packet, a failed Wi-Fi join); three in a row is
+/// a node that has actually stopped.
+const MISSED_ROUNDS: u32 = 3;
+
+/// How Home Assistant learns that a node has gone quiet. The two mechanisms are
+/// complementary, so a mains node uses both:
+///
+/// * `lwt` — the broker publishes `offline` to the node's availability topic
+///   when the connection drops unexpectedly. Immediate, but silent if the node
+///   dies while it is (legitimately) not connected.
+/// * `expire_after` — Home Assistant invalidates the values itself when nothing
+///   arrives in time. Slower, but catches the node that dies between rounds,
+///   which is *every* dead battery node.
+pub struct Availability {
+    pub lwt: bool,
+    pub expire_after: u32,
+}
+
+/// The availability policy for this node, given the live config (a battery node
+/// publishes on its heartbeat, a mains node on its fixed cadence).
+pub fn availability(cfg: &Config) -> Availability {
+    let period = if NODE.power.is_battery() {
+        cfg.heartbeat_secs
+    } else {
+        // Clamped to u32 seconds; no node samples anywhere near that rarely.
+        NODE.sample_secs.min(u32::MAX as u64) as u32
+    };
+    Availability {
+        lwt: NODE.uses_lwt(),
+        expire_after: period.saturating_mul(MISSED_ROUNDS).max(MIN_EXPIRY_SECS),
+    }
+}
 
 /// One Home Assistant entity: a descriptor plus the node-level naming from its
 /// [`Slot`].
@@ -72,7 +115,7 @@ pub fn config_topic(entity: &Entity) -> String<96> {
 /// The retained discovery payload for one entity, or `None` if it would not fit
 /// the buffer. Truncated JSON would be worse than no entity at all: Home
 /// Assistant would keep re-reading a broken retained config on every restart.
-pub fn config_payload(entity: &Entity) -> Option<String<384>> {
+pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<String<384>> {
     let (slot, desc) = (entity.slot, entity.desc);
     let mut p = String::new();
     write!(
@@ -84,7 +127,16 @@ pub fn config_payload(entity: &Entity) -> Option<String<384>> {
          \"unit_of_meas\":\"{unit}\",\
          \"dev_cla\":\"{dev_cla}\",\
          \"stat_cla\":\"{stat_cla}\",\
+         \"exp_aft\":{expire},{avty}\
          \"dev\":{{\"ids\":[\"{id}\"],\"name\":\"{dev_name}\",\"mf\":\"{mf}\",\"mdl\":\"{mdl}\"}}}}",
+        expire = avail.expire_after,
+        // The availability topic is relative to `~`, and only exists on a node
+        // whose last-will keeps it honest.
+        avty = if avail.lwt {
+            "\"avty_t\":\"~/status\","
+        } else {
+            ""
+        },
         ns = NODE.namespace,
         id = NODE.id,
         label = slot.label,

@@ -134,6 +134,22 @@ impl NodeConfig {
         t
     }
 
+    /// Whether this node backs its Home Assistant availability with an MQTT
+    /// last-will.
+    ///
+    /// Only mains nodes do. A battery node is *meant* to be disconnected almost
+    /// all the time — it wakes, publishes, and drops the link again — so a will
+    /// would mark it offline seconds after every reading. Those nodes rely on
+    /// the discovery `expire_after` instead (see [`crate::discovery`]).
+    pub const fn uses_lwt(&self) -> bool {
+        !self.power.is_battery()
+    }
+
+    /// Retained topic carrying `online` / `offline` for a node with a last-will.
+    pub fn availability_topic(&self) -> String<80> {
+        self.state_topic("", "status")
+    }
+
     /// Prefix under which Home Assistant publishes retained tuning values.
     pub fn config_prefix(&self) -> String<64> {
         let mut t = String::new();

@@ -94,6 +94,12 @@ pub fn mark_discovery_published() {
     set_flag(FLAG_DISCOVERY, true);
 }
 
+/// Forget that discovery was published, so the next connect re-announces it.
+/// Needed when a value baked into the discovery payload changes.
+pub fn clear_discovery_published() {
+    set_flag(FLAG_DISCOVERY, false);
+}
+
 /// Idle wake-ups accumulated since the last publish.
 pub fn idle_wakes() -> u32 {
     unsafe { core::ptr::addr_of!(IDLE_WAKES).read() }

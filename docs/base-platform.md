@@ -81,6 +81,33 @@ The bird scale keeps its historical `birds/scale/…` namespace, and its weight 
 still mirrored to the pre-discovery `birds/scale/state` topic, so the migration
 of the hand-declared Home Assistant entities can happen at leisure.
 
+### Availability
+
+Two mechanisms, because neither alone covers a fleet that is half asleep:
+
+| | Mains node | Battery node |
+| --- | --- | --- |
+| Last will (`avty_t` → `<ns>/<node>/status`) | yes | **no** |
+| `expire_after` | 3 × `sample_secs` | 3 × `heartbeat_secs` |
+
+A last will catches the node that dies *while connected*: the broker publishes
+retained `offline` and Home Assistant greys the entities out at once. The node
+publishes retained `online` right after each connect, and — importantly — sends
+a proper MQTT `DISCONNECT` when a round is done, which tells the broker to
+discard the will. Without that, a mains node that reconnects per round would be
+declared dead after every single publish.
+
+Battery nodes get **no** will at all: they are legitimately disconnected almost
+all the time, so a will would mark them offline seconds after every reading.
+They rely on `expire_after` instead, which is also what catches a mains node
+that dies *between* rounds (a clean disconnect discards the will, so nothing
+else would notice). Three missed rounds is the threshold — one miss is a lost
+packet or a failed join, three is a node that stopped — with a 120 s floor.
+
+`expire_after` is derived from the live config, so changing the heartbeat
+interval clears the "discovery published" flag and re-announces the entities
+with the new expiry.
+
 ## Power profiles (#17)
 
 - **battery**: deep-sleep between samples (the bird-scale behaviour).
@@ -97,8 +124,6 @@ single-shot on battery.
 
 ## Known gaps
 
-- No availability/LWT topic yet, so Home Assistant cannot tell a silent node
-  from a quiet one.
 - Node selection is build-time only (issue #12 explicitly starts there); moving
   it to NVS would let one image be provisioned per board without a rebuild.
 - The SDS011 warm-up (20 s) is a fixed constant rather than adaptive.

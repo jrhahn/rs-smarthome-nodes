@@ -512,6 +512,13 @@ fn persist_if_changed(old: Config, new: Config) -> Config {
             Ok(()) => info!("config updated and saved to flash"),
             Err(e) => warn!("config save failed: {}", e),
         }
+        // The discovery payload embeds `expire_after`, derived from the publish
+        // cadence — so a changed heartbeat has to be re-announced, or Home
+        // Assistant keeps expiring the entities on the old schedule.
+        if new.heartbeat_secs != old.heartbeat_secs {
+            info!("heartbeat changed; re-announcing discovery on the next connect");
+            state::clear_discovery_published();
+        }
     }
     new
 }
@@ -652,13 +659,20 @@ async fn publish_samples(
         .await
         .map_err(|_| "tcp connect")?;
 
-    // Declared before the client config it is borrowed by, so it outlives it.
+    // Declared before the client config that borrows them, so they outlive it.
     let client_id = NODE.client_id();
+    let availability_topic = NODE.availability_topic();
     let mut mqtt_config: ClientConfig<'_, 5, _> = ClientConfig::new(
         rust_mqtt::client::client_config::MqttVersion::MQTTv5,
         CountingRng(20_000),
     );
     mqtt_config.add_client_id(&client_id);
+    // Last will: if this node drops off without saying goodbye, the broker tells
+    // Home Assistant. Only mains nodes register one — a battery node spends most
+    // of its life legitimately disconnected (see `NodeConfig::uses_lwt`).
+    if NODE.uses_lwt() {
+        mqtt_config.add_will(&availability_topic, discovery::PAYLOAD_OFFLINE, true);
+    }
     if let Some(user) = MQTT_USER {
         mqtt_config.add_username(user);
     }
@@ -684,14 +698,29 @@ async fn publish_samples(
         .await
         .map_err(|_| "mqtt connect")?;
 
+    // Retract the will's `offline` now that we are back. Retained, so Home
+    // Assistant sees the node as available even if it restarts meanwhile.
+    if NODE.uses_lwt() {
+        client
+            .send_message(
+                &availability_topic,
+                discovery::PAYLOAD_ONLINE,
+                QualityOfService::QoS0,
+                true,
+            )
+            .await
+            .map_err(|_| "mqtt availability")?;
+    }
+
     // --- Home Assistant discovery (#16) ------------------------------------
     // Retained, so the broker replays it to Home Assistant on its next restart;
     // hence once per power cycle is enough (the flag lives in RTC RAM).
     if !state::discovery_published() {
+        let availability = discovery::availability(&cfg);
         let mut ok = true;
         for entity in discovery::entities() {
             let topic = discovery::config_topic(&entity);
-            let Some(payload) = discovery::config_payload(&entity) else {
+            let Some(payload) = discovery::config_payload(&entity, &availability) else {
                 warn!("discovery payload too long for {}; skipping", topic);
                 continue;
             };
@@ -772,6 +801,12 @@ async fn publish_samples(
             }
         }
     }
+
+    // Say goodbye properly. A DISCONNECT tells the broker to *discard* the will,
+    // so a node that simply finished its round is not announced as dead — the
+    // will then only fires when the link really breaks. Best-effort: if it
+    // fails, the worst case is a spurious `offline` that the next round clears.
+    let _ = client.disconnect().await;
 
     Ok(updated)
 }

@@ -206,6 +206,14 @@ and its entities without any YAML. Values are ready to use — grams, °C, %, pp
 The weight is also mirrored to the pre-discovery `birds/scale/state` topic so an
 existing hand-declared entity keeps working during the migration.
 
+**Availability.** A mains node registers an MQTT last will, so the broker
+publishes retained `offline` to `<namespace>/<node>/status` the moment its
+connection breaks (and the node publishes `online` on connect, disconnecting
+cleanly at the end of a round so a normal publish is never mistaken for a
+death). Battery nodes get no will — they are supposed to be offline between
+readings — so every node also carries `expire_after` in its discovery config:
+three missed publish rounds and Home Assistant invalidates the values.
+
 The tuning/calibration entities are *commands*, not readings, so they are still
 declared once in
 [`home-assistant/configuration.yaml`](home-assistant/configuration.yaml).
