@@ -21,7 +21,7 @@ jobs:
     name: Format & host tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rust-toolchain.toml pins the channel (1.83, the last one esp-wifi 0.11
       # builds against) and the components.
@@ -55,7 +55,7 @@ jobs:
       matrix:
         node: [draussen, schlafzimmer, wohnzimmer, kueche, bad]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         run: rustup show
@@ -87,7 +87,7 @@ jobs:
     name: An unknown NODE fails the build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         run: rustup show
