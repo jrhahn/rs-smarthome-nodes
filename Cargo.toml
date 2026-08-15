@@ -24,12 +24,28 @@ required-features = ["hal"]
 # layouts, discovery payloads, config parsing), and *those* build for the host,
 # so they can have real unit tests:
 #
-#   cargo test --lib --no-default-features --target x86_64-unknown-linux-gnu
+#   cargo test --no-default-features --features host-tests \
+#       --target x86_64-unknown-linux-gnu
 #
-# See tests/README or `docs/base-platform.md` for the reasoning.
+# See `docs/base-platform.md` for the reasoning.
 [features]
 default = ["hal"]
+
+# The bus-generic sensor drivers: they name no esp-hal type, only the
+# `embedded-hal-async` / `embedded-io-async` traits and embassy-time. Split out
+# of `hal` so the host tests can exercise the *real* drivers against fake buses
+# (see `sensors::mock`) without dragging in the chip support crates.
+drivers = ["dep:embassy-time", "dep:embedded-hal-async", "dep:embedded-io-async"]
+
+# What the host test run enables. embassy-time needs two things to link that the
+# device gets elsewhere: a time driver (`std`, the whole reason the driver tests
+# can await a conversion) and a timer queue — on the device that comes from
+# embassy-executor's `integrated-timers`, which there is no executor to provide
+# here.
+host-tests = ["drivers", "embassy-time/std", "embassy-time/generic-queue-16"]
+
 hal = [
+    "drivers",
     "dep:esp-hal",
     "dep:esp-hal-embassy",
     "dep:esp-backtrace",
@@ -40,10 +56,7 @@ hal = [
     "dep:embedded-storage",
     "dep:embassy-net",
     "dep:embassy-executor",
-    "dep:embassy-time",
     "dep:embassy-sync",
-    "dep:embedded-hal-async",
-    "dep:embedded-io-async",
     "dep:rust-mqtt",
     "dep:static_cell",
 ]
@@ -108,6 +121,10 @@ embedded-storage = { version = "0.3", optional = true }
 # than pattern-matching strings. Never built for the device.
 [target.'cfg(not(target_os = "none"))'.dev-dependencies]
 serde_json = "1"
+# Drives the driver futures in tests. A hand-rolled block_on with a wrong waker
+# would show up as a hang rather than a failure, which is not a trade worth
+# making to save a dev-dependency.
+futures-executor = "0.3"
 
 [profile.dev]
 # Rust debug builds are far too large/slow to run on-device; always optimise.

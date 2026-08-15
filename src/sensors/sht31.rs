@@ -14,15 +14,15 @@
 //! SCL for the whole conversion, which would block the shared bus (and the
 //! SCD41 sitting on it) for 15 ms inside one transaction.
 
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 use embassy_time::{Duration, Timer};
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 use embedded_hal_async::i2c::I2c as I2cBus;
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 use heapless::{String, Vec};
 
 use super::EntityDescriptor;
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 use super::{crc_word, write_tenths, Reading, Sensor, MAX_READINGS};
 
 /// I²C address with ADDR tied low (the common breakout default).
@@ -68,13 +68,13 @@ pub const fn rh_tenths(raw: u16) -> i32 {
 
 /// SHT31-D on an I²C bus. Generic over the bus so the driver stays HAL-agnostic;
 /// `platform.rs` hands it a shared-bus handle it can own.
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 pub struct Sht31<I2C> {
     i2c: I2C,
     addr: u8,
 }
 
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 impl<I2C: I2cBus> Sht31<I2C> {
     /// Driver at the default address (0x44, ADDR low).
     pub fn new(i2c: I2C) -> Self {
@@ -107,7 +107,7 @@ impl<I2C: I2cBus> Sht31<I2C> {
     }
 }
 
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 impl<I2C: I2cBus> Sensor for Sht31<I2C> {
     fn kind(&self) -> &'static str {
         "SHT31-D"
@@ -140,6 +140,10 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `super::*` brings in heapless's `Vec` once the drivers are compiled; the
+    // tests want the growable one.
+    #[allow(unused_imports)]
+    use std::vec::Vec;
 
     #[test]
     fn conversions_hit_the_datasheet_endpoints() {
@@ -166,6 +170,105 @@ mod tests {
         // ~21.4 °C and ~50 % RH, the values a bench check should produce.
         assert_eq!(temp_tenths(24_900), 214);
         assert_eq!(rh_tenths(32_768), 500);
+    }
+
+    // --- Driver, against a fake bus -----------------------------------------
+
+    /// A CRC-correct 6-byte reply for the given raw words.
+    #[cfg(feature = "drivers")]
+    fn reply(t_raw: u16, rh_raw: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        for word in [t_raw, rh_raw] {
+            let bytes = word.to_be_bytes();
+            out.extend_from_slice(&bytes);
+            out.push(super::super::crc8_sensirion(&bytes));
+        }
+        out
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_measurement_is_decoded_and_published_as_two_readings() {
+        use super::super::mock::{block_on, FakeI2c};
+        use super::super::Sensor;
+
+        let bus = FakeI2c::new(ADDR, [reply(24_900, 32_768)]);
+        let mut sensor = Sht31::new(bus);
+        let readings = block_on(sensor.measure());
+
+        let values: Vec<(&str, &str)> =
+            readings.iter().map(|r| (r.key, r.value.as_str())).collect();
+        assert_eq!(values, vec![("temperature", "21.4"), ("humidity", "50.0")]);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_conversion_is_started_before_the_read() {
+        use super::super::mock::{block_on, FakeI2c, I2cEvent};
+        use super::super::Sensor;
+
+        let bus = FakeI2c::new(ADDR, [reply(0, 0)]);
+        let mut sensor = Sht31::new(bus);
+        let _ = block_on(sensor.measure());
+
+        // Command first, then a 6-byte read — reading before the conversion
+        // has been asked for would return the *previous* measurement.
+        assert_eq!(
+            sensor.i2c.events,
+            vec![
+                I2cEvent::Write {
+                    addr: ADDR,
+                    data: CMD_SINGLE_HIGH.to_be_bytes().to_vec(),
+                },
+                I2cEvent::Read { addr: ADDR, len: 6 },
+            ]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_corrupt_word_is_dropped_rather_than_published() {
+        use super::super::mock::{block_on, FakeI2c};
+        use super::super::Sensor;
+
+        // Bus noise in each of the two words in turn, and in a CRC byte.
+        for corrupt in 0..6 {
+            let mut bytes = reply(24_900, 32_768);
+            bytes[corrupt] ^= 0x01;
+            let mut sensor = Sht31::new(FakeI2c::new(ADDR, [bytes]));
+            assert!(
+                block_on(sensor.measure()).is_empty(),
+                "a reading with byte {corrupt} corrupted was published"
+            );
+        }
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn an_absent_sensor_contributes_nothing() {
+        use super::super::mock::{block_on, FakeI2c};
+        use super::super::Sensor;
+
+        // Nothing on the bus: every transaction NACKs. This must be silent, not
+        // fatal — the node publishes whatever else answered.
+        let mut sensor = Sht31::new(FakeI2c::empty());
+        assert!(block_on(sensor.measure()).is_empty());
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_sensor_strapped_to_the_alternate_address_is_reachable() {
+        use super::super::mock::{block_on, FakeI2c};
+        use super::super::Sensor;
+
+        // The breakout the bus probe adopts at 0x45.
+        let mut sensor =
+            Sht31::with_address(FakeI2c::new(ADDR_ALT, [reply(24_900, 32_768)]), ADDR_ALT);
+        assert_eq!(block_on(sensor.measure()).len(), 2);
+
+        // ... and the same driver at the default address finds nothing there.
+        let mut sensor = Sht31::new(FakeI2c::new(ADDR_ALT, [reply(24_900, 32_768)]));
+        assert!(block_on(sensor.measure()).is_empty());
     }
 
     #[test]

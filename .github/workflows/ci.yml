@@ -38,11 +38,13 @@ jobs:
       # The pure subset: no esp-hal, so it builds and runs for the host.
       - name: Clippy (host)
         run: >
-          cargo clippy --all-targets --no-default-features
+          cargo clippy --all-targets --no-default-features --features host-tests
           --target x86_64-unknown-linux-gnu -- -D warnings
 
       - name: Tests
-        run: cargo test --no-default-features --target x86_64-unknown-linux-gnu
+        run: >
+          cargo test --no-default-features --features host-tests
+          --target x86_64-unknown-linux-gnu
 
   # The real thing: every node in the fleet has to build, because `NODE=` picks
   # a different sensor set and power profile at compile time and a node nobody

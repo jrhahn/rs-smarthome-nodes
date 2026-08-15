@@ -19,15 +19,15 @@
 //!   T[°C]    = -45 + 175 · raw / 65535
 //!   RH[%]    = 100 · raw / 65535
 
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 use embassy_time::{Duration, Timer};
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 use embedded_hal_async::i2c::I2c as I2cBus;
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 use heapless::{String, Vec};
 
 use super::EntityDescriptor;
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 use super::{crc_word, write_int, write_tenths, Reading, Sensor, MAX_READINGS};
 
 pub const ADDR: u8 = 0x62;
@@ -96,7 +96,7 @@ pub enum Mode {
 }
 
 /// SCD41 on an I²C bus, generic over the bus (see [`super::sht31::Sht31`]).
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 pub struct Scd41<I2C> {
     i2c: I2C,
     pub mode: Mode,
@@ -105,7 +105,7 @@ pub struct Scd41<I2C> {
     started: bool,
 }
 
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 impl<I2C: I2cBus> Scd41<I2C> {
     pub fn new(i2c: I2C, mode: Mode) -> Self {
         Self {
@@ -190,7 +190,7 @@ impl<I2C: I2cBus> Scd41<I2C> {
     }
 }
 
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 impl<I2C: I2cBus> Sensor for Scd41<I2C> {
     fn kind(&self) -> &'static str {
         "SCD41"

@@ -231,11 +231,22 @@ the HAL and therefore run on the host.
 
 ```bash
 # What CI runs
-cargo test --no-default-features --target x86_64-unknown-linux-gnu
+cargo test --no-default-features --features host-tests \
+    --target x86_64-unknown-linux-gnu
 ```
 
-Anything that touches a bus, RTC RAM, flash or the radio sits behind the `hal`
-feature (on by default), so a normal `cargo build` is unaffected. Compile-time
+The sensor drivers themselves are covered too. They are generic over the
+`embedded-hal-async` / `embedded-io-async` bus traits, so
+[`src/sensors/mock.rs`](src/sensors/mock.rs) can feed the *real* SHT31 and
+SDS011 drivers a scripted bus: canned I²C replies, and a UART that hands over
+stale frames, falls quiet, then delivers the frame that matters. That covers the
+resync, the CRC rejection, the fan duty cycle and what happens when a sensor is
+absent — but not timing, bus contention or anything electrical, which stay bench
+questions.
+
+Anything that touches the chip itself — RTC RAM, flash, the radio, the bit-bang
+drivers — sits behind the `hal` feature (on by default), so a normal
+`cargo build` is unaffected. Compile-time
 `const _: () = assert!(…)` checks stay where they are: they cost nothing and
 fail the *build*, which is stronger than a test — the tests cover what
 const-eval cannot reach, such as anything that formats a string, negative cases,

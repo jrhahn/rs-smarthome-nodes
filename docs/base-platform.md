@@ -208,6 +208,33 @@ the failures that would otherwise show up as an entity stuck at "unknown".
 Compile-time assertions stay: they fail the build rather than a test run, and
 they cover invariants a test cannot reach.
 
+### Driver tests against fake buses
+
+Making the drivers generic over `embedded-hal-async` / `embedded-io-async` was
+about keeping them free of esp-hal types; the other half of that payoff is that
+the **real** drivers run on the host against a scripted bus (`sensors/mock.rs`).
+The `hal` feature was split for it: `drivers` brings in only the bus traits and
+embassy-time, whose `std` time driver is what lets a test await a conversion.
+
+The UART mock is the interesting one, because the SDS011 driver distinguishes
+"stale frames buffered while the fan span up" from "the frame I want" purely by
+draining until the line falls quiet. So the script is a list of segments with an
+optional gap before each, and a run-dry mock returns `Pending` rather than
+`Ok(0)` — which is what a real UART does, and what lets the driver's timeout
+fire. Covered: the full duty cycle, the fan being parked on *every* exit path,
+resync past noise, a rejected checksum, an absent sensor, and a stray `0xAA`
+costing exactly one frame.
+
+Writing them turned up one real hazard. `read_byte` and `drain` looped on a
+read that completed with zero bytes, which never yields — so the surrounding
+timeout could never fire and the driver would spin for ever. esp-hal's UART does
+not do that (it waits for a byte) but the trait permits it, so both loops are
+now bounded, with a `StarvedUart` test to keep them that way.
+
+What this does *not* cover: timing, bus contention, anything electrical. A green
+test says the driver handles the bytes correctly, not that the SHT31 answers
+within 15 ms on the real bus.
+
 ## Known gaps
 
 - Provisioning needs the board to reach the broker, so a node with the wrong

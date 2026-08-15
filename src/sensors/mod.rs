@@ -24,6 +24,8 @@ use core::fmt::Write as _;
 
 use heapless::{String, Vec};
 
+#[cfg(all(test, feature = "drivers"))]
+pub mod mock;
 pub mod scale;
 pub mod scd41;
 pub mod sds011;
