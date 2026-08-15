@@ -176,6 +176,38 @@ sleeping and CO₂/PM continuity to lose, so it ignores it. The SCD41 follows th
 profile too: periodic measurement on mains (what its self-calibration expects),
 single-shot on battery.
 
+## Testing
+
+`cargo test` cannot link for `riscv32imc`, and the crate used to be a single
+binary that pulled in esp-hal, so it could not be built for the host either.
+That left compile-time `const` assertions as the only harness, and the awkward
+habit of validating things like the discovery JSON with throwaway host replicas
+of the real code — copy-paste that proves nothing once it drifts.
+
+So the crate is now a library plus a thin binary, and everything that touches a
+bus, RTC RAM, flash or the radio sits behind the `hal` feature. With it off, the
+remainder builds for the host: the protocol decoding, the CRCs, the flash blob
+layouts, `Config::apply`, the node table and the discovery payload builders.
+That is most of the logic that can be silently *wrong* rather than fail to
+build.
+
+Two changes fell out of making that possible, both of which stand on their own:
+
+- `discovery` takes the `NodeConfig` as an argument instead of reading the
+  global identity, so the payloads are a pure function of the node;
+- the provisioning-payload parser moved out of `main.rs` into `node`, with the
+  two facts it needs (the current identity, whether flash holds an override)
+  passed in rather than read.
+
+The tests worth having are the cross-checks, not the arithmetic: that a
+discovered state topic is exactly the topic the publish path uses, that every
+control key is one `Config::apply` accepts, that no two entities on a node share
+a topic or a unique id, and that `KNOWN_NODES` still lists the fleet. Those are
+the failures that would otherwise show up as an entity stuck at "unknown".
+
+Compile-time assertions stay: they fail the build rather than a test run, and
+they cover invariants a test cannot reach.
+
 ## Known gaps
 
 - Provisioning needs the board to reach the broker, so a node with the wrong

@@ -25,7 +25,7 @@ use heapless::{String, Vec};
 
 use crate::config::Config;
 use crate::ds18b20;
-use crate::node::{self, Slot};
+use crate::node::{NodeConfig, Slot};
 use crate::sensors::{scale, scd41, sds011, sht31, EntityDescriptor};
 
 /// Upper bound on entities a node can expose (weight, probe temperature,
@@ -78,8 +78,7 @@ pub struct Availability {
 
 /// The availability policy for this node, given the live config (a battery node
 /// publishes on its heartbeat, a mains node on its fixed cadence).
-pub fn availability(cfg: &Config) -> Availability {
-    let node = node::active();
+pub fn availability(node: &NodeConfig, cfg: &Config) -> Availability {
     let period = if node.power.is_battery() {
         cfg.heartbeat_secs
     } else {
@@ -100,8 +99,7 @@ pub struct Entity {
 }
 
 /// Every entity this node exposes, in publish order.
-pub fn entities() -> Vec<Entity, MAX_ENTITIES> {
-    let node = node::active();
+pub fn entities(node: &NodeConfig) -> Vec<Entity, MAX_ENTITIES> {
     let mut out = Vec::new();
     for (slot, descriptors) in [
         (node.scale, scale::DESCRIPTORS),
@@ -121,8 +119,7 @@ pub fn entities() -> Vec<Entity, MAX_ENTITIES> {
 }
 
 /// `homeassistant/sensor/<node>/<prefix><key>/config`.
-pub fn config_topic(entity: &Entity) -> String<96> {
-    let node = node::active();
+pub fn config_topic(node: &NodeConfig, entity: &Entity) -> String<96> {
     let mut t = String::new();
     let _ = write!(
         t,
@@ -135,8 +132,7 @@ pub fn config_topic(entity: &Entity) -> String<96> {
 /// The retained discovery payload for one entity, or `None` if it would not fit
 /// the buffer. Truncated JSON would be worse than no entity at all: Home
 /// Assistant would keep re-reading a broken retained config on every restart.
-pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<Payload> {
-    let node = node::active();
+pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) -> Option<Payload> {
     let (slot, desc) = (entity.slot, entity.desc);
     let mut p = String::new();
     write!(
@@ -171,7 +167,7 @@ pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<Payload> 
         stat_cla = desc.state_class,
     )
     .ok()?;
-    write_device(&mut p).ok()?;
+    write_device(&mut p, node).ok()?;
     Some(p)
 }
 
@@ -179,8 +175,7 @@ pub fn config_payload(entity: &Entity, avail: &Availability) -> Option<Payload> 
 /// closing brace. Identical across entities — that sameness is exactly what
 /// makes Home Assistant group them all under one device card — so it is written
 /// in one place rather than repeated in each format string.
-fn write_device(p: &mut Payload) -> core::fmt::Result {
-    let node = node::active();
+fn write_device(p: &mut Payload, node: &NodeConfig) -> core::fmt::Result {
     write!(
         p,
         "\"dev\":{{\"ids\":[\"{}\"],\"name\":\"{}\",\"mf\":\"{}\",\"mdl\":\"{}\"}}}}",
@@ -294,8 +289,7 @@ const BATTERY_CONTROLS: &[Control] = &[
 ];
 
 /// Every command entity this node exposes.
-pub fn controls() -> Vec<&'static Control, MAX_CONTROLS> {
-    let node = node::active();
+pub fn controls(node: &NodeConfig) -> Vec<&'static Control, MAX_CONTROLS> {
     let mut out = Vec::new();
     for control in SCALE_CONTROLS
         .iter()
@@ -308,8 +302,7 @@ pub fn controls() -> Vec<&'static Control, MAX_CONTROLS> {
 }
 
 /// `homeassistant/<component>/<node>/<key>/config`.
-pub fn control_topic(control: &Control) -> String<96> {
-    let node = node::active();
+pub fn control_topic(node: &NodeConfig, control: &Control) -> String<96> {
     let mut t = String::new();
     let _ = write!(
         t,
@@ -325,8 +318,11 @@ pub fn control_topic(control: &Control) -> String<96> {
 /// Command entities carry no `exp_aft` — they have no state to expire — but they
 /// do follow the node's availability, so the controls grey out along with the
 /// readings when a mains node drops off.
-pub fn control_payload(control: &Control, avail: &Availability) -> Option<Payload> {
-    let node = node::active();
+pub fn control_payload(
+    node: &NodeConfig,
+    control: &Control,
+    avail: &Availability,
+) -> Option<Payload> {
     let mut p = String::new();
     write!(
         p,
@@ -356,10 +352,331 @@ pub fn control_payload(control: &Control, avail: &Availability) -> Option<Payloa
         },
     )
     .ok()?;
-    write_device(&mut p).ok()?;
+    write_device(&mut p, node).ok()?;
     Some(p)
 }
 
 const _: () = {
     assert!(SCALE_CONTROLS.len() + BATTERY_CONTROLS.len() <= MAX_CONTROLS);
 };
+
+#[cfg(test)]
+mod tests {
+    // Deliberately not a glob import: `super::String` / `super::Vec` are the
+    // heapless ones, and the tests want the std types.
+    use super::{
+        availability, config_payload, config_topic, control_payload, control_topic, controls,
+        entities, Availability, Config, NodeConfig, BATTERY_CONTROLS, MIN_EXPIRY_SECS,
+        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS,
+    };
+    use crate::node::FLEET;
+    use serde_json::Value;
+
+    /// Expand Home Assistant's `~` shorthand the way it does, so a topic can be
+    /// compared against what the firmware actually publishes to.
+    fn expand(topic: &str, node: &NodeConfig) -> String {
+        topic.replace('~', &format!("{}/{}", node.namespace, node.id))
+    }
+
+    fn parse(payload: &str) -> Value {
+        serde_json::from_str(payload).unwrap_or_else(|e| panic!("{e}: {payload}"))
+    }
+
+    /// Every discovery message a node sends, as (topic, parsed payload).
+    fn announcements(node: &NodeConfig, avail: &Availability) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        for entity in entities(node) {
+            let payload = config_payload(node, &entity, avail).expect("payload fits");
+            out.push((config_topic(node, &entity).to_string(), parse(&payload)));
+        }
+        for control in controls(node) {
+            let payload = control_payload(node, control, avail).expect("payload fits");
+            out.push((control_topic(node, control).to_string(), parse(&payload)));
+        }
+        out
+    }
+
+    fn availability_of(node: &NodeConfig) -> Availability {
+        availability(node, &Config::DEFAULT)
+    }
+
+    // --- Payloads -----------------------------------------------------------
+
+    #[test]
+    fn every_payload_is_valid_json_and_fits() {
+        // `config_payload` returns None rather than truncating, so "fits" is
+        // what `expect` checks; the parse is what catches a malformed join.
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            let messages = announcements(node, &avail);
+            assert!(!messages.is_empty());
+            for (_, payload) in messages {
+                assert!(payload.is_object());
+            }
+        }
+    }
+
+    #[test]
+    fn state_topics_match_what_the_firmware_publishes() {
+        // The whole point of discovery: if these drift, Home Assistant
+        // subscribes to a topic nothing ever publishes to and the entity sits
+        // at "unknown" for ever.
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            for entity in entities(node) {
+                let payload = parse(&config_payload(node, &entity, &avail).unwrap());
+                let announced = expand(payload["stat_t"].as_str().unwrap(), node);
+                let published = node.state_topic(entity.slot.prefix, entity.desc.key);
+                assert_eq!(announced.as_str(), published.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn command_topics_match_the_subscription_and_the_config_keys() {
+        // Likewise for the other direction: the command topic has to fall under
+        // the wildcard the node subscribes to, and the key has to be one
+        // `Config::apply` actually understands.
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            let prefix = node.config_prefix();
+            for control in controls(node) {
+                let payload = parse(&control_payload(node, control, &avail).unwrap());
+                let topic = expand(payload["cmd_t"].as_str().unwrap(), node);
+                assert!(
+                    topic.starts_with(prefix.as_str()),
+                    "{topic} is outside {prefix}"
+                );
+                assert_eq!(&topic[prefix.len()..], control.key);
+                // Two values, because one of them may happen to equal the
+                // default and `apply` reports "changed", not "understood".
+                let mut probe = Config::DEFAULT;
+                assert!(
+                    probe.apply(control.key, "1", 0) || probe.apply(control.key, "0", 0),
+                    "{} is not a key Config::apply knows",
+                    control.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn topics_and_unique_ids_do_not_collide() {
+        // Two entities sharing either one would silently overwrite each other in
+        // Home Assistant — exactly what the outdoor node's two temperature
+        // sources would do without their slot prefix.
+        for (name, node) in FLEET {
+            let avail = availability_of(node);
+            let messages = announcements(node, &avail);
+            for (i, (topic_a, a)) in messages.iter().enumerate() {
+                for (topic_b, b) in &messages[i + 1..] {
+                    assert_ne!(topic_a, topic_b, "{name} repeats a config topic");
+                    assert_ne!(a["uniq_id"], b["uniq_id"], "{name} repeats a uniq_id");
+                    if let (Some(x), Some(y)) = (a.get("stat_t"), b.get("stat_t")) {
+                        assert_ne!(x, y, "{name} repeats a state topic");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_entity_belongs_to_the_same_device() {
+        // The `dev` block is what groups the entities into one device card, so
+        // it has to be byte-identical across a node's messages.
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            let messages = announcements(node, &avail);
+            let device = messages[0].1["dev"].clone();
+            assert_eq!(device["ids"], serde_json::json!([node.id]));
+            assert_eq!(device["name"], node.name);
+            for (_, payload) in &messages {
+                assert_eq!(payload["dev"], device);
+                assert!(payload["uniq_id"].as_str().unwrap().starts_with(node.id));
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_topics_follow_the_home_assistant_layout() {
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            for (topic, _) in announcements(node, &avail) {
+                let parts: Vec<&str> = topic.split('/').collect();
+                assert_eq!(parts[0], PREFIX);
+                assert!(matches!(
+                    parts[1],
+                    "sensor" | "number" | "switch" | "button"
+                ));
+                assert_eq!(parts[2], node.id);
+                assert_eq!(parts[4], "config");
+                assert_eq!(parts.len(), 5);
+            }
+        }
+    }
+
+    // --- Availability -------------------------------------------------------
+
+    #[test]
+    fn only_readings_expire() {
+        // A control has no state to go stale; `exp_aft` on one would just make
+        // the slider vanish.
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            for entity in entities(node) {
+                let payload = parse(&config_payload(node, &entity, &avail).unwrap());
+                assert!(payload["exp_aft"].is_number());
+            }
+            for control in controls(node) {
+                let payload = parse(&control_payload(node, control, &avail).unwrap());
+                assert!(payload.get("exp_aft").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn the_availability_topic_appears_only_where_there_is_a_will() {
+        for (name, node) in FLEET {
+            let avail = availability_of(node);
+            for (_, payload) in announcements(node, &avail) {
+                match payload.get("avty_t") {
+                    Some(topic) => {
+                        assert!(
+                            node.uses_lwt(),
+                            "{name} announces availability it never publishes"
+                        );
+                        let topic = expand(topic.as_str().unwrap(), node);
+                        assert_eq!(topic.as_str(), node.availability_topic().as_str());
+                    }
+                    None => assert!(
+                        !node.uses_lwt(),
+                        "{name} has a will but no availability topic"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expiry_allows_three_missed_rounds_with_a_floor() {
+        let mut cfg = Config::DEFAULT;
+        cfg.heartbeat_secs = 600;
+        for (name, node) in FLEET {
+            let avail = availability(node, &cfg);
+            let period = if node.power.is_battery() {
+                cfg.heartbeat_secs
+            } else {
+                node.sample_secs as u32
+            };
+            assert_eq!(
+                avail.expire_after,
+                (period * MISSED_ROUNDS).max(MIN_EXPIRY_SECS),
+                "{name}"
+            );
+            assert!(avail.expire_after >= MIN_EXPIRY_SECS);
+        }
+    }
+
+    #[test]
+    fn a_fast_heartbeat_does_not_expire_below_the_floor() {
+        // One lost packet must never blank an entity, however tight the poll.
+        let mut cfg = Config::DEFAULT;
+        cfg.heartbeat_secs = 1;
+        let scale = crate::node::by_name("draussen").unwrap();
+        assert_eq!(availability(&scale, &cfg).expire_after, MIN_EXPIRY_SECS);
+    }
+
+    // --- Controls -----------------------------------------------------------
+
+    #[test]
+    fn controls_follow_what_the_node_actually_is() {
+        for (name, node) in FLEET {
+            let keys: Vec<&str> = controls(node).iter().map(|c| c.key).collect();
+            for control in SCALE_CONTROLS {
+                assert_eq!(
+                    keys.contains(&control.key),
+                    node.scale.enabled,
+                    "{name}: {}",
+                    control.key
+                );
+            }
+            for control in BATTERY_CONTROLS {
+                assert_eq!(
+                    keys.contains(&control.key),
+                    node.power.is_battery(),
+                    "{name}: {}",
+                    control.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_mains_node_without_a_load_cell_has_no_knobs_at_all() {
+        // Nothing tunable at runtime today — better an empty Configuration
+        // section than four controls that do nothing.
+        for (name, node) in FLEET {
+            if !node.power.is_battery() && !node.scale.enabled {
+                assert!(controls(node).is_empty(), "{name} exposes dead controls");
+            }
+        }
+    }
+
+    #[test]
+    fn each_component_carries_what_its_schema_needs() {
+        let scale = crate::node::by_name("draussen").unwrap();
+        let avail = availability_of(&scale);
+        for control in controls(&scale) {
+            let payload = parse(&control_payload(&scale, control, &avail).unwrap());
+            assert_eq!(payload["ret"], true, "commands must be retained");
+            assert_eq!(payload["ent_cat"], "config");
+            match control.component {
+                "number" => {
+                    for key in ["min", "max", "step"] {
+                        assert!(payload[key].is_number(), "{} lacks {key}", control.key);
+                    }
+                    assert!(payload["min"].as_f64() <= payload["max"].as_f64());
+                }
+                "switch" => {
+                    assert!(payload["pl_on"].is_string() && payload["pl_off"].is_string());
+                }
+                "button" => {
+                    assert!(payload["pl_prs"].is_string());
+                    // A press has no state to read back.
+                    assert!(payload.get("stat_t").is_none());
+                }
+                other => panic!("unhandled component {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn controls_read_their_state_back_off_their_command_topic() {
+        // Why the sliders show the last value set instead of "unknown", and why
+        // that survives a Home Assistant restart.
+        let scale = crate::node::by_name("draussen").unwrap();
+        let avail = availability_of(&scale);
+        for control in controls(&scale) {
+            let payload = parse(&control_payload(&scale, control, &avail).unwrap());
+            match payload.get("stat_t") {
+                Some(state) => assert_eq!(state, &payload["cmd_t"]),
+                None => assert_eq!(control.component, "button"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_slot_label_never_leaves_a_stray_space() {
+        // The outdoor node labels its SHT31 "Luft"; every other slot is unnamed
+        // and must not produce " Temperatur".
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            for entity in entities(node) {
+                let payload = parse(&config_payload(node, &entity, &avail).unwrap());
+                let name = payload["name"].as_str().unwrap();
+                assert_eq!(name.trim(), name, "{name:?} is padded");
+                assert!(!name.contains("  "));
+            }
+        }
+    }
+}

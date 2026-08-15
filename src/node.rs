@@ -19,11 +19,16 @@
 //! that is re-provisioned while running reboots into its new self.
 
 use core::fmt::Write as _;
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::addr_of;
+#[cfg(feature = "hal")]
+use core::ptr::addr_of_mut;
 
 use heapless::String;
-use log::{info, warn};
+#[cfg(feature = "hal")]
+use log::info;
+use log::warn;
 
+#[cfg(feature = "hal")]
 use crate::config;
 use crate::sensors::scd41::Mode as Scd41Mode;
 
@@ -254,7 +259,20 @@ const BAD: NodeConfig = NodeConfig {
     legacy_weight_topic: None,
 };
 
-/// Names accepted by `NODE=` and by provisioning, for error messages.
+/// The fleet, keyed by the name `NODE=` and provisioning accept. The single
+/// source of truth: [`by_name`] walks it, so a node added here is immediately
+/// selectable both ways.
+pub const FLEET: &[(&str, NodeConfig)] = &[
+    ("draussen", DRAUSSEN),
+    ("schlafzimmer", SCHLAFZIMMER),
+    ("wohnzimmer", WOHNZIMMER),
+    ("kueche", KUECHE),
+    ("bad", BAD),
+];
+
+/// The same names as one string, for error messages. Spelled out rather than
+/// built from [`FLEET`] because it is used in a const-eval `panic!`, which takes
+/// a literal; a test keeps the two in step.
 pub const KNOWN_NODES: &str = "draussen, schlafzimmer, wohnzimmer, kueche, bad";
 
 /// The node this image was **built** for — the fallback when flash carries no
@@ -267,19 +285,14 @@ pub const BUILT_AS: NodeConfig = select(match option_env!("NODE") {
 /// Look a node up by name. Shared by the build-time selection and by runtime
 /// provisioning, so both accept exactly the same set of names.
 pub const fn by_name(id: &str) -> Option<NodeConfig> {
-    if str_eq(id, "draussen") {
-        Some(DRAUSSEN)
-    } else if str_eq(id, "schlafzimmer") {
-        Some(SCHLAFZIMMER)
-    } else if str_eq(id, "wohnzimmer") {
-        Some(WOHNZIMMER)
-    } else if str_eq(id, "kueche") {
-        Some(KUECHE)
-    } else if str_eq(id, "bad") {
-        Some(BAD)
-    } else {
-        None
+    let mut i = 0;
+    while i < FLEET.len() {
+        if str_eq(id, FLEET[i].0) {
+            return Some(FLEET[i].1);
+        }
+        i += 1;
     }
+    None
 }
 
 /// Map the `NODE` build-time name onto a config. Unknown names panic during
@@ -313,6 +326,7 @@ pub fn active() -> NodeConfig {
 /// A stored name that is not in the table is reported and ignored rather than
 /// obeyed, so a bad provisioning message degrades to the build-time identity
 /// instead of a board that does nothing.
+#[cfg(feature = "hal")]
 pub fn init() {
     let Some(stored) = config::load_node_name() else {
         return;
@@ -359,6 +373,55 @@ pub const PROVISION_PREFIX: &str = "smarthome/provision/";
 /// Payload that clears a provisioned identity.
 pub const PROVISION_RESET: &str = "default";
 
+// --- Provisioning requests ---------------------------------------------------
+
+/// What a retained provisioning message asks this board to become.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Provision {
+    /// Run as this node from the next boot (already checked against the table).
+    Become(String<{ crate::config::NODE_NAME_MAX }>),
+    /// Drop the stored override and go back to the built-in identity.
+    Reset,
+}
+
+/// Interpret a provisioning payload, or `None` if there is nothing to do.
+///
+/// "Nothing to do" is the common case and matters: the message is retained, so
+/// it is re-delivered on *every* connect. Only an actual change may reach flash,
+/// or a board would rewrite its identity sector for the rest of its life.
+///
+/// `current` is the identity in force and `has_override` says whether flash
+/// carries one — both passed in rather than read here, so the decision itself
+/// stays pure and testable.
+pub fn provision_request(
+    value: &str,
+    current: &NodeConfig,
+    has_override: bool,
+) -> Option<Provision> {
+    // A zero-length payload is how a retained message is cleared, not a request.
+    if value.is_empty() {
+        return None;
+    }
+
+    if value == PROVISION_RESET {
+        return has_override.then_some(Provision::Reset);
+    }
+
+    match by_name(value) {
+        // Compared by node id, not by name: the outdoor node answers to
+        // `draussen` but its id — and its topics — say `scale`.
+        Some(cfg) if cfg.id == current.id => None,
+        Some(_) => Some(Provision::Become(String::try_from(value).ok()?)),
+        None => {
+            warn!(
+                "provisioning asked for unknown node '{}'; expected one of: {}",
+                value, KNOWN_NODES
+            );
+            None
+        }
+    }
+}
+
 /// `str` equality usable in const context (`==` on `&str` is not const in 1.83).
 const fn str_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
@@ -391,3 +454,211 @@ const _: () = {
     assert!(!SCHLAFZIMMER.power.is_battery());
     assert!(DRAUSSEN.power.is_battery());
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NODE_NAME_MAX;
+
+    #[test]
+    fn every_fleet_name_resolves_and_nothing_else_does() {
+        for (name, cfg) in FLEET {
+            assert_eq!(by_name(name).expect("in the table").id, cfg.id);
+        }
+        for name in ["", "Draussen", "draussen ", "küche", "kuche", "scale"] {
+            assert!(by_name(name).is_none(), "{name:?} resolved");
+        }
+    }
+
+    #[test]
+    fn known_nodes_lists_exactly_the_fleet() {
+        // The message a mistyped `NODE=` prints. It has to be a literal (it is
+        // used in a const-eval panic), so nothing but this test keeps it honest.
+        let listed: Vec<&str> = KNOWN_NODES.split(", ").collect();
+        let actual: Vec<&str> = FLEET.iter().map(|(name, _)| *name).collect();
+        assert_eq!(listed, actual);
+    }
+
+    #[test]
+    fn node_ids_and_names_are_unique() {
+        // Two nodes sharing an id would share topics, a Home Assistant device
+        // and an MQTT client id — they would fight over the broker session.
+        for (i, (name_a, a)) in FLEET.iter().enumerate() {
+            for (name_b, b) in &FLEET[i + 1..] {
+                assert_ne!(a.id, b.id, "{name_a} and {name_b} share an id");
+                assert_ne!(name_a, name_b);
+            }
+        }
+    }
+
+    #[test]
+    fn every_fleet_name_fits_the_flash_slot() {
+        // A name that does not fit could be built but never provisioned.
+        for (name, _) in FLEET {
+            assert!(name.len() <= NODE_NAME_MAX, "{name} is too long to store");
+        }
+    }
+
+    #[test]
+    fn topics_are_built_from_the_identity() {
+        let scale = by_name("draussen").unwrap();
+        assert_eq!(
+            scale.state_topic("", "weight").as_str(),
+            "birds/scale/weight"
+        );
+        assert_eq!(
+            scale.state_topic("air_", "temperature").as_str(),
+            "birds/scale/air_temperature"
+        );
+        assert_eq!(scale.config_prefix().as_str(), "birds/scale/config/");
+        assert_eq!(scale.config_wildcard().as_str(), "birds/scale/config/#");
+        assert_eq!(scale.client_id().as_str(), "rs-scale");
+        assert_eq!(scale.availability_topic().as_str(), "birds/scale/status");
+    }
+
+    #[test]
+    fn no_topic_is_truncated() {
+        // The heapless buffers are fixed; a longer node would silently lose the
+        // tail of its topic and publish somewhere unexpected.
+        for (_, node) in FLEET {
+            let longest_key = "heartbeat_interval";
+            assert!(node.state_topic("air_", longest_key).ends_with(longest_key));
+            assert!(node.config_wildcard().ends_with('#'));
+            assert!(node.client_id().starts_with("rs-"));
+        }
+    }
+
+    #[test]
+    fn the_power_profile_decides_sleep_and_availability() {
+        for (name, node) in FLEET {
+            // A battery node is offline by design between readings, so a last
+            // will would declare it dead after every single publish.
+            assert_eq!(
+                node.uses_lwt(),
+                !node.power.is_battery(),
+                "{name} availability does not match its power profile"
+            );
+            // Single-shot CO₂ on battery; periodic is what ASC expects on mains.
+            assert_eq!(
+                node.scd41_mode() == crate::sensors::scd41::Mode::SingleShot,
+                node.power.is_battery(),
+                "{name} SCD41 mode does not match its power profile"
+            );
+        }
+    }
+
+    #[test]
+    fn bus_setup_follows_the_populated_sensors() {
+        for (name, node) in FLEET {
+            assert_eq!(
+                node.uses_i2c(),
+                node.sht31.enabled || node.scd41.enabled,
+                "{name} I²C"
+            );
+            assert_eq!(node.uses_uart(), node.sds011.enabled, "{name} UART");
+        }
+    }
+
+    #[test]
+    fn the_fan_and_continuous_co2_never_land_on_battery() {
+        // Both rule out deep sleep: the SDS011's fan has to spin up per sample,
+        // and the SCD41's self-calibration assumes it keeps running.
+        for (name, node) in FLEET {
+            if node.sds011.enabled {
+                assert!(!node.power.is_battery(), "{name} runs a fan on battery");
+            }
+        }
+    }
+
+    #[test]
+    fn provision_topic_is_keyed_by_mac() {
+        let topic = provision_topic([0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6]);
+        assert_eq!(topic.as_str(), "smarthome/provision/a1b2c3d4e5f6");
+        // Leading zeroes must survive, or two boards could share a topic.
+        let topic = provision_topic([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+        assert_eq!(topic.as_str(), "smarthome/provision/000102030405");
+        assert!(topic.starts_with(PROVISION_PREFIX));
+    }
+
+    #[test]
+    fn only_the_scale_keeps_a_legacy_topic() {
+        for (name, node) in FLEET {
+            match node.legacy_weight_topic {
+                Some(topic) => {
+                    assert_eq!(*name, "draussen");
+                    assert!(node.scale.enabled, "{name} mirrors a weight it never reads");
+                    assert_eq!(topic, "birds/scale/state");
+                }
+                None => assert!(*name != "draussen"),
+            }
+        }
+    }
+
+    #[test]
+    fn slots_disambiguate_colliding_keys() {
+        // The outdoor node has two temperature sources. Without a prefix they
+        // would publish to the same topic and one would overwrite the other.
+        let scale = by_name("draussen").unwrap();
+        assert!(scale.ds18b20.enabled && scale.sht31.enabled);
+        assert_ne!(scale.ds18b20.prefix, scale.sht31.prefix);
+    }
+
+    // --- Provisioning -------------------------------------------------------
+
+    #[test]
+    fn an_empty_payload_is_not_a_request() {
+        // How a retained message is deleted. Acting on it would re-provision
+        // every board whose provisioning was just cleared.
+        let scale = by_name("draussen").unwrap();
+        assert_eq!(provision_request("", &scale, true), None);
+        assert_eq!(provision_request("", &scale, false), None);
+    }
+
+    #[test]
+    fn reset_only_does_something_when_there_is_an_override() {
+        let scale = by_name("draussen").unwrap();
+        assert_eq!(
+            provision_request(PROVISION_RESET, &scale, true),
+            Some(Provision::Reset)
+        );
+        // Nothing stored: the message is retained and arrives on every connect,
+        // so obeying it would erase the same sector for ever.
+        assert_eq!(provision_request(PROVISION_RESET, &scale, false), None);
+    }
+
+    #[test]
+    fn being_told_what_it_already_is_changes_nothing() {
+        let scale = by_name("draussen").unwrap();
+        assert_eq!(provision_request("draussen", &scale, false), None);
+        assert_eq!(provision_request("draussen", &scale, true), None);
+    }
+
+    #[test]
+    fn a_different_node_is_adopted() {
+        let scale = by_name("draussen").unwrap();
+        for (name, _) in FLEET.iter().filter(|(n, _)| *n != "draussen") {
+            assert_eq!(
+                provision_request(name, &scale, false),
+                Some(Provision::Become(String::try_from(*name).unwrap())),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_name_is_ignored() {
+        let scale = by_name("draussen").unwrap();
+        for value in ["kuche", "Draussen", "scale", "  ", "0"] {
+            assert_eq!(provision_request(value, &scale, false), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn the_node_is_matched_by_id_not_by_name() {
+        // `draussen` is the name; `scale` is the id its topics use. A board
+        // already running as it must not re-provision itself in a loop.
+        let scale = by_name("draussen").unwrap();
+        assert_eq!(scale.id, "scale");
+        assert_eq!(provision_request("draussen", &scale, false), None);
+    }
+}

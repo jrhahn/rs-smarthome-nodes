@@ -19,11 +19,16 @@
 //!   T[°C]    = -45 + 175 · raw / 65535
 //!   RH[%]    = 100 · raw / 65535
 
+#[cfg(feature = "hal")]
 use embassy_time::{Duration, Timer};
+#[cfg(feature = "hal")]
 use embedded_hal_async::i2c::I2c as I2cBus;
+#[cfg(feature = "hal")]
 use heapless::{String, Vec};
 
-use super::{crc_word, write_int, write_tenths, EntityDescriptor, Reading, Sensor, MAX_READINGS};
+use super::EntityDescriptor;
+#[cfg(feature = "hal")]
+use super::{crc_word, write_int, write_tenths, Reading, Sensor, MAX_READINGS};
 
 pub const ADDR: u8 = 0x62;
 pub const CMD_START_PERIODIC: u16 = 0x21B1;
@@ -91,6 +96,7 @@ pub enum Mode {
 }
 
 /// SCD41 on an I²C bus, generic over the bus (see [`super::sht31::Sht31`]).
+#[cfg(feature = "hal")]
 pub struct Scd41<I2C> {
     i2c: I2C,
     pub mode: Mode,
@@ -99,6 +105,7 @@ pub struct Scd41<I2C> {
     started: bool,
 }
 
+#[cfg(feature = "hal")]
 impl<I2C: I2cBus> Scd41<I2C> {
     pub fn new(i2c: I2C, mode: Mode) -> Self {
         Self {
@@ -183,6 +190,7 @@ impl<I2C: I2cBus> Scd41<I2C> {
     }
 }
 
+#[cfg(feature = "hal")]
 impl<I2C: I2cBus> Sensor for Scd41<I2C> {
     fn kind(&self) -> &'static str {
         "SCD41"
@@ -215,3 +223,53 @@ const _: () = {
     assert!(!data_ready(0x8000)); // only the reserved high bits set -> not ready
     assert!(data_ready(0x8001));
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn co2_is_reported_raw() {
+        assert_eq!(co2_ppm(0), 0);
+        assert_eq!(co2_ppm(812), 812);
+        assert_eq!(co2_ppm(40_000), 40_000);
+    }
+
+    #[test]
+    fn temperature_and_humidity_share_the_sht31_transfer_function() {
+        assert_eq!(temp_tenths(0), crate::sensors::sht31::temp_tenths(0));
+        assert_eq!(rh_tenths(65535), crate::sensors::sht31::rh_tenths(65535));
+        assert_eq!(temp_tenths(65535), 1300);
+        assert_eq!(rh_tenths(0), 0);
+    }
+
+    #[test]
+    fn data_ready_looks_only_at_the_low_bits() {
+        // The reply's high bits are reserved and set on a healthy sensor;
+        // reading them as "ready" would return the previous measurement for ever.
+        assert!(!data_ready(0x0000));
+        assert!(!data_ready(0x8000));
+        assert!(!data_ready(0xF800));
+        assert!(data_ready(0x0001));
+        assert!(data_ready(0x8001));
+        assert!(data_ready(0x07FF));
+    }
+
+    #[test]
+    fn the_commands_are_distinct() {
+        // A transposed digit here would silently start the wrong mode.
+        let commands = [
+            CMD_START_PERIODIC,
+            CMD_START_LOW_POWER_PERIODIC,
+            CMD_READ_MEASUREMENT,
+            CMD_MEASURE_SINGLE_SHOT,
+            CMD_STOP_PERIODIC,
+            CMD_GET_DATA_READY,
+        ];
+        for (i, a) in commands.iter().enumerate() {
+            for b in &commands[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+}

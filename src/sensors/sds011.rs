@@ -15,11 +15,16 @@
 //! stabilise -> read a frame -> put the sensor back to sleep. The sensor must
 //! also be kept dry (condensation ruins both reading and hardware).
 
+#[cfg(feature = "hal")]
 use embassy_time::{with_timeout, Duration, Timer};
+#[cfg(feature = "hal")]
 use embedded_io_async::{Read, Write};
+#[cfg(feature = "hal")]
 use heapless::{String, Vec};
 
-use super::{write_tenths, EntityDescriptor, Reading, Sensor, MAX_READINGS};
+use super::EntityDescriptor;
+#[cfg(feature = "hal")]
+use super::{write_tenths, Reading, Sensor, MAX_READINGS};
 
 /// Frame markers.
 pub const HEAD: u8 = 0xAA;
@@ -33,9 +38,11 @@ pub const CMD_FRAME_LEN: usize = 19;
 pub const WARMUP_SECS: u64 = 20;
 /// How long to wait for a measurement frame once the fan has warmed up. The
 /// sensor reports every ~1 s, so this is generous; exceeding it means silence.
+#[cfg(feature = "hal")]
 pub const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// A gap this long with no byte means the receive buffer is empty, i.e. the
 /// stale pre-warm-up frames have been flushed (frames arrive ~1 s apart).
+#[cfg(feature = "hal")]
 const DRAIN_QUIET: Duration = Duration::from_millis(100);
 
 pub const DESCRIPTORS: &[EntityDescriptor] = &[
@@ -99,6 +106,7 @@ pub const fn sleep_work_frame(work: bool) -> [u8; CMD_FRAME_LEN] {
 
 /// SDS011 on a UART, generic over the byte stream so the driver stays
 /// HAL-agnostic (esp-hal's async `Uart` implements `embedded-io-async`).
+#[cfg(feature = "hal")]
 pub struct Sds011<U> {
     uart: U,
     /// Seconds the fan runs before a frame is trusted. Configurable so a mains
@@ -106,6 +114,7 @@ pub struct Sds011<U> {
     pub warmup_secs: u64,
 }
 
+#[cfg(feature = "hal")]
 impl<U: Read + Write> Sds011<U> {
     pub fn new(uart: U) -> Self {
         Self {
@@ -169,6 +178,7 @@ impl<U: Read + Write> Sds011<U> {
     }
 }
 
+#[cfg(feature = "hal")]
 impl<U: Read + Write> Sensor for Sds011<U> {
     fn kind(&self) -> &'static str {
         "SDS011"
@@ -221,3 +231,94 @@ const _: () = {
     let sleep = sleep_work_frame(false);
     assert!(sleep[4] == 0 && sleep[18] == TAIL);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a well-formed measurement frame for the given raw PM words.
+    fn frame(pm25: u16, pm10: u16) -> [u8; FRAME_LEN] {
+        let mut f = [0u8; FRAME_LEN];
+        f[0] = HEAD;
+        f[1] = CMD_DATA;
+        f[2..4].copy_from_slice(&pm25.to_le_bytes());
+        f[4..6].copy_from_slice(&pm10.to_le_bytes());
+        f[6] = 0xA1; // device id, not covered by the reading
+        f[7] = 0xB2;
+        f[8] = f[2..8].iter().fold(0u8, |a, b| a.wrapping_add(*b));
+        f[9] = TAIL;
+        f
+    }
+
+    #[test]
+    fn a_well_formed_frame_is_accepted() {
+        assert!(frame_ok(&frame(245, 1000)));
+    }
+
+    #[test]
+    fn a_frame_is_rejected_on_any_marker_or_checksum_error() {
+        let good = frame(245, 1000);
+        // Markers and command byte.
+        for (i, wrong) in [(0, 0x00), (1, 0xC5), (9, 0x00)] {
+            let mut f = good;
+            f[i] = wrong;
+            assert!(!frame_ok(&f), "byte {i} = {wrong:#04x} accepted");
+        }
+        // A single bit flipped anywhere in the checksummed payload.
+        for byte in 2..8 {
+            for bit in 0..8 {
+                let mut f = good;
+                f[byte] ^= 1 << bit;
+                assert!(!frame_ok(&f), "bit {bit} of byte {byte} accepted");
+            }
+        }
+        // ... and a checksum that simply does not match.
+        let mut f = good;
+        f[8] = f[8].wrapping_add(1);
+        assert!(!frame_ok(&f));
+    }
+
+    #[test]
+    fn pm_words_decode_as_tenths() {
+        // The protocol reports tenths of µg/m³, little-endian.
+        assert_eq!(pm_tenths(0xF5, 0x00), 245); // 24.5 µg/m³
+        assert_eq!(pm_tenths(0x00, 0x01), 256);
+        assert_eq!(pm_tenths(0x00, 0x00), 0);
+        assert_eq!(pm_tenths(0xFF, 0xFF), 65535);
+        // Byte order matters: swapping the two must not give the same number.
+        assert_ne!(pm_tenths(0x01, 0x02), pm_tenths(0x02, 0x01));
+    }
+
+    #[test]
+    fn a_decoded_frame_reports_both_particle_sizes_independently() {
+        let f = frame(123, 4567);
+        assert_eq!(pm_tenths(f[2], f[3]), 123);
+        assert_eq!(pm_tenths(f[4], f[5]), 4567);
+    }
+
+    #[test]
+    fn the_sleep_and_work_commands_differ_only_where_they_should() {
+        let work = sleep_work_frame(true);
+        let sleep = sleep_work_frame(false);
+
+        for f in [&work, &sleep] {
+            assert_eq!(f[0], HEAD);
+            assert_eq!(f[1], 0xB4);
+            assert_eq!(f[2], 0x06); // set sleep/work
+            assert_eq!(f[3], 0x01); // set, not query
+            assert_eq!([f[15], f[16]], [0xFF, 0xFF]); // broadcast
+            assert_eq!(f[18], TAIL);
+            let sum = f[2..17].iter().fold(0u8, |a, b| a.wrapping_add(*b));
+            assert_eq!(f[17], sum, "checksum");
+        }
+
+        assert_eq!(work[4], 1);
+        assert_eq!(sleep[4], 0);
+        // The mode byte and the checksum are the only difference — a frame that
+        // differed elsewhere would be addressing something else entirely.
+        let differing: Vec<usize> = (0..CMD_FRAME_LEN)
+            .filter(|&i| work[i] != sleep[i])
+            .collect();
+        assert_eq!(differing, vec![4, 17]);
+    }
+}

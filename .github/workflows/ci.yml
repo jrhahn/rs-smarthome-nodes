@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately *not* setting RUSTFLAGS here: a RUSTFLAGS env var replaces the
+  # `target.*.rustflags` in .cargo/config.toml wholesale, which would drop
+  # `-C link-arg=-Tlinkall.x` and break the firmware link. Warnings are denied
+  # per clippy invocation instead.
+
+jobs:
+  # Formatting and the host-testable logic. Fast, and the only job that can
+  # actually *run* anything — see `src/lib.rs` for why the firmware itself
+  # cannot be tested here.
+  test:
+    name: Format & host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel (1.83, the last one esp-wifi 0.11
+      # builds against) and the components.
+      - name: Install Rust
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: host
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # The pure subset: no esp-hal, so it builds and runs for the host.
+      - name: Clippy (host)
+        run: >
+          cargo clippy --all-targets --no-default-features
+          --target x86_64-unknown-linux-gnu -- -D warnings
+
+      - name: Tests
+        run: cargo test --no-default-features --target x86_64-unknown-linux-gnu
+
+  # The real thing: every node in the fleet has to build, because `NODE=` picks
+  # a different sensor set and power profile at compile time and a node nobody
+  # has flashed lately is exactly where a break hides.
+  firmware:
+    name: Firmware (NODE=${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [draussen, schlafzimmer, wohnzimmer, kueche, bad]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: firmware
+
+      - name: Clippy
+        run: cargo clippy --lib --bins -- -D warnings
+        env:
+          NODE: ${{ matrix.node }}
+
+      - name: Build
+        run: cargo build --release
+        env:
+          # Credentials and the broker address are compile-time; CI has none and
+          # builds against the placeholder defaults. The image is never flashed
+          # from here, so that is fine.
+          NODE: ${{ matrix.node }}
+
+      - name: Report size
+        run: ls -l target/riscv32imc-unknown-none-elf/release/rs-smarthome-nodes
+
+  # A typo in `NODE=` must fail the build rather than quietly produce an image
+  # for the wrong room. That guard is a const-eval panic, so the only way to
+  # check it still works is to try.
+  unknown-node-fails:
+    name: An unknown NODE fails the build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: firmware
+
+      - name: Build with a mistyped node name
+        run: |
+          if NODE=kuche cargo build --release 2>build.log; then
+            echo "::error::NODE=kuche built successfully; the const-eval guard is gone"
+            exit 1
+          fi
+          grep -q "unknown NODE" build.log || {
+            echo "::error::build failed, but not on the node-name guard:"
+            cat build.log
+            exit 1
+          }
+          echo "rejected as expected"
