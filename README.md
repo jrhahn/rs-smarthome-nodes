@@ -221,6 +221,11 @@ line); adjust `MQTT_PORT` in `src/main.rs` if it isn't the default 1883.
 📖 **Full build/flash walkthrough — including flashing with a Raspberry Pi Pico
 probe — is in [FLASHING.md](FLASHING.md).**
 
+🔌 **Complete wiring for each node — which sensor goes on which pad, per
+`NODE=`, with the pull-ups and supply notes — is in
+[docs/wiring.md](docs/wiring.md).** The pin map above is the summary; that page
+is what you build from.
+
 ## Tests
 
 A firmware binary for `riscv32imc` cannot host a test harness, so the crate is

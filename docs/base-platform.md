@@ -16,6 +16,9 @@ of sensors, selected with `NODE=<name>` at build time.
 | `kueche` | Küche | SDS011 | mains (fan) |
 | `bad` | Bad | SHT31-D | mains |
 
+Per-node wiring — which sensor sits on which pad, with the pull-ups and supply
+notes — is in [wiring.md](wiring.md).
+
 ## Sensor set
 
 | Sensor | Bus | Emits | Status |
