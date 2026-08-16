@@ -176,6 +176,76 @@ sleeping and CO₂/PM continuity to lose, so it ignores it. The SCD41 follows th
 profile too: periodic measurement on mains (what its self-calibration expects),
 single-shot on battery.
 
+## Testing
+
+`cargo test` cannot link for `riscv32imc`, and the crate used to be a single
+binary that pulled in esp-hal, so it could not be built for the host either.
+That left compile-time `const` assertions as the only harness, and the awkward
+habit of validating things like the discovery JSON with throwaway host replicas
+of the real code — copy-paste that proves nothing once it drifts.
+
+So the crate is now a library plus a thin binary, and everything that touches a
+bus, RTC RAM, flash or the radio sits behind the `hal` feature. With it off, the
+remainder builds for the host: the protocol decoding, the CRCs, the flash blob
+layouts, `Config::apply`, the node table and the discovery payload builders.
+That is most of the logic that can be silently *wrong* rather than fail to
+build.
+
+Two changes fell out of making that possible, both of which stand on their own:
+
+- `discovery` takes the `NodeConfig` as an argument instead of reading the
+  global identity, so the payloads are a pure function of the node;
+- the provisioning-payload parser moved out of `main.rs` into `node`, with the
+  two facts it needs (the current identity, whether flash holds an override)
+  passed in rather than read.
+
+The tests worth having are the cross-checks, not the arithmetic: that a
+discovered state topic is exactly the topic the publish path uses, that every
+control key is one `Config::apply` accepts, that no two entities on a node share
+a topic or a unique id, and that `KNOWN_NODES` still lists the fleet. Those are
+the failures that would otherwise show up as an entity stuck at "unknown".
+
+Compile-time assertions stay: they fail the build rather than a test run, and
+they cover invariants a test cannot reach.
+
+### Driver tests against fake buses
+
+Making the drivers generic over `embedded-hal-async` / `embedded-io-async` was
+about keeping them free of esp-hal types; the other half of that payoff is that
+the **real** drivers run on the host against a scripted bus (`sensors/mock.rs`).
+The `hal` feature was split for it: `drivers` brings in only the bus traits and
+embassy-time, whose `std` time driver is what lets a test await a conversion.
+
+The UART mock is the interesting one, because the SDS011 driver distinguishes
+"stale frames buffered while the fan span up" from "the frame I want" purely by
+draining until the line falls quiet. So the script is a list of segments with an
+optional gap before each, and a run-dry mock returns `Pending` rather than
+`Ok(0)` — which is what a real UART does, and what lets the driver's timeout
+fire. Covered: the full duty cycle, the fan being parked on *every* exit path,
+resync past noise, a rejected checksum, an absent sensor, and a stray `0xAA`
+costing exactly one frame.
+
+Writing them turned up one real hazard. `read_byte` and `drain` looped on a
+read that completed with zero bytes, which never yields — so the surrounding
+timeout could never fire and the driver would spin for ever. esp-hal's UART does
+not do that (it waits for a byte) but the trait permits it, so both loops are
+now bounded, with a `StarvedUart` test to keep them that way.
+
+The SCD41 gets the same treatment, and there the two run modes are the point.
+Periodic (mains) must send `start_periodic_measurement` exactly **once** — a
+node that re-sent it every round would restart the conversion cycle and never
+read anything — and must poll data-ready before reading, or it gets the previous
+measurement. Single-shot (battery) does neither: it asks for one conversion,
+waits it out, reads. Both must treat `0 ppm` as "no measurement yet" rather than
+as air, which would otherwise draw a plausible flat line at zero. That one
+single-shot test really does sit through the datasheet's ~5 s conversion; unlike
+the SDS011 warm-up it is a fixed sensor timing, not a policy knob, so there is
+nothing honest to shorten.
+
+What this does *not* cover: timing, bus contention, anything electrical. A green
+test says the driver handles the bytes correctly, not that the SHT31 answers
+within 15 ms on the real bus.
+
 ## Known gaps
 
 - Provisioning needs the board to reach the broker, so a node with the wrong

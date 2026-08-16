@@ -31,15 +31,6 @@
 #![no_std]
 #![no_main]
 
-mod config;
-mod discovery;
-mod ds18b20;
-mod hx711;
-mod node;
-mod platform;
-mod sensors;
-mod state;
-
 use core::time::Duration as CoreDuration;
 
 use embassy_executor::Spawner;
@@ -69,6 +60,9 @@ use rust_mqtt::{
     packet::v5::publish_packet::QualityOfService,
     utils::rng_generator::CountingRng,
 };
+
+use node::Provision;
+use rs_smarthome_nodes::{config, discovery, ds18b20, hx711, node, platform, state};
 
 use config::Config;
 use ds18b20::Ds18b20;
@@ -741,11 +735,11 @@ async fn publish_samples(
     // Retained, so the broker replays it to Home Assistant on its next restart;
     // hence once per power cycle is enough (the flag lives in RTC RAM).
     if !state::discovery_published() {
-        let availability = discovery::availability(&cfg);
+        let availability = discovery::availability(&node, &cfg);
         let mut ok = true;
-        for entity in discovery::entities() {
-            let topic = discovery::config_topic(&entity);
-            let Some(payload) = discovery::config_payload(&entity, &availability) else {
+        for entity in discovery::entities(&node) {
+            let topic = discovery::config_topic(&node, &entity);
+            let Some(payload) = discovery::config_payload(&node, &entity, &availability) else {
                 warn!("discovery payload too long for {}; skipping", topic);
                 continue;
             };
@@ -761,12 +755,12 @@ async fn publish_samples(
         // The tuning knobs are discovered the same way, as `number` / `switch` /
         // `button` entities pointing back at the config topics we subscribe to
         // below.
-        for control in discovery::controls() {
+        for control in discovery::controls(&node) {
             if !ok {
                 break;
             }
-            let topic = discovery::control_topic(control);
-            let Some(payload) = discovery::control_payload(control, &availability) else {
+            let topic = discovery::control_topic(&node, control);
+            let Some(payload) = discovery::control_payload(&node, control, &availability) else {
                 warn!("discovery payload too long for {}; skipping", topic);
                 continue;
             };
@@ -844,7 +838,11 @@ async fn publish_samples(
                     };
                     let value = value.trim();
                     if topic == provision_topic {
-                        reprovision = provision_request(value);
+                        reprovision = node::provision_request(
+                            value,
+                            &node,
+                            config::load_node_name().is_some(),
+                        );
                     } else if let Some(key) = topic.strip_prefix(config_prefix.as_str()) {
                         // Tracked separately from `apply`'s "did anything
                         // change" answer: taring an already-zeroed scale changes
@@ -894,49 +892,6 @@ async fn publish_samples(
     }
 
     Ok(updated)
-}
-
-/// What a retained provisioning message asks this board to become.
-enum Provision {
-    /// Run as this node from the next boot (already checked against the table).
-    Become(heapless::String<{ config::NODE_NAME_MAX }>),
-    /// Drop the stored override and go back to the built-in identity.
-    Reset,
-}
-
-/// Interpret a provisioning payload, or `None` if there is nothing to do.
-///
-/// "Nothing to do" is the common case and matters: the message is retained, so
-/// it is re-delivered on *every* connect. Only an actual change may reach flash,
-/// or a board would rewrite its identity sector for the rest of its life.
-fn provision_request(value: &str) -> Option<Provision> {
-    let node = node::active();
-
-    // A zero-length payload is how a retained message is cleared, not a request.
-    if value.is_empty() {
-        return None;
-    }
-
-    if value == node::PROVISION_RESET {
-        return config::load_node_name()
-            .is_some()
-            .then_some(Provision::Reset);
-    }
-
-    match node::by_name(value) {
-        // Compared by node id, not by name: the outdoor node answers to
-        // `draussen` but its id — and its topics — say `scale`.
-        Some(cfg) if cfg.id == node.id => None,
-        Some(_) => Some(Provision::Become(heapless::String::try_from(value).ok()?)),
-        None => {
-            warn!(
-                "provisioning asked for unknown node '{}'; expected one of: {}",
-                value,
-                node::KNOWN_NODES
-            );
-            None
-        }
-    }
 }
 
 /// Store the new identity and restart into it.

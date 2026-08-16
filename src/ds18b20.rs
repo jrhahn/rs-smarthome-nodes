@@ -17,7 +17,9 @@
 //! third wire); the MCU pin is configured open-drain with the weak internal
 //! pull-up enabled as a backup.
 
+#[cfg(feature = "hal")]
 use embassy_time::{Duration, Timer};
+#[cfg(feature = "hal")]
 use esp_hal::{delay::Delay, gpio::OutputOpenDrain};
 
 use crate::sensors::EntityDescriptor;
@@ -35,6 +37,7 @@ pub const DESCRIPTORS: &[EntityDescriptor] = &[EntityDescriptor {
 
 /// 12-bit (default) conversions take up to 750 ms per the datasheet. Wait a hair
 /// longer to be safe before clocking the result out.
+#[cfg(feature = "hal")]
 const CONVERSION_TIME: Duration = Duration::from_millis(760);
 
 // --- ROM / function commands (only the single-drop subset we use) -----------
@@ -47,11 +50,13 @@ const CMD_CONVERT_T: u8 = 0x44;
 const CMD_READ_SCRATCHPAD: u8 = 0xBE;
 
 /// Driver wrapping the single open-drain 1-Wire data line.
+#[cfg(feature = "hal")]
 pub struct Ds18b20<'d> {
     io: OutputOpenDrain<'d>,
     delay: Delay,
 }
 
+#[cfg(feature = "hal")]
 impl<'d> Ds18b20<'d> {
     /// Create a driver over an already-configured open-drain data pin. The pin
     /// is left released (high / bus idle).
@@ -227,3 +232,78 @@ const _: () = {
     assert!(temp_tenths(-8) == -5);
     assert!(temp_tenths(0) == 0);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_crc_matches_a_real_scratchpad() {
+        assert_eq!(
+            crc8(&[0x91, 0x01, 0x4B, 0x46, 0x7F, 0xFF, 0x0C, 0x10]),
+            0x70
+        );
+        assert_eq!(crc8(&[]), 0);
+    }
+
+    #[test]
+    fn a_frame_with_its_crc_appended_checks_out_to_zero() {
+        // The property the driver relies on when validating a scratchpad read.
+        for data in [
+            &[0x91u8, 0x01, 0x4B, 0x46, 0x7F, 0xFF, 0x0C, 0x10][..],
+            &[0x50, 0x05, 0x4B, 0x46][..],
+            &[0x00][..],
+        ] {
+            let mut framed = data.to_vec();
+            framed.push(crc8(data));
+            assert_eq!(crc8(&framed), 0);
+        }
+    }
+
+    #[test]
+    fn the_crc_catches_any_single_bit_error() {
+        let data = [0x91u8, 0x01, 0x4B, 0x46, 0x7F, 0xFF, 0x0C, 0x10];
+        let good = crc8(&data);
+        for byte in 0..data.len() {
+            for bit in 0..8 {
+                let mut corrupt = data;
+                corrupt[byte] ^= 1 << bit;
+                assert_ne!(crc8(&corrupt), good, "bit {bit} of byte {byte}");
+            }
+        }
+    }
+
+    #[test]
+    fn raw_readings_convert_to_tenths() {
+        assert_eq!(temp_tenths(0x0191), 251); // +25.0625 -> 25.1
+        assert_eq!(temp_tenths(0x0550), 850); // power-on default, +85.0
+        assert_eq!(temp_tenths(0), 0);
+        assert_eq!(temp_tenths(-8), -5); // -0.5
+        assert_eq!(temp_tenths(-0x0191), -251);
+    }
+
+    #[test]
+    fn formatting_keeps_the_sign_of_a_sub_degree_reading() {
+        for (raw, expected) in [
+            (0x0191, "25.1"),
+            (0, "0.0"),
+            (-8, "-0.5"),
+            (-0x0191, "-25.1"),
+            (0x07D0, "125.0"), // the sensor's maximum
+        ] {
+            let mut buf = heapless::String::new();
+            write_temp_c(&mut buf, raw);
+            assert_eq!(buf.as_str(), expected, "raw {raw:#06x}");
+        }
+    }
+
+    #[test]
+    fn the_widest_reading_still_fits_the_buffer() {
+        // The buffer is 16 bytes and the formatting is infallible-by-assumption.
+        for raw in [i16::MIN, i16::MAX] {
+            let mut buf = heapless::String::new();
+            write_temp_c(&mut buf, raw);
+            assert!(!buf.is_empty() && buf.len() < 16);
+        }
+    }
+}

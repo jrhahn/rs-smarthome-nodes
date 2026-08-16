@@ -13,10 +13,16 @@
 //! [`Config::DEFAULT`]. RTC RAM ([`crate::state`]) is deliberately *not* used for
 //! this: it is wiped on a cold power-on (battery swap), and calibration must
 //! survive that.
+//!
+//! The blob encoding and [`Config::apply`] are pure and always compiled; only
+//! the flash access itself sits behind the `hal` feature, so the layout and the
+//! parsing can be unit-tested on the host (see the `tests` module below).
 
 use core::time::Duration as CoreDuration;
 
+#[cfg(feature = "hal")]
 use embedded_storage::{ReadStorage, Storage};
+#[cfg(feature = "hal")]
 use esp_storage::FlashStorage;
 use heapless::String;
 
@@ -254,6 +260,7 @@ impl Config {
 /// Load the config from flash, or [`Config::DEFAULT`] if the sector is blank or
 /// corrupt. Call this at boot, before the radio is up (flash access is happier
 /// with Wi-Fi idle).
+#[cfg(feature = "hal")]
 pub fn load() -> Config {
     let mut flash = FlashStorage::new();
     let mut buf = [0u8; BLOB_LEN];
@@ -269,6 +276,7 @@ pub fn load() -> Config {
 /// critical section, so it is safe to run with the radio still up just before
 /// deep sleep. Errors are returned for logging; a failed write simply means the
 /// change is lost, not corruption.
+#[cfg(feature = "hal")]
 pub fn store(config: &Config) -> Result<(), &'static str> {
     let mut flash = FlashStorage::new();
     flash
@@ -292,13 +300,10 @@ pub const NODE_NAME_MAX: usize = 16;
 /// magic(4) + version(1) + len(1) + pad(2) + name(16) + crc(4).
 const NODE_BLOB_LEN: usize = 4 + 4 + NODE_NAME_MAX + 4;
 
-/// The provisioned node name, or `None` when this board runs as the identity it
-/// was built with.
-pub fn load_node_name() -> Option<String<NODE_NAME_MAX>> {
-    let mut flash = FlashStorage::new();
-    let mut b = [0u8; NODE_BLOB_LEN];
-    flash.read(NODE_OFFSET, &mut b).ok()?;
-
+/// Decode an identity blob. `None` for anything that does not check out — a
+/// blank sector, an erased one (all `0xFF`), a stale version, a bad CRC or a
+/// length that does not fit — which the caller reads as "no override".
+fn decode_node_name(b: &[u8; NODE_BLOB_LEN]) -> Option<String<NODE_NAME_MAX>> {
     if u32::from_le_bytes(b[0..4].try_into().ok()?) != NODE_MAGIC || b[4] != NODE_VERSION {
         return None;
     }
@@ -313,10 +318,9 @@ pub fn load_node_name() -> Option<String<NODE_NAME_MAX>> {
     String::try_from(name).ok()
 }
 
-/// Persist a node name, so the next boot comes up as that node. Callers should
-/// have validated the name first — an unknown one would leave the board falling
-/// back to its build-time identity on every boot.
-pub fn store_node_name(name: &str) -> Result<(), &'static str> {
+/// Encode an identity blob. Rejects a name that cannot be stored rather than
+/// truncating it, since a truncated name would name a different node (or none).
+fn encode_node_name(name: &str) -> Result<[u8; NODE_BLOB_LEN], &'static str> {
     if name.is_empty() || name.len() > NODE_NAME_MAX {
         return Err("node name length");
     }
@@ -327,13 +331,32 @@ pub fn store_node_name(name: &str) -> Result<(), &'static str> {
     b[8..8 + name.len()].copy_from_slice(name.as_bytes());
     let crc = crc32(&b[0..24]);
     b[24..28].copy_from_slice(&crc.to_le_bytes());
+    Ok(b)
+}
 
+/// The provisioned node name, or `None` when this board runs as the identity it
+/// was built with.
+#[cfg(feature = "hal")]
+pub fn load_node_name() -> Option<String<NODE_NAME_MAX>> {
+    let mut flash = FlashStorage::new();
+    let mut b = [0u8; NODE_BLOB_LEN];
+    flash.read(NODE_OFFSET, &mut b).ok()?;
+    decode_node_name(&b)
+}
+
+/// Persist a node name, so the next boot comes up as that node. Callers should
+/// have validated the name first — an unknown one would leave the board falling
+/// back to its build-time identity on every boot.
+#[cfg(feature = "hal")]
+pub fn store_node_name(name: &str) -> Result<(), &'static str> {
+    let b = encode_node_name(name)?;
     FlashStorage::new()
         .write(NODE_OFFSET, &b)
         .map_err(|_| "node nvs write")
 }
 
 /// Drop the override, returning the board to its build-time identity.
+#[cfg(feature = "hal")]
 pub fn clear_node_name() -> Result<(), &'static str> {
     FlashStorage::new()
         .write(NODE_OFFSET, &[0u8; NODE_BLOB_LEN])
@@ -363,3 +386,292 @@ const _: () = {
     assert!(crc32(b"123456789") == 0xCBF4_3926);
     assert!(crc32(&[]) == 0);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config that differs from `DEFAULT` in every field, so a serialisation
+    /// bug that drops or transposes one shows up.
+    fn sample() -> Config {
+        Config {
+            offset: -12_345,
+            scale_factor: 512.5,
+            threshold_grams: 7.5,
+            idle_secs: 3,
+            active_secs: 11,
+            tare_token: 99,
+            deep_sleep: false,
+            heartbeat_secs: 1234,
+        }
+    }
+
+    // --- Config blob --------------------------------------------------------
+
+    #[test]
+    fn config_blob_round_trips() {
+        for cfg in [Config::DEFAULT, sample()] {
+            let decoded = Config::from_bytes(&cfg.to_bytes()).expect("valid blob");
+            assert!(decoded == cfg);
+        }
+    }
+
+    #[test]
+    fn config_blob_rejects_blank_and_erased_sectors() {
+        // A never-written sector reads as zeroes on some parts and as 0xFF
+        // (erased flash) on others; both must fall back to defaults.
+        assert!(Config::from_bytes(&[0x00; BLOB_LEN]).is_none());
+        assert!(Config::from_bytes(&[0xFF; BLOB_LEN]).is_none());
+    }
+
+    #[test]
+    fn config_blob_rejects_a_stale_version() {
+        let mut b = sample().to_bytes();
+        b[4] = VERSION.wrapping_add(1);
+        assert!(Config::from_bytes(&b).is_none());
+    }
+
+    #[test]
+    fn config_blob_rejects_any_single_bit_flip() {
+        // Every byte the CRC covers, and every bit of it. A flip must never
+        // decode as a *different valid* config — that would silently move the
+        // calibration.
+        let good = sample().to_bytes();
+        for byte in 0..BLOB_LEN {
+            for bit in 0..8 {
+                let mut b = good;
+                b[byte] ^= 1 << bit;
+                assert!(
+                    Config::from_bytes(&b).is_none(),
+                    "bit {bit} of byte {byte} decoded despite corruption"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn config_blob_rejects_a_half_written_sector() {
+        // Power lost mid-write: a prefix of the new blob, the rest still erased.
+        let good = sample().to_bytes();
+        for kept in 1..BLOB_LEN {
+            let mut b = [0xFFu8; BLOB_LEN];
+            b[..kept].copy_from_slice(&good[..kept]);
+            assert!(Config::from_bytes(&b).is_none(), "accepted {kept} bytes");
+        }
+    }
+
+    // --- Config::apply ------------------------------------------------------
+
+    #[test]
+    fn apply_parses_every_key() {
+        let mut cfg = Config::DEFAULT;
+        assert!(cfg.apply("offset", "-500", 0));
+        assert_eq!(cfg.offset, -500);
+        assert!(cfg.apply("scale_factor", "123.5", 0));
+        assert_eq!(cfg.scale_factor, 123.5);
+        assert!(cfg.apply("threshold", "42", 0));
+        assert_eq!(cfg.threshold_grams, 42.0);
+        assert!(cfg.apply("idle_interval", "7", 0));
+        assert_eq!(cfg.idle_secs, 7);
+        assert!(cfg.apply("active_interval", "17", 0));
+        assert_eq!(cfg.active_secs, 17);
+        assert!(cfg.apply("heartbeat_interval", "900", 0));
+        assert_eq!(cfg.heartbeat_secs, 900);
+        assert!(cfg.apply("deep_sleep", "0", 0));
+        assert!(!cfg.deep_sleep);
+    }
+
+    #[test]
+    fn apply_reports_no_change_for_a_repeat() {
+        // What keeps a retained message, re-delivered on every connect, from
+        // rewriting flash for ever.
+        let mut cfg = Config::DEFAULT;
+        assert!(cfg.apply("idle_interval", "5", 0));
+        assert!(!cfg.apply("idle_interval", "5", 0));
+    }
+
+    #[test]
+    fn apply_ignores_unparseable_and_unknown_input() {
+        let mut cfg = Config::DEFAULT;
+        for (key, value) in [
+            ("offset", "not-a-number"),
+            ("idle_interval", "-1"), // u32
+            ("idle_interval", ""),   //
+            ("scale_factor", "0"),   // would divide by zero
+            ("scale_factor", "-3"),  // would invert the reading
+            ("scale_factor", "NaN"), // parses, but is not finite
+            ("scale_factor", "inf"), //
+            ("threshold", "-1"),     // negative grams
+            ("deep_sleep", "maybe"), //
+            ("no_such_key", "1"),    //
+            ("", "1"),               //
+        ] {
+            assert!(!cfg.apply(key, value, 0), "{key}={value:?} was accepted");
+        }
+        assert!(cfg == Config::DEFAULT);
+    }
+
+    #[test]
+    fn apply_accepts_every_boolean_spelling() {
+        let mut cfg = Config::DEFAULT;
+        for value in ["0", "false", "off", "OFF"] {
+            cfg.deep_sleep = true;
+            assert!(cfg.apply("deep_sleep", value, 0));
+            assert!(!cfg.deep_sleep);
+        }
+        for value in ["1", "true", "on", "ON"] {
+            cfg.deep_sleep = false;
+            assert!(cfg.apply("deep_sleep", value, 0));
+            assert!(cfg.deep_sleep);
+        }
+    }
+
+    #[test]
+    fn tare_adopts_the_baseline() {
+        let mut cfg = Config::DEFAULT;
+        // The discovered button sends a constant payload, so every press must
+        // count — it is the caller that stops the retained message repeating.
+        assert!(cfg.apply("tare", "tare", 4242));
+        assert_eq!(cfg.offset, 4242);
+        assert!(cfg.apply("tare", "tare", 99));
+        assert_eq!(cfg.offset, 99);
+    }
+
+    #[test]
+    fn tare_ignores_a_replayed_token_but_honours_a_new_one() {
+        // The older automation published a timestamp; the same one arriving
+        // again is the broker replaying, not a second press.
+        let mut cfg = Config::DEFAULT;
+        assert!(cfg.apply("tare", "1000", 4242));
+        assert_eq!(cfg.offset, 4242);
+        assert!(!cfg.apply("tare", "1000", 77));
+        assert_eq!(cfg.offset, 4242);
+        assert!(cfg.apply("tare", "1001", 77));
+        assert_eq!(cfg.offset, 77);
+    }
+
+    #[test]
+    fn tare_ignores_an_empty_payload() {
+        // How a retained message is deleted — it must not read as a press.
+        let mut cfg = Config::DEFAULT;
+        assert!(!cfg.apply("tare", "", 4242));
+        assert_eq!(cfg.offset, Config::DEFAULT.offset);
+    }
+
+    // --- Derived values -----------------------------------------------------
+
+    #[test]
+    fn threshold_ticks_never_collapses_to_zero() {
+        // A zero threshold would make every sample look like a bird.
+        let mut cfg = Config::DEFAULT;
+        cfg.threshold_grams = 0.0;
+        assert_eq!(cfg.threshold_ticks(), 1);
+        cfg.threshold_grams = 10.0;
+        cfg.scale_factor = f32::NAN;
+        assert_eq!(cfg.threshold_ticks(), 1);
+        cfg.scale_factor = 100.0;
+        assert_eq!(cfg.threshold_ticks(), 1000);
+    }
+
+    #[test]
+    fn heartbeat_wakes_is_at_least_one() {
+        let mut cfg = Config::DEFAULT;
+        // A zero interval would divide by zero; it clamps to one second, so the
+        // heartbeat still lands on its configured period.
+        cfg.idle_secs = 0;
+        assert_eq!(cfg.heartbeat_wakes(), cfg.heartbeat_secs);
+        cfg.idle_secs = 2;
+        cfg.heartbeat_secs = 600;
+        assert_eq!(cfg.heartbeat_wakes(), 300);
+        cfg.heartbeat_secs = 1; // shorter than one wake
+        assert_eq!(cfg.heartbeat_wakes(), 1);
+    }
+
+    #[test]
+    fn write_grams_formats_fixed_point() {
+        let mut cfg = Config::DEFAULT;
+        cfg.offset = 0;
+        cfg.scale_factor = 100.0;
+        for (raw, expected) in [
+            (0, "0.0"),
+            (1000, "10.0"),
+            (1005, "10.1"), // rounds away from zero
+            (-1005, "-10.1"),
+            (-50, "-0.5"),
+        ] {
+            let mut buf = String::new();
+            cfg.write_grams(&mut buf, raw);
+            assert_eq!(buf.as_str(), expected, "raw {raw}");
+        }
+    }
+
+    #[test]
+    fn write_grams_survives_a_broken_calibration() {
+        // A zero scale factor must not produce `inf` or `NaN` on the wire.
+        let mut cfg = Config::DEFAULT;
+        cfg.offset = 0;
+        cfg.scale_factor = 0.0;
+        let mut buf = String::new();
+        cfg.write_grams(&mut buf, 4200);
+        assert!(buf
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-'));
+    }
+
+    // --- Node identity blob -------------------------------------------------
+
+    #[test]
+    fn node_blob_round_trips_every_fleet_name() {
+        for (name, _) in crate::node::FLEET {
+            let blob = encode_node_name(name).expect("encodable");
+            assert_eq!(decode_node_name(&blob).as_deref(), Some(*name));
+        }
+    }
+
+    #[test]
+    fn node_blob_rejects_unstorable_names() {
+        assert!(encode_node_name("").is_err());
+        assert!(encode_node_name(&"x".repeat(NODE_NAME_MAX + 1)).is_err());
+        // Exactly full is fine — the boundary the fleet must stay inside.
+        assert!(encode_node_name(&"x".repeat(NODE_NAME_MAX)).is_ok());
+    }
+
+    #[test]
+    fn node_blob_rejects_blank_erased_and_corrupt_sectors() {
+        assert!(decode_node_name(&[0x00; NODE_BLOB_LEN]).is_none());
+        assert!(decode_node_name(&[0xFF; NODE_BLOB_LEN]).is_none());
+
+        let good = encode_node_name("kueche").unwrap();
+        for byte in 0..NODE_BLOB_LEN {
+            for bit in 0..8 {
+                let mut b = good;
+                b[byte] ^= 1 << bit;
+                assert!(
+                    decode_node_name(&b).is_none(),
+                    "bit {bit} of byte {byte} decoded despite corruption"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn node_blob_rejects_a_half_written_sector() {
+        let good = encode_node_name("schlafzimmer").unwrap();
+        for kept in 1..NODE_BLOB_LEN {
+            let mut b = [0xFFu8; NODE_BLOB_LEN];
+            b[..kept].copy_from_slice(&good[..kept]);
+            assert!(decode_node_name(&b).is_none(), "accepted {kept} bytes");
+        }
+    }
+
+    #[test]
+    fn node_blob_rejects_a_length_that_overruns_the_slot() {
+        // A length field pointing past the name field, with the CRC recomputed
+        // so only the bounds check stands between it and a panic.
+        let mut b = encode_node_name("bad").unwrap();
+        b[5] = NODE_NAME_MAX as u8 + 1;
+        let crc = crc32(&b[0..24]);
+        b[24..28].copy_from_slice(&crc.to_le_bytes());
+        assert!(decode_node_name(&b).is_none());
+    }
+}

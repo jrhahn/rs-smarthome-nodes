@@ -221,6 +221,42 @@ line); adjust `MQTT_PORT` in `src/main.rs` if it isn't the default 1883.
 📖 **Full build/flash walkthrough — including flashing with a Raspberry Pi Pico
 probe — is in [FLASHING.md](FLASHING.md).**
 
+## Tests
+
+A firmware binary for `riscv32imc` cannot host a test harness, so the crate is
+split: [`src/lib.rs`](src/lib.rs) holds everything the binary is made of, and
+the parts that are **pure computation** — frame decoding, CRCs, the flash blob
+layouts, `Config::apply`, the discovery payloads, the node table — build without
+the HAL and therefore run on the host.
+
+```bash
+# What CI runs
+cargo test --no-default-features --features host-tests \
+    --target x86_64-unknown-linux-gnu
+```
+
+The sensor drivers themselves are covered too. They are generic over the
+`embedded-hal-async` / `embedded-io-async` bus traits, so
+[`src/sensors/mock.rs`](src/sensors/mock.rs) can feed the *real* SHT31, SCD41
+and SDS011 drivers a scripted bus: canned I²C replies, and a UART that hands
+over stale frames, falls quiet, then delivers the frame that matters. That
+covers the resync, the CRC rejection, the fan duty cycle, the SCD41's two run
+modes and its data-ready handshake, and what happens when a sensor is absent —
+but not timing, bus contention or anything electrical, which stay bench
+questions.
+
+Anything that touches the chip itself — RTC RAM, flash, the radio, the bit-bang
+drivers — sits behind the `hal` feature (on by default), so a normal
+`cargo build` is unaffected. Compile-time
+`const _: () = assert!(…)` checks stay where they are: they cost nothing and
+fail the *build*, which is stronger than a test — the tests cover what
+const-eval cannot reach, such as anything that formats a string, negative cases,
+and inputs enumerated in a loop.
+
+[CI](.github/workflows/ci.yml) runs the tests, both clippy passes, and builds
+every node in the fleet — plus a check that a mistyped `NODE=` still fails the
+build.
+
 ## Home Assistant integration
 
 Each node **announces itself**: on the first connect after a power-up it

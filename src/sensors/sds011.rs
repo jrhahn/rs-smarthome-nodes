@@ -15,11 +15,16 @@
 //! stabilise -> read a frame -> put the sensor back to sleep. The sensor must
 //! also be kept dry (condensation ruins both reading and hardware).
 
+#[cfg(feature = "drivers")]
 use embassy_time::{with_timeout, Duration, Timer};
+#[cfg(feature = "drivers")]
 use embedded_io_async::{Read, Write};
+#[cfg(feature = "drivers")]
 use heapless::{String, Vec};
 
-use super::{write_tenths, EntityDescriptor, Reading, Sensor, MAX_READINGS};
+use super::EntityDescriptor;
+#[cfg(feature = "drivers")]
+use super::{write_tenths, Reading, Sensor, MAX_READINGS};
 
 /// Frame markers.
 pub const HEAD: u8 = 0xAA;
@@ -33,10 +38,20 @@ pub const CMD_FRAME_LEN: usize = 19;
 pub const WARMUP_SECS: u64 = 20;
 /// How long to wait for a measurement frame once the fan has warmed up. The
 /// sensor reports every ~1 s, so this is generous; exceeding it means silence.
+#[cfg(feature = "drivers")]
 pub const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// A gap this long with no byte means the receive buffer is empty, i.e. the
 /// stale pre-warm-up frames have been flushed (frames arrive ~1 s apart).
+#[cfg(feature = "drivers")]
 const DRAIN_QUIET: Duration = Duration::from_millis(100);
+/// Consecutive zero-length reads tolerated before giving up.
+///
+/// A UART that keeps *completing* a read with no bytes never yields, so the
+/// surrounding timeout could never fire and the driver would spin for ever.
+/// esp-hal's UART does not do this — it waits for at least one byte — but the
+/// trait permits it, and a bound is three lines.
+#[cfg(feature = "drivers")]
+const EMPTY_READ_LIMIT: usize = 64;
 
 pub const DESCRIPTORS: &[EntityDescriptor] = &[
     EntityDescriptor {
@@ -99,18 +114,25 @@ pub const fn sleep_work_frame(work: bool) -> [u8; CMD_FRAME_LEN] {
 
 /// SDS011 on a UART, generic over the byte stream so the driver stays
 /// HAL-agnostic (esp-hal's async `Uart` implements `embedded-io-async`).
+#[cfg(feature = "drivers")]
 pub struct Sds011<U> {
     uart: U,
     /// Seconds the fan runs before a frame is trusted. Configurable so a mains
     /// node that samples rarely can afford a longer, more accurate warm-up.
     pub warmup_secs: u64,
+    /// How long to wait for a frame once the fan has warmed up. Configurable
+    /// for the same reason as the warm-up — and so a test does not have to sit
+    /// through the real thing.
+    pub frame_timeout: Duration,
 }
 
+#[cfg(feature = "drivers")]
 impl<U: Read + Write> Sds011<U> {
     pub fn new(uart: U) -> Self {
         Self {
             uart,
             warmup_secs: WARMUP_SECS,
+            frame_timeout: FRAME_TIMEOUT,
         }
     }
 
@@ -124,13 +146,14 @@ impl<U: Read + Write> Sds011<U> {
     /// Read a single byte, awaiting the UART until one arrives.
     async fn read_byte(&mut self) -> Option<u8> {
         let mut b = [0u8; 1];
-        loop {
+        for _ in 0..EMPTY_READ_LIMIT {
             match self.uart.read(&mut b).await {
                 Ok(0) => continue,
                 Ok(_) => return Some(b[0]),
                 Err(_) => return None,
             }
         }
+        None
     }
 
     /// Throw away whatever is already buffered: frames the sensor emitted
@@ -138,10 +161,15 @@ impl<U: Read + Write> Sds011<U> {
     /// the reply to a sleep/work command sits in the same stream.
     async fn drain(&mut self) {
         let mut scratch = [0u8; 64];
-        while with_timeout(DRAIN_QUIET, self.uart.read(&mut scratch))
-            .await
-            .is_ok()
-        {}
+        // Bounded for the same reason as `read_byte`: a read that completes
+        // instantly with nothing would otherwise loop without ever yielding.
+        for _ in 0..EMPTY_READ_LIMIT {
+            match with_timeout(DRAIN_QUIET, self.uart.read(&mut scratch)).await {
+                Ok(Ok(1..)) => continue,
+                // Quiet line, error, or a read that returned nothing: done.
+                _ => return,
+            }
+        }
     }
 
     /// Resynchronise on `HEAD` and read one complete, checksum-valid frame.
@@ -169,6 +197,7 @@ impl<U: Read + Write> Sds011<U> {
     }
 }
 
+#[cfg(feature = "drivers")]
 impl<U: Read + Write> Sensor for Sds011<U> {
     fn kind(&self) -> &'static str {
         "SDS011"
@@ -189,7 +218,7 @@ impl<U: Read + Write> Sensor for Sds011<U> {
         Timer::after(Duration::from_secs(self.warmup_secs)).await;
         self.drain().await;
 
-        let frame = with_timeout(FRAME_TIMEOUT, self.read_frame()).await;
+        let frame = with_timeout(self.frame_timeout, self.read_frame()).await;
 
         // Park the fan again whatever happened — its 8000 h life is the scarce
         // resource here, so it must never be left running by an error path.
@@ -221,3 +250,293 @@ const _: () = {
     let sleep = sleep_work_frame(false);
     assert!(sleep[4] == 0 && sleep[18] == TAIL);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `super::*` brings in heapless's `Vec` once the drivers are compiled; the
+    // tests want the growable one.
+    #[allow(unused_imports)]
+    use std::{string::String, vec::Vec};
+
+    /// Build a well-formed measurement frame for the given raw PM words.
+    fn frame(pm25: u16, pm10: u16) -> [u8; FRAME_LEN] {
+        let mut f = [0u8; FRAME_LEN];
+        f[0] = HEAD;
+        f[1] = CMD_DATA;
+        f[2..4].copy_from_slice(&pm25.to_le_bytes());
+        f[4..6].copy_from_slice(&pm10.to_le_bytes());
+        f[6] = 0xA1; // device id, not covered by the reading
+        f[7] = 0xB2;
+        f[8] = f[2..8].iter().fold(0u8, |a, b| a.wrapping_add(*b));
+        f[9] = TAIL;
+        f
+    }
+
+    #[test]
+    fn a_well_formed_frame_is_accepted() {
+        assert!(frame_ok(&frame(245, 1000)));
+    }
+
+    #[test]
+    fn a_frame_is_rejected_on_any_marker_or_checksum_error() {
+        let good = frame(245, 1000);
+        // Markers and command byte.
+        for (i, wrong) in [(0, 0x00), (1, 0xC5), (9, 0x00)] {
+            let mut f = good;
+            f[i] = wrong;
+            assert!(!frame_ok(&f), "byte {i} = {wrong:#04x} accepted");
+        }
+        // A single bit flipped anywhere in the checksummed payload.
+        for byte in 2..8 {
+            for bit in 0..8 {
+                let mut f = good;
+                f[byte] ^= 1 << bit;
+                assert!(!frame_ok(&f), "bit {bit} of byte {byte} accepted");
+            }
+        }
+        // ... and a checksum that simply does not match.
+        let mut f = good;
+        f[8] = f[8].wrapping_add(1);
+        assert!(!frame_ok(&f));
+    }
+
+    #[test]
+    fn pm_words_decode_as_tenths() {
+        // The protocol reports tenths of µg/m³, little-endian.
+        assert_eq!(pm_tenths(0xF5, 0x00), 245); // 24.5 µg/m³
+        assert_eq!(pm_tenths(0x00, 0x01), 256);
+        assert_eq!(pm_tenths(0x00, 0x00), 0);
+        assert_eq!(pm_tenths(0xFF, 0xFF), 65535);
+        // Byte order matters: swapping the two must not give the same number.
+        assert_ne!(pm_tenths(0x01, 0x02), pm_tenths(0x02, 0x01));
+    }
+
+    #[test]
+    fn a_decoded_frame_reports_both_particle_sizes_independently() {
+        let f = frame(123, 4567);
+        assert_eq!(pm_tenths(f[2], f[3]), 123);
+        assert_eq!(pm_tenths(f[4], f[5]), 4567);
+    }
+
+    #[test]
+    fn the_sleep_and_work_commands_differ_only_where_they_should() {
+        let work = sleep_work_frame(true);
+        let sleep = sleep_work_frame(false);
+
+        for f in [&work, &sleep] {
+            assert_eq!(f[0], HEAD);
+            assert_eq!(f[1], 0xB4);
+            assert_eq!(f[2], 0x06); // set sleep/work
+            assert_eq!(f[3], 0x01); // set, not query
+            assert_eq!([f[15], f[16]], [0xFF, 0xFF]); // broadcast
+            assert_eq!(f[18], TAIL);
+            let sum = f[2..17].iter().fold(0u8, |a, b| a.wrapping_add(*b));
+            assert_eq!(f[17], sum, "checksum");
+        }
+
+        assert_eq!(work[4], 1);
+        assert_eq!(sleep[4], 0);
+        // The mode byte and the checksum are the only difference — a frame that
+        // differed elsewhere would be addressing something else entirely.
+        let differing: Vec<usize> = (0..CMD_FRAME_LEN)
+            .filter(|&i| work[i] != sleep[i])
+            .collect();
+        assert_eq!(differing, vec![4, 17]);
+    }
+
+    // --- Driver, against a scripted UART -------------------------------------
+
+    #[cfg(feature = "drivers")]
+    fn sensor(segments: Vec<super::super::mock::Segment>) -> Sds011<super::super::mock::FakeUart> {
+        let mut sensor = Sds011::new(super::super::mock::FakeUart::new(segments));
+        // The fan spin-up and the patience for a stubborn sensor are the two
+        // things a test must not sit through.
+        sensor.warmup_secs = 0;
+        sensor.frame_timeout = Duration::from_millis(50);
+        sensor
+    }
+
+    #[cfg(feature = "drivers")]
+    fn readings(sensor: &mut Sds011<super::super::mock::FakeUart>) -> Vec<(&'static str, String)> {
+        use super::super::mock::block_on;
+        use super::super::Sensor;
+        block_on(sensor.measure())
+            .iter()
+            .map(|r| (r.key, r.value.to_string()))
+            .collect()
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_frame_read_after_the_warm_up_becomes_two_readings() {
+        use super::super::mock::Segment;
+
+        let mut sensor = sensor(vec![
+            // What the sensor said while the fan was still spinning up.
+            Segment::now(frame(9999, 9999).to_vec()),
+            // ... and the frame that describes air actually flowing through it.
+            Segment::after_a_gap(frame(245, 1000).to_vec()),
+        ]);
+
+        assert_eq!(
+            readings(&mut sensor),
+            vec![("pm25", "24.5".to_string()), ("pm10", "100.0".to_string())]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn frames_buffered_during_the_warm_up_are_discarded() {
+        use super::super::mock::Segment;
+
+        // Three stale frames arrive before the airflow settles. Reporting the
+        // first one would publish the air from the *previous* round.
+        let mut stale = Vec::new();
+        for _ in 0..3 {
+            stale.extend_from_slice(&frame(9999, 9999));
+        }
+        let mut sensor = sensor(vec![
+            Segment::now(stale),
+            Segment::after_a_gap(frame(120, 300).to_vec()),
+        ]);
+
+        assert_eq!(
+            readings(&mut sensor),
+            vec![("pm25", "12.0".to_string()), ("pm10", "30.0".to_string())]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_fan_is_woken_and_parked_again() {
+        use super::super::mock::Segment;
+
+        let mut sensor = sensor(vec![Segment::after_a_gap(frame(245, 1000).to_vec())]);
+        let _ = readings(&mut sensor);
+
+        // The 8000 h fan life is the scarce resource: it must be asked to work
+        // and then put back to sleep, in that order.
+        assert_eq!(
+            sensor.uart.commands(),
+            &[
+                sleep_work_frame(true).to_vec(),
+                sleep_work_frame(false).to_vec()
+            ]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_fan_is_parked_even_when_nothing_is_read() {
+        use super::super::mock::Segment;
+
+        // Every exit path, because a fan left spinning is the one failure that
+        // costs hardware rather than a reading.
+        let cases: Vec<Vec<super::super::mock::Segment>> = vec![
+            // Silence after the warm-up.
+            vec![],
+            // A frame with a broken checksum, and nothing after it.
+            vec![Segment::after_a_gap({
+                let mut f = frame(245, 1000).to_vec();
+                f[8] ^= 0xFF;
+                f
+            })],
+            // Nothing but noise.
+            vec![Segment::after_a_gap(vec![0x11, 0x22, 0x33, 0x44])],
+        ];
+
+        for (i, segments) in cases.into_iter().enumerate() {
+            let mut sensor = sensor(segments);
+            assert!(
+                readings(&mut sensor).is_empty(),
+                "case {i} published something"
+            );
+            assert_eq!(
+                sensor.uart.commands().last(),
+                Some(&sleep_work_frame(false).to_vec()),
+                "case {i} left the fan running"
+            );
+        }
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_reader_resynchronises_past_junk() {
+        use super::super::mock::Segment;
+
+        // A mid-frame start and line noise, as a UART that was opened partway
+        // through a transmission hands over.
+        let mut stream = vec![0x00, 0xC0, 0x12, 0x99];
+        stream.extend_from_slice(&frame(245, 1000));
+
+        let mut sensor = sensor(vec![Segment::after_a_gap(stream)]);
+        assert_eq!(
+            readings(&mut sensor),
+            vec![("pm25", "24.5".to_string()), ("pm10", "100.0".to_string())]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_frame_that_fails_its_checksum_is_skipped_for_the_next_one() {
+        use super::super::mock::Segment;
+
+        let mut corrupt = frame(9999, 9999);
+        corrupt[3] ^= 0x20; // payload changed, checksum now wrong
+        let mut stream = corrupt.to_vec();
+        stream.extend_from_slice(&frame(245, 1000));
+
+        let mut sensor = sensor(vec![Segment::after_a_gap(stream)]);
+        assert_eq!(
+            readings(&mut sensor),
+            vec![("pm25", "24.5".to_string()), ("pm10", "100.0".to_string())]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_false_head_byte_costs_one_frame_and_no_more() {
+        use super::super::mock::Segment;
+
+        // A stray 0xAA in the noise makes the reader treat the *next* frame as
+        // that frame's body, so it is lost. What matters is that it recovers on
+        // the frame after — the sensor sends one a second.
+        let mut stream = vec![HEAD, 0xFF];
+        stream.extend_from_slice(&frame(9999, 9999));
+        stream.extend_from_slice(&frame(245, 1000));
+
+        let mut sensor = sensor(vec![Segment::after_a_gap(stream)]);
+        assert_eq!(
+            readings(&mut sensor),
+            vec![("pm25", "24.5".to_string()), ("pm10", "100.0".to_string())]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_disconnected_sensor_is_silent_rather_than_fatal() {
+        use super::super::mock::{block_on, FakeUart};
+        use super::super::Sensor;
+
+        // The write fails, so there is nothing to wait for and nothing to park.
+        let mut sensor = Sds011::new(FakeUart::disconnected());
+        sensor.warmup_secs = 0;
+        assert!(block_on(sensor.measure()).is_empty());
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_uart_that_never_yields_cannot_wedge_the_driver() {
+        use super::super::mock::{block_on, StarvedUart};
+        use super::super::Sensor;
+
+        // A read that keeps completing with zero bytes never returns Pending,
+        // so the surrounding timeout could never fire: without a bound on the
+        // empty reads this call would spin for ever and take the node with it.
+        let mut sensor = Sds011::new(StarvedUart);
+        sensor.warmup_secs = 0;
+        sensor.frame_timeout = Duration::from_millis(50);
+        assert!(block_on(sensor.measure()).is_empty());
+    }
+}

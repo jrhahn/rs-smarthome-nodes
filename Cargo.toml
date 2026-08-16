@@ -6,22 +6,80 @@ authors = ["Jürgen Hahn"]
 description = "Async no_std firmware for configurable ESP32-C3 smart-home sensor nodes (Embassy); started as a battery bird-feeder scale"
 license = "MIT"
 
+[lib]
+name = "rs_smarthome_nodes"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rs-smarthome-nodes"
 path = "src/main.rs"
+# The firmware itself only exists with the HAL. Declaring that lets a host build
+# (`--no-default-features`) skip the binary entirely instead of failing to find
+# esp-hal, so `cargo test` and `cargo clippy --all-targets` work on the host.
+required-features = ["hal"]
+
+# Everything that talks to a bus, a peripheral or the radio sits behind `hal`,
+# which is on by default — a normal `cargo build` is unchanged. Turning it off
+# leaves the parts that are pure computation (frame decoding, CRCs, blob
+# layouts, discovery payloads, config parsing), and *those* build for the host,
+# so they can have real unit tests:
+#
+#   cargo test --no-default-features --features host-tests \
+#       --target x86_64-unknown-linux-gnu
+#
+# See `docs/base-platform.md` for the reasoning.
+[features]
+default = ["hal"]
+
+# The bus-generic sensor drivers: they name no esp-hal type, only the
+# `embedded-hal-async` / `embedded-io-async` traits and embassy-time. Split out
+# of `hal` so the host tests can exercise the *real* drivers against fake buses
+# (see `sensors::mock`) without dragging in the chip support crates.
+drivers = ["dep:embassy-time", "dep:embedded-hal-async", "dep:embedded-io-async"]
+
+# What the host test run enables. embassy-time needs two things to link that the
+# device gets elsewhere: a time driver (`std`, the whole reason the driver tests
+# can await a conversion) and a timer queue — on the device that comes from
+# embassy-executor's `integrated-timers`, which there is no executor to provide
+# here.
+host-tests = ["drivers", "embassy-time/std", "embassy-time/generic-queue-16"]
+
+hal = [
+    "drivers",
+    "dep:esp-hal",
+    "dep:esp-hal-embassy",
+    "dep:esp-backtrace",
+    "dep:esp-println",
+    "dep:esp-alloc",
+    "dep:esp-wifi",
+    "dep:esp-storage",
+    "dep:embedded-storage",
+    "dep:embassy-net",
+    "dep:embassy-executor",
+    "dep:embassy-sync",
+    "dep:rust-mqtt",
+    "dep:static_cell",
+]
 
 [dependencies]
+# --- Portable: needed by the pure logic too, so never optional ---
+heapless = "0.8.0"
+log = "0.4.22"
+
 # --- ESP32-C3 HAL & async runtime ---
-esp-hal = { version = "0.22.0", features = ["esp32c3"] }
-esp-hal-embassy = { version = "0.5.0", features = ["esp32c3"] }
+esp-hal = { version = "0.22.0", features = ["esp32c3"], optional = true }
+esp-hal-embassy = { version = "0.5.0", features = ["esp32c3"], optional = true }
 esp-backtrace = { version = "0.14.2", features = [
     "esp32c3",
     "panic-handler",
     "println",
     "exception-handler",
-] }
-esp-println = { version = "0.12.0", features = ["esp32c3", "log"] }
-esp-alloc = "0.5.0"
+], optional = true }
+esp-println = { version = "0.12.0", features = [
+    "esp32c3",
+    "log",
+], optional = true }
+esp-alloc = { version = "0.5.0", optional = true }
 
 # --- Wi-Fi + TCP/IP stack ---
 esp-wifi = { version = "0.11.0", features = [
@@ -29,36 +87,44 @@ esp-wifi = { version = "0.11.0", features = [
     "wifi",
     "utils",
     "esp-alloc",
-] }
+], optional = true }
 embassy-net = { version = "0.4.0", features = [
     "tcp",
     "udp",
     "dhcpv4",
     "medium-ethernet",
     "dns",
-] }
+], optional = true }
 
 # --- Embassy core ---
 embassy-executor = { version = "0.6.3", features = [
     "task-arena-size-32768",
     "integrated-timers",
-] }
-embassy-time = "0.3.2"
-embassy-sync = "0.6.1"
+], optional = true }
+embassy-time = { version = "0.3.2", optional = true }
+embassy-sync = { version = "0.6.1", optional = true }
 
 # --- Sensor bus traits (keep the drivers HAL-agnostic) ---
-embedded-hal-async = "1.0.0"
-embedded-io-async = "0.6.1"
+embedded-hal-async = { version = "1.0.0", optional = true }
+embedded-io-async = { version = "0.6.1", optional = true }
 
 # --- MQTT & utility ---
-rust-mqtt = { version = "=0.3.0", default-features = false }
-static_cell = "2.1.0"
-heapless = "0.8.0"
-log = "0.4.22"
+rust-mqtt = { version = "=0.3.0", default-features = false, optional = true }
+static_cell = { version = "2.1.0", optional = true }
 
 # --- Config persistence (NVS flash) ---
-esp-storage = { version = "0.4.0", features = ["esp32c3"] }
-embedded-storage = "0.3"
+esp-storage = { version = "0.4.0", features = ["esp32c3"], optional = true }
+embedded-storage = { version = "0.3", optional = true }
+
+# Host-only, and only for `cargo test`: the discovery payloads are assembled by
+# hand into a fixed buffer, so the tests parse them back as real JSON rather
+# than pattern-matching strings. Never built for the device.
+[target.'cfg(not(target_os = "none"))'.dev-dependencies]
+serde_json = "1"
+# Drives the driver futures in tests. A hand-rolled block_on with a wrong waker
+# would show up as a hang rather than a failure, which is not a trade worth
+# making to save a dev-dependency.
+futures-executor = "0.3"
 
 [profile.dev]
 # Rust debug builds are far too large/slow to run on-device; always optimise.
