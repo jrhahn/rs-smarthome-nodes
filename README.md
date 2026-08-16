@@ -237,11 +237,12 @@ cargo test --no-default-features --features host-tests \
 
 The sensor drivers themselves are covered too. They are generic over the
 `embedded-hal-async` / `embedded-io-async` bus traits, so
-[`src/sensors/mock.rs`](src/sensors/mock.rs) can feed the *real* SHT31 and
-SDS011 drivers a scripted bus: canned I²C replies, and a UART that hands over
-stale frames, falls quiet, then delivers the frame that matters. That covers the
-resync, the CRC rejection, the fan duty cycle and what happens when a sensor is
-absent — but not timing, bus contention or anything electrical, which stay bench
+[`src/sensors/mock.rs`](src/sensors/mock.rs) can feed the *real* SHT31, SCD41
+and SDS011 drivers a scripted bus: canned I²C replies, and a UART that hands
+over stale frames, falls quiet, then delivers the frame that matters. That
+covers the resync, the CRC rejection, the fan duty cycle, the SCD41's two run
+modes and its data-ready handshake, and what happens when a sensor is absent —
+but not timing, bus contention or anything electrical, which stay bench
 questions.
 
 Anything that touches the chip itself — RTC RAM, flash, the radio, the bit-bang

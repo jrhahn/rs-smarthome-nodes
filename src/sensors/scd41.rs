@@ -227,6 +227,10 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `super::*` brings in heapless's `Vec`/`String` once the drivers are
+    // compiled; the tests want the growable ones.
+    #[allow(unused_imports)]
+    use std::{string::String, vec::Vec};
 
     #[test]
     fn co2_is_reported_raw() {
@@ -271,5 +275,204 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    // --- Driver, against a fake bus -----------------------------------------
+
+    /// One Sensirion data word: value, big-endian, plus its CRC.
+    #[cfg(feature = "drivers")]
+    fn word(value: u16) -> Vec<u8> {
+        let bytes = value.to_be_bytes();
+        let mut out = bytes.to_vec();
+        out.push(super::super::crc8_sensirion(&bytes));
+        out
+    }
+
+    /// A `read_measurement` reply: CO₂, temperature, humidity.
+    #[cfg(feature = "drivers")]
+    fn measurement(co2: u16, t: u16, rh: u16) -> Vec<u8> {
+        let mut out = word(co2);
+        out.extend(word(t));
+        out.extend(word(rh));
+        out
+    }
+
+    /// A `get_data_ready_status` reply. The high bits are reserved and set on a
+    /// healthy sensor, so "ready" lives in the low 11.
+    #[cfg(feature = "drivers")]
+    fn ready(ready: bool) -> Vec<u8> {
+        word(if ready { 0x8001 } else { 0x8000 })
+    }
+
+    #[cfg(feature = "drivers")]
+    fn readings(sensor: &mut Scd41<super::super::mock::FakeI2c>) -> Vec<(&'static str, String)> {
+        use super::super::mock::block_on;
+        use super::super::Sensor;
+        block_on(sensor.measure())
+            .iter()
+            .map(|r| (r.key, r.value.to_string()))
+            .collect()
+    }
+
+    #[cfg(feature = "drivers")]
+    fn sent(sensor: &Scd41<super::super::mock::FakeI2c>, cmd: u16) -> usize {
+        sensor
+            .i2c
+            .writes()
+            .into_iter()
+            .filter(|w| *w == cmd.to_be_bytes())
+            .count()
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn periodic_mode_starts_the_measurement_and_reports_nothing_yet() {
+        use super::super::mock::FakeI2c;
+
+        // The first conversion needs ~5 s. Waiting for it would block the
+        // publish path, so the round reports nothing and the next one has data.
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, []), Mode::Periodic);
+        assert!(readings(&mut sensor).is_empty());
+        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 1);
+        assert_eq!(sent(&sensor, CMD_READ_MEASUREMENT), 0);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn periodic_mode_is_started_only_once() {
+        use super::super::mock::FakeI2c;
+
+        // Re-sending `start_periodic` would restart the measurement cycle, so a
+        // mains node polling every 60 s would never get a reading at all.
+        let replies = vec![
+            ready(true),
+            measurement(812, 24_900, 32_768),
+            ready(true),
+            measurement(820, 24_900, 32_768),
+        ];
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, replies), Mode::Periodic);
+        for _ in 0..3 {
+            let _ = readings(&mut sensor);
+        }
+        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 1);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn periodic_mode_waits_for_data_ready_before_reading() {
+        use super::super::mock::FakeI2c;
+
+        // Reading before the sensor says it is ready returns the *previous*
+        // measurement, which on a fresh start is not a measurement at all.
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, vec![ready(false)]), Mode::Periodic);
+        let _ = readings(&mut sensor); // start
+        assert!(readings(&mut sensor).is_empty());
+        assert_eq!(sent(&sensor, CMD_GET_DATA_READY), 1);
+        assert_eq!(sent(&sensor, CMD_READ_MEASUREMENT), 0);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_ready_measurement_becomes_three_readings() {
+        use super::super::mock::FakeI2c;
+
+        let replies = vec![ready(true), measurement(812, 24_900, 32_768)];
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, replies), Mode::Periodic);
+        let _ = readings(&mut sensor); // start
+
+        assert_eq!(
+            readings(&mut sensor),
+            vec![
+                ("co2", "812".to_string()),
+                ("temperature", "21.4".to_string()),
+                ("humidity", "50.0".to_string()),
+            ]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn zero_ppm_is_the_sensors_no_measurement_answer_not_air() {
+        use super::super::mock::FakeI2c;
+
+        // 0 ppm is not a reading of clean air — it is the sensor saying it has
+        // nothing. Publishing it would draw a plausible-looking line at zero.
+        let replies = vec![ready(true), measurement(0, 24_900, 32_768)];
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, replies), Mode::Periodic);
+        let _ = readings(&mut sensor); // start
+        assert!(readings(&mut sensor).is_empty());
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_corrupt_word_is_dropped_rather_than_published() {
+        use super::super::mock::FakeI2c;
+
+        // Bus noise anywhere in the nine bytes, including the CRCs themselves.
+        for corrupt in 0..9 {
+            let mut reply = measurement(812, 24_900, 32_768);
+            reply[corrupt] ^= 0x01;
+            let mut sensor =
+                Scd41::new(FakeI2c::new(ADDR, vec![ready(true), reply]), Mode::Periodic);
+            let _ = readings(&mut sensor); // start
+            assert!(
+                readings(&mut sensor).is_empty(),
+                "a measurement with byte {corrupt} corrupted was published"
+            );
+        }
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_corrupt_data_ready_reply_is_not_read_as_ready() {
+        use super::super::mock::FakeI2c;
+
+        let mut reply = ready(true);
+        reply[2] ^= 0x01; // CRC no longer matches
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, vec![reply]), Mode::Periodic);
+        let _ = readings(&mut sensor); // start
+        assert!(readings(&mut sensor).is_empty());
+        assert_eq!(sent(&sensor, CMD_READ_MEASUREMENT), 0);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn an_absent_sensor_contributes_nothing() {
+        use super::super::mock::FakeI2c;
+
+        // Silent, not fatal: the node publishes whatever else answered.
+        let mut sensor = Scd41::new(FakeI2c::empty(), Mode::Periodic);
+        assert!(readings(&mut sensor).is_empty());
+        let mut sensor = Scd41::new(FakeI2c::empty(), Mode::SingleShot);
+        assert!(readings(&mut sensor).is_empty());
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn single_shot_mode_measures_on_demand_without_polling() {
+        use super::super::mock::FakeI2c;
+
+        // The battery node's mode: ask for one conversion, wait it out, read.
+        // No `start_periodic` (there is no continuous cycle to keep alive) and
+        // no data-ready poll (the wait already covers it).
+        //
+        // This test really does take the datasheet's ~5 s conversion time — it
+        // is a fixed sensor timing, not a policy knob like the SDS011 warm-up,
+        // so there is nothing honest to shorten.
+        let replies = vec![measurement(812, 24_900, 32_768)];
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, replies), Mode::SingleShot);
+
+        assert_eq!(
+            readings(&mut sensor),
+            vec![
+                ("co2", "812".to_string()),
+                ("temperature", "21.4".to_string()),
+                ("humidity", "50.0".to_string()),
+            ]
+        );
+        assert_eq!(sent(&sensor, CMD_MEASURE_SINGLE_SHOT), 1);
+        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 0);
+        assert_eq!(sent(&sensor, CMD_GET_DATA_READY), 0);
+        assert_eq!(sent(&sensor, CMD_READ_MEASUREMENT), 1);
     }
 }

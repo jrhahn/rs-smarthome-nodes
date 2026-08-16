@@ -231,6 +231,17 @@ timeout could never fire and the driver would spin for ever. esp-hal's UART does
 not do that (it waits for a byte) but the trait permits it, so both loops are
 now bounded, with a `StarvedUart` test to keep them that way.
 
+The SCD41 gets the same treatment, and there the two run modes are the point.
+Periodic (mains) must send `start_periodic_measurement` exactly **once** — a
+node that re-sent it every round would restart the conversion cycle and never
+read anything — and must poll data-ready before reading, or it gets the previous
+measurement. Single-shot (battery) does neither: it asks for one conversion,
+waits it out, reads. Both must treat `0 ppm` as "no measurement yet" rather than
+as air, which would otherwise draw a plausible flat line at zero. That one
+single-shot test really does sit through the datasheet's ~5 s conversion; unlike
+the SDS011 warm-up it is a fixed sensor timing, not a policy knob, so there is
+nothing honest to shorten.
+
 What this does *not* cover: timing, bus contention, anything electrical. A green
 test says the driver handles the bytes correctly, not that the SHT31 answers
 within 15 ms on the real bus.
