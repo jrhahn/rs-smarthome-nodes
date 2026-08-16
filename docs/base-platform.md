@@ -246,8 +246,32 @@ What this does *not* cover: timing, bus contention, anything electrical. A green
 test says the driver handles the bytes correctly, not that the SHT31 answers
 within 15 ms on the real bus.
 
+## SDS011 warm-up
+
+The fan cannot run continuously (~8000 h rated), so it is woken per sample — and
+how long it stays awake was, until recently, a flat 20 s. That is a guess in
+both directions: too long for still air, and too short for air that is actually
+changing, which is exactly when the reading matters.
+
+It now serves a **floor** and then watches. The floor (10 s) is not optional:
+before the airflow establishes, the sensor repeats its last value, so frames
+agree with each other perfectly and a settling check alone would stop on air
+that is not moving yet. After it, the driver reads frames until three in a row
+agree — within 1 µg/m³ plus 5 % of the larger, an absolute floor for clean air
+where the sensor's own noise dominates and a proportional band for dirty air
+where it does not — on **both** particle sizes, since PM2.5 settling while PM10
+still climbs is not a settled reading.
+
+A ceiling (30 s) stops it there and reports whatever it has: unsettled air is a
+reason to publish the latest number, not to keep the fan spinning. One frame is
+always read however tight the budget, because an unsettled reading beats an
+empty round.
+
+In still air this typically ends around 13 s rather than 20 — roughly 7 s of fan
+life back on every sample, which on the kitchen node's four samples an hour is
+the difference the duty cycle exists for.
+
 ## Known gaps
 
 - Provisioning needs the board to reach the broker, so a node with the wrong
   Wi-Fi credentials still needs a reflash. Credentials remain build-time.
-- The SDS011 warm-up (20 s) is a fixed constant rather than adaptive.

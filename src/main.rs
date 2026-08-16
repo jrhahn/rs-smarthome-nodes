@@ -492,7 +492,7 @@ async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
 /// Measure everything this node has and format the readings for MQTT.
 ///
 /// Called on publish cycles only, so the DS18B20's 750 ms conversion and the
-/// SDS011's ~20 s fan warm-up never run on the cheap idle polls. `raw` is the
+/// SDS011's 10–30 s fan warm-up never run on the cheap idle polls. `raw` is the
 /// load-cell reading already taken by the caller (it drives the presence logic),
 /// converted to grams here with the stored calibration.
 async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) -> Samples {
