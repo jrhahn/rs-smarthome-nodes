@@ -46,6 +46,7 @@ use esp_hal::{
     rng::Rng,
     rtc_cntl::{sleep::TimerWakeupSource, Rtc},
     timer::timg::TimerGroup,
+    usb_serial_jtag::UsbSerialJtag,
 };
 use esp_wifi::{
     wifi::{
@@ -62,7 +63,7 @@ use rust_mqtt::{
 };
 
 use node::Provision;
-use rs_smarthome_nodes::{config, discovery, ds18b20, hx711, node, platform, state};
+use rs_smarthome_nodes::{config, discovery, ds18b20, hx711, node, platform, state, wifi};
 
 use config::Config;
 use ds18b20::Ds18b20;
@@ -78,7 +79,7 @@ type WifiStack = Stack<WifiDevice<'static, WifiStaDevice>>;
 // The MQTT broker address is edited here directly.
 const SSID: &str = match option_env!("SSID") {
     Some(s) => s,
-    None => "your-ssid",
+    None => wifi::PLACEHOLDER_SSID,
 };
 const PASSWORD: &str = match option_env!("PASSWORD") {
     Some(s) => s,
@@ -152,6 +153,16 @@ const _: () = {
 /// Retained values arrive within tens of ms, so once a receive hits this
 /// timeout we assume the broker has sent them all and stop draining.
 const CONFIG_RECV_WINDOW: Duration = Duration::from_millis(400);
+
+/// How long a cold boot waits for someone at the serial console before carrying
+/// on. Short, because it delays every power-up of every node; long enough to
+/// paste three lines into a terminal that is already open.
+const CONSOLE_WINDOW: Duration = Duration::from_secs(3);
+
+/// The same wait for a board that has no usable credentials at all. It has
+/// nothing else it could be doing, so it is worth waiting properly — and after
+/// this it boots on and simply fails to join, which is no worse.
+const CONSOLE_WINDOW_STRANDED: Duration = Duration::from_secs(120);
 
 /// Config key carrying a tare request. Called out because, unlike every other
 /// key, acting on it means deleting the retained message afterwards.
@@ -235,6 +246,29 @@ async fn main(spawner: Spawner) {
         "provision topic: {}",
         node::provision_topic(Efuse::read_base_mac_address())
     );
+
+    // Which network? Credentials stored over the serial console win over the
+    // ones compiled in. Resolved before the radio comes up, and before the
+    // console window below, so provisioning can report what it is replacing.
+    let source = wifi::init(built_in_credentials());
+    match wifi::active() {
+        Some(credentials) => info!(
+            "wifi: '{}' ({})",
+            credentials.ssid,
+            match source {
+                wifi::Source::Stored => "from flash",
+                wifi::Source::BuiltIn => "built in",
+            }
+        ),
+        None => warn!("wifi: no credentials"),
+    }
+
+    // The escape hatch. Only on a cold boot: a deep-sleep wake skips it, so a
+    // battery node pays this once per power-up rather than every two seconds.
+    if state::is_cold_boot() {
+        console_provisioning(peripherals.USB_DEVICE).await;
+    }
+    state::mark_booted();
 
     // Runtime config from flash (calibration + tuning), or defaults on a blank
     // sector. Read now, while the radio is still down. It may be updated from
@@ -931,10 +965,71 @@ const MQTT_BUFFER: usize = 640;
 
 const _: () = assert!(MQTT_BUFFER >= discovery::PAYLOAD_MAX + 96 + 64);
 
+/// The credentials this image was compiled with. The fallback when flash holds
+/// none, and the net the connection task reverts to when the stored ones keep
+/// being refused.
+fn built_in_credentials() -> wifi::Credentials {
+    wifi::Credentials::new(SSID, PASSWORD).unwrap_or_else(|| {
+        // Only reachable from an image built with an empty or over-long `SSID=`.
+        // Naming nothing is better than naming half a network: the console
+        // window below is then the way in.
+        warn!("built-in credentials do not fit; console provisioning only");
+        wifi::Credentials::new(wifi::PLACEHOLDER_SSID, "").expect("placeholder fits")
+    })
+}
+
+/// Offer the serial console a chance to change the Wi-Fi credentials, and act
+/// on it.
+///
+/// This is the one path that works when the network does not, which is exactly
+/// when it is needed — so it deliberately runs before the radio is initialised
+/// and costs nothing but the window. A board with no usable credentials waits
+/// far longer, since it has nothing else to be doing.
+async fn console_provisioning(usb: esp_hal::peripherals::USB_DEVICE) {
+    let stranded = wifi::active().map_or(true, |c| c.is_placeholder());
+    let window = if stranded {
+        warn!("wifi: no usable credentials; waiting for the console");
+        CONSOLE_WINDOW_STRANDED
+    } else {
+        CONSOLE_WINDOW
+    };
+
+    let mut console = UsbSerialJtag::new(usb).into_async();
+    match wifi::provision(&mut console, window).await {
+        wifi::Outcome::Save(credentials) => {
+            match config::store_credentials(&credentials.ssid, &credentials.psk) {
+                // A restart rather than an in-place switch, for the same reason
+                // re-provisioning the node identity reboots: the radio is
+                // configured once, on the way up.
+                Ok(()) => {
+                    info!("wifi: stored '{}'; restarting", credentials.ssid);
+                    software_reset();
+                }
+                Err(e) => warn!("wifi: could not store credentials: {}", e),
+            }
+        }
+        wifi::Outcome::Clear => match config::clear_credentials() {
+            Ok(()) => {
+                info!("wifi: cleared stored credentials; restarting");
+                software_reset();
+            }
+            Err(e) => warn!("wifi: could not clear credentials: {}", e),
+        },
+        wifi::Outcome::Continue => {}
+    }
+}
+
 /// Background task: keeps the Wi-Fi controller connected, reconnecting on drop.
 #[embassy_executor::task]
 async fn connection(mut controller: WifiController<'static>) {
     info!("Wi-Fi connection task started");
+    // Consecutive refusals of the *stored* credentials. Kept here rather than in
+    // RTC RAM on purpose: a power cycle should give them another try, since the
+    // likeliest reason for a run of failures is an access point that was down,
+    // not a passphrase that changed under us.
+    let mut refusals = 0u32;
+    let mut configured: Option<heapless::String<{ config::SSID_MAX }>> = None;
+
     loop {
         if esp_wifi::wifi::wifi_state() == WifiState::StaConnected {
             // Stay parked until we lose the connection.
@@ -942,21 +1037,58 @@ async fn connection(mut controller: WifiController<'static>) {
             Timer::after(Duration::from_millis(5000)).await;
         }
 
-        if !matches!(controller.is_started(), Ok(true)) {
+        // The net: stored credentials that keep being refused are set aside for
+        // the rest of this run in favour of the ones compiled in. Unlike a wrong
+        // node name, a wrong passphrase cannot be corrected over the air — so
+        // without this a single typo at the console would take a board off the
+        // network until someone walked over with a cable.
+        let credentials = match (refusals >= wifi::FALLBACK_AFTER)
+            .then(wifi::built_in)
+            .flatten()
+        {
+            Some(fallback) => fallback,
+            None => match wifi::active() {
+                Some(credentials) => credentials,
+                None => {
+                    warn!("Wi-Fi: no credentials to try");
+                    Timer::after(Duration::from_millis(5000)).await;
+                    continue;
+                }
+            },
+        };
+
+        // Re-configure only when the pair actually changed; `set_configuration`
+        // on an already-running controller is not free.
+        if configured.as_deref() != Some(credentials.ssid.as_str())
+            || !matches!(controller.is_started(), Ok(true))
+        {
             let client_config = Configuration::Client(ClientConfiguration {
-                ssid: SSID.try_into().unwrap(),
-                password: PASSWORD.try_into().unwrap(),
+                ssid: credentials.ssid.as_str().try_into().unwrap_or_default(),
+                password: credentials.psk.as_str().try_into().unwrap_or_default(),
                 ..Default::default()
             });
             controller.set_configuration(&client_config).unwrap();
-            info!("Starting Wi-Fi controller");
-            controller.start_async().await.unwrap();
+            configured = Some(credentials.ssid.clone());
+            if !matches!(controller.is_started(), Ok(true)) {
+                info!("Starting Wi-Fi controller");
+                controller.start_async().await.unwrap();
+            }
         }
 
         match controller.connect_async().await {
-            Ok(_) => info!("Connected to Wi-Fi '{}'", SSID),
+            Ok(_) => {
+                info!("Connected to Wi-Fi '{}'", credentials.ssid);
+                refusals = 0;
+            }
             Err(e) => {
-                warn!("Wi-Fi connect failed: {:?}, retrying", e);
+                refusals = refusals.saturating_add(1);
+                warn!(
+                    "Wi-Fi connect to '{}' failed: {:?} (attempt {}), retrying",
+                    credentials.ssid, e, refusals
+                );
+                if refusals == wifi::FALLBACK_AFTER {
+                    warn!("Wi-Fi: falling back to the built-in credentials");
+                }
                 Timer::after(Duration::from_millis(5000)).await;
             }
         }

@@ -271,7 +271,45 @@ In still air this typically ends around 13 s rather than 20 — roughly 7 s of f
 life back on every sample, which on the kitchen node's four samples an hour is
 the difference the duty cycle exists for.
 
+## Wi-Fi credentials
+
+Credentials were compile-time only, which made the one failure that matters
+unrecoverable: a board that cannot join the network cannot be told anything
+over the network either. MQTT provisioning — how the node identity is set — is
+no help, because reaching the broker is precisely what is broken.
+
+So the escape hatch is the **serial console**, the one channel that still works.
+On a **cold boot** the board listens briefly for `ssid` / `psk` / `save`, stores
+the pair in its own flash sector and restarts into it; `clear` returns it to
+whatever it was flashed with. Physical access already implies the ability to
+reflash, so this gives away nothing a USB cable did not.
+
+Three decisions worth recording:
+
+- **Cold boot only.** RTC RAM is wiped by a power-up and survives deep sleep, so
+  the existing flag distinguishes "someone just plugged this in" from "this woke
+  up to take a reading". A battery node pays the window once per power cycle
+  rather than every two seconds.
+- **The window depends on how stuck the board is.** Three seconds when it has
+  usable credentials — it is only offering the chance to intervene — and two
+  minutes when it does not, since a board that cannot join has nothing better to
+  be doing.
+- **Stored credentials are not trusted blindly.** After three consecutive
+  refusals the connection task falls back to the build-time pair for the rest of
+  the run. Unlike a wrong node name, a wrong passphrase cannot be corrected over
+  the air, so without this a single typo would take a board off the network
+  until someone walked over with a cable. The count deliberately lives in RAM,
+  not RTC RAM: a power cycle should give the stored pair another try, because
+  the likeliest cause of a run of failures is an access point that was down.
+
+The passphrase is taken verbatim after the keyword, so one containing spaces
+survives; only the line ending and trailing whitespace are stripped. A mangled
+passphrase would be indistinguishable from a wrong one, which is a bad evening.
+`show` prints the SSID and the passphrase's *length*, never its content — those
+lines go to a log that may be scrolling in someone else's terminal.
+
 ## Known gaps
 
-- Provisioning needs the board to reach the broker, so a node with the wrong
-  Wi-Fi credentials still needs a reflash. Credentials remain build-time.
+- Console provisioning is the only way to *set* credentials; there is no way to
+  rotate them across the fleet remotely. Changing the router's passphrase means
+  visiting each board with a cable.
