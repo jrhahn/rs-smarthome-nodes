@@ -163,7 +163,7 @@ never runs on the low-power idle-poll cycles. It is published to
 | Node selection     | [`src/node.rs`](src/node.rs) — sensor set, identity, topics and power profile per node, chosen by `NODE=` at build time |
 | Sensor abstraction | [`src/sensors/`](src/sensors) — HAL-agnostic `Sensor` trait (`measure()` + `descriptors()`), drivers generic over `embedded-hal-async` / `embedded-io-async` |
 | Board wiring       | [`src/platform.rs`](src/platform.rs) — concrete buses; one shared I²C handle so both I²C drivers can own their bus |
-| Load-cell driver   | [`src/hx711.rs`](src/hx711.rs) — async `wait_ready()` with timeout, blocking 24+N clock read, two's-complement sign-extend to `i32` |
+| Load-cell driver   | [`src/hx711.rs`](src/hx711.rs) — async `wait_ready()` with timeout, blocking 24+N clock read, two's-complement sign-extend to `i32`; generic over the `embedded-hal` pin traits, so the bit protocol is tested against fake pins |
 | Temperature driver | [`src/ds18b20.rs`](src/ds18b20.rs) — bit-bang 1-Wire on an open-drain pin, blocking time slots, async 750 ms conversion wait, CRC-checked scratchpad |
 | SHT31-D / SCD41    | [`sht31.rs`](src/sensors/sht31.rs) / [`scd41.rs`](src/sensors/scd41.rs) — single-shot and periodic I²C reads, every word CRC-checked (Sensirion CRC-8), fixed-point conversions |
 | SDS011             | [`sds011.rs`](src/sensors/sds011.rs) — 10-byte UART frames with checksum + resync, fan woken only for the measurement and parked again on every exit path, warm-up ended by the readings settling rather than by a fixed wait |
