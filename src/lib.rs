@@ -37,6 +37,7 @@ pub mod discovery;
 pub mod ds18b20;
 pub mod node;
 pub mod sensors;
+pub mod wifi;
 
 #[cfg(feature = "hal")]
 pub mod hx711;

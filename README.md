@@ -204,6 +204,10 @@ vars (see [`.env.example`](.env.example)): `SSID`, `PASSWORD`, optional
 secret, kept out of source). `MQTT_PORT` is still a constant in
 [`src/main.rs`](src/main.rs).
 
+The Wi-Fi credentials are only the *default*: a board can be told different ones
+over its serial console and will remember them — see
+[below](#wi-fi-credentials-without-a-rebuild).
+
 ```bash
 # Build only (defaults to NODE=draussen, the bird scale)
 cargo build --release
@@ -225,6 +229,37 @@ probe — is in [FLASHING.md](FLASHING.md).**
 `NODE=`, with the pull-ups and supply notes — is in
 [docs/wiring.md](docs/wiring.md).** The pin map above is the summary; that page
 is what you build from.
+
+## Wi-Fi credentials without a rebuild
+
+A board that cannot join the network cannot be told anything over the network,
+so the way in is the serial console. On a **cold boot** (a power-up or a
+reflash — not a deep-sleep wake) the firmware listens briefly:
+
+```
+wifi: 'your-ssid' (built in)
+wifi: no usable credentials; waiting for the console
+wifi provisioning: ssid <name> / psk <passphrase> / save / clear / show / done
+```
+
+Type into the same serial monitor you are watching the logs in:
+
+```
+ssid MyNetwork
+psk correct horse battery staple
+save
+```
+
+The board stores them in its own flash sector — separate from the calibration
+and the node identity — and restarts into them. `clear` forgets them and returns
+to the credentials the image was built with; `show` reports the SSID and the
+passphrase's length (never its content); `done` carries on booting.
+
+The window is 3 s when the board already has usable credentials, and 2 minutes
+when it has none, since then it has nothing else to be doing. A passphrase may
+contain spaces. If stored credentials are refused three times in a row, the
+board falls back to the build-time pair for the rest of that run, so a typo
+cannot strand it permanently.
 
 ## Tests
 

@@ -36,6 +36,11 @@ const FLAG_PRESENT: u32 = 1 << 1;
 /// power cycle. They are retained on the broker, so re-sending them on every
 /// deep-sleep wake would just spend battery on airtime.
 const FLAG_DISCOVERY: u32 = 1 << 2;
+/// Set at the end of the first boot of a power cycle. RTC RAM is wiped by a
+/// cold power-on (and by a reflash) but survives deep sleep, so an unset flag
+/// means "the board was just plugged in", which is the moment someone might be
+/// waiting at the serial console.
+const FLAG_BOOTED: u32 = 1 << 3;
 
 fn flags() -> u32 {
     // Single-word reads/writes of a `Persistable` primitive; no other execution
@@ -109,4 +114,15 @@ pub fn idle_wakes() -> u32 {
 /// zero right after a publish).
 pub fn set_idle_wakes(value: u32) {
     unsafe { core::ptr::addr_of_mut!(IDLE_WAKES).write(value) }
+}
+
+/// Is this the first boot since the board was powered up or reflashed, rather
+/// than a wake from deep sleep?
+pub fn is_cold_boot() -> bool {
+    flags() & FLAG_BOOTED == 0
+}
+
+/// Record that this power cycle has booted once; every later wake sees it.
+pub fn mark_booted() {
+    set_flag(FLAG_BOOTED, true);
 }

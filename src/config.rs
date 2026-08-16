@@ -36,6 +36,12 @@ const FLASH_OFFSET: u32 = 0x9000;
 /// once in a board's life while the tuning changes all the time.
 const NODE_OFFSET: u32 = 0xA000;
 
+/// Third sector: the Wi-Fi credentials (see [`crate::wifi`]). Separate again,
+/// and for a sharper reason than the others — this is the one blob whose loss
+/// takes a board off the network entirely, so nothing else may share a sector
+/// erase with it.
+const WIFI_OFFSET: u32 = 0xB000;
+
 /// `"BIRD"` little-endian — marks an initialised blob.
 const MAGIC: u32 = 0x4449_5242;
 /// Bump when the on-flash layout changes; an old version reverts to defaults.
@@ -387,6 +393,106 @@ const _: () = {
     assert!(crc32(&[]) == 0);
 };
 
+// Every blob has to fit inside the single 4 KiB sector it is written to; a
+// `Storage::write` past the end would silently spill into the next one.
+const _: () = {
+    assert!(BLOB_LEN <= 0x1000);
+    assert!(NODE_BLOB_LEN <= 0x1000);
+    assert!(WIFI_BLOB_LEN <= 0x1000);
+};
+
+// --- Wi-Fi credential blob ---------------------------------------------------
+// Credentials are normally compiled in, but a board can be told different ones
+// over the serial console and remember them (see `crate::wifi`). Same discipline
+// as the blobs above: anything that does not check out reads back as "nothing
+// stored", so the board falls back to what it was built with rather than
+// silently losing the network.
+
+/// `"WIFI"` little-endian.
+const WIFI_MAGIC: u32 = 0x4946_4957;
+const WIFI_VERSION: u8 = 1;
+/// 802.11 caps an SSID at 32 bytes.
+pub const SSID_MAX: usize = 32;
+/// A WPA2 passphrase is at most 63 characters; a raw PSK is 64 hex digits.
+pub const PSK_MAX: usize = 64;
+/// magic(4) + version(1) + ssid_len(1) + psk_len(1) + pad(1) + ssid + psk + crc(4).
+const WIFI_BLOB_LEN: usize = 8 + SSID_MAX + PSK_MAX + 4;
+const WIFI_SSID_AT: usize = 8;
+const WIFI_PSK_AT: usize = WIFI_SSID_AT + SSID_MAX;
+const WIFI_CRC_AT: usize = WIFI_PSK_AT + PSK_MAX;
+
+/// Decode a credential blob into `(ssid, psk)`. `None` for a blank or erased
+/// sector, a stale version, a bad CRC, lengths that do not fit, or bytes that
+/// are not UTF-8.
+fn decode_credentials(b: &[u8; WIFI_BLOB_LEN]) -> Option<(String<SSID_MAX>, String<PSK_MAX>)> {
+    if u32::from_le_bytes(b[0..4].try_into().ok()?) != WIFI_MAGIC || b[4] != WIFI_VERSION {
+        return None;
+    }
+    if u32::from_le_bytes(b[WIFI_CRC_AT..WIFI_BLOB_LEN].try_into().ok()?)
+        != crc32(&b[0..WIFI_CRC_AT])
+    {
+        return None;
+    }
+    let (ssid_len, psk_len) = (b[5] as usize, b[6] as usize);
+    // An empty SSID names no network; an empty passphrase is a legitimate open
+    // one, so only the SSID has a lower bound.
+    if ssid_len == 0 || ssid_len > SSID_MAX || psk_len > PSK_MAX {
+        return None;
+    }
+    let ssid = core::str::from_utf8(&b[WIFI_SSID_AT..WIFI_SSID_AT + ssid_len]).ok()?;
+    let psk = core::str::from_utf8(&b[WIFI_PSK_AT..WIFI_PSK_AT + psk_len]).ok()?;
+    Some((String::try_from(ssid).ok()?, String::try_from(psk).ok()?))
+}
+
+/// Encode a credential blob. Rejects anything that will not fit rather than
+/// truncating — a truncated SSID names a different network, and a truncated
+/// passphrase simply never authenticates.
+fn encode_credentials(ssid: &str, psk: &str) -> Result<[u8; WIFI_BLOB_LEN], &'static str> {
+    if ssid.is_empty() || ssid.len() > SSID_MAX {
+        return Err("ssid length");
+    }
+    if psk.len() > PSK_MAX {
+        return Err("psk length");
+    }
+    let mut b = [0u8; WIFI_BLOB_LEN];
+    b[0..4].copy_from_slice(&WIFI_MAGIC.to_le_bytes());
+    b[4] = WIFI_VERSION;
+    b[5] = ssid.len() as u8;
+    b[6] = psk.len() as u8;
+    b[WIFI_SSID_AT..WIFI_SSID_AT + ssid.len()].copy_from_slice(ssid.as_bytes());
+    b[WIFI_PSK_AT..WIFI_PSK_AT + psk.len()].copy_from_slice(psk.as_bytes());
+    let crc = crc32(&b[0..WIFI_CRC_AT]);
+    b[WIFI_CRC_AT..WIFI_BLOB_LEN].copy_from_slice(&crc.to_le_bytes());
+    Ok(b)
+}
+
+/// The stored credentials, or `None` when this board uses the ones it was built
+/// with.
+#[cfg(feature = "hal")]
+pub fn load_credentials() -> Option<(String<SSID_MAX>, String<PSK_MAX>)> {
+    let mut flash = FlashStorage::new();
+    let mut b = [0u8; WIFI_BLOB_LEN];
+    flash.read(WIFI_OFFSET, &mut b).ok()?;
+    decode_credentials(&b)
+}
+
+/// Persist credentials, so the next boot joins with them.
+#[cfg(feature = "hal")]
+pub fn store_credentials(ssid: &str, psk: &str) -> Result<(), &'static str> {
+    let b = encode_credentials(ssid, psk)?;
+    FlashStorage::new()
+        .write(WIFI_OFFSET, &b)
+        .map_err(|_| "wifi nvs write")
+}
+
+/// Drop the stored credentials, returning the board to its build-time ones.
+#[cfg(feature = "hal")]
+pub fn clear_credentials() -> Result<(), &'static str> {
+    FlashStorage::new()
+        .write(WIFI_OFFSET, &[0u8; WIFI_BLOB_LEN])
+        .map_err(|_| "wifi nvs erase")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +779,102 @@ mod tests {
         let crc = crc32(&b[0..24]);
         b[24..28].copy_from_slice(&crc.to_le_bytes());
         assert!(decode_node_name(&b).is_none());
+    }
+
+    // --- Wi-Fi credential blob ----------------------------------------------
+
+    #[test]
+    fn credentials_round_trip() {
+        for (ssid, psk) in [
+            ("MyNetwork", "hunter2"),
+            // An open network, and the two extremes of what can be stored.
+            ("OpenNet", ""),
+            ("x", "y"),
+            (
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            // Non-ASCII is legal in an SSID and must survive byte-for-byte.
+            ("Küche 2.4␣GHz", "Fußball"),
+        ] {
+            let blob = encode_credentials(ssid, psk).expect("encodable");
+            let (out_ssid, out_psk) = decode_credentials(&blob).expect("valid blob");
+            assert_eq!(out_ssid.as_str(), ssid);
+            assert_eq!(out_psk.as_str(), psk);
+        }
+    }
+
+    #[test]
+    fn credentials_reject_what_will_not_fit() {
+        assert!(encode_credentials("", "psk").is_err());
+        assert!(encode_credentials(&"x".repeat(SSID_MAX + 1), "psk").is_err());
+        assert!(encode_credentials("Net", &"x".repeat(PSK_MAX + 1)).is_err());
+        assert!(encode_credentials(&"x".repeat(SSID_MAX), &"x".repeat(PSK_MAX)).is_ok());
+    }
+
+    #[test]
+    fn credentials_reject_blank_erased_and_corrupt_sectors() {
+        assert!(decode_credentials(&[0x00; WIFI_BLOB_LEN]).is_none());
+        assert!(decode_credentials(&[0xFF; WIFI_BLOB_LEN]).is_none());
+
+        // Every bit of every byte. A flip that decoded as *different* valid
+        // credentials would take the board off the network with no clue why.
+        let good = encode_credentials("MyNetwork", "hunter2").unwrap();
+        for byte in 0..WIFI_BLOB_LEN {
+            for bit in 0..8 {
+                let mut b = good;
+                b[byte] ^= 1 << bit;
+                assert!(
+                    decode_credentials(&b).is_none(),
+                    "bit {bit} of byte {byte} decoded despite corruption"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn credentials_reject_a_half_written_sector() {
+        let good = encode_credentials("MyNetwork", "hunter2").unwrap();
+        for kept in 1..WIFI_BLOB_LEN {
+            let mut b = [0xFFu8; WIFI_BLOB_LEN];
+            b[..kept].copy_from_slice(&good[..kept]);
+            assert!(decode_credentials(&b).is_none(), "accepted {kept} bytes");
+        }
+    }
+
+    #[test]
+    fn credentials_reject_lengths_that_overrun_their_fields() {
+        // Length fields pointing past their buffers, with the CRC recomputed so
+        // only the bounds checks stand between them and a panic.
+        for (ssid_len, psk_len) in [(SSID_MAX as u8 + 1, 7), (9, PSK_MAX as u8 + 1), (0, 7)] {
+            let mut b = encode_credentials("MyNetwork", "hunter2").unwrap();
+            b[5] = ssid_len;
+            b[6] = psk_len;
+            let crc = crc32(&b[0..WIFI_CRC_AT]);
+            b[WIFI_CRC_AT..WIFI_BLOB_LEN].copy_from_slice(&crc.to_le_bytes());
+            assert!(
+                decode_credentials(&b).is_none(),
+                "accepted ssid_len {ssid_len}, psk_len {psk_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn credentials_reject_a_stale_version() {
+        let mut b = encode_credentials("MyNetwork", "hunter2").unwrap();
+        b[4] = WIFI_VERSION.wrapping_add(1);
+        assert!(decode_credentials(&b).is_none());
+    }
+
+    #[test]
+    fn the_three_blobs_live_in_different_sectors() {
+        // A 4 KiB erase takes the whole sector with it, so two blobs sharing one
+        // would mean re-taring a scale could drop its credentials.
+        let sectors = [FLASH_OFFSET, NODE_OFFSET, WIFI_OFFSET];
+        for (i, a) in sectors.iter().enumerate() {
+            for b in &sectors[i + 1..] {
+                assert!(a.abs_diff(*b) >= 0x1000, "{a:#x} and {b:#x} share a sector");
+            }
+        }
     }
 }
