@@ -208,7 +208,7 @@ impl Sensors {
     ///
     /// A sensor that does not answer contributes nothing and is logged — never
     /// fatal, matching the DS18B20 contract. This is only called on publish
-    /// cycles: the SDS011 in particular spends ~20 s spinning its fan here.
+    /// cycles: the SDS011 in particular spends 10–30 s spinning its fan here.
     pub async fn measure_all(&mut self, out: &mut Samples) {
         let node = node::active();
 

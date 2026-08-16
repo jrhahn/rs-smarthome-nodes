@@ -11,12 +11,14 @@
 //!
 //! **Fan duty-cycling (important):** the laser + fan are rated ~8000 h, so we
 //! must not run them continuously. Command frame `AA B4 06 01 <mode> ... AB`
-//! sets sleep/work; the cycle is: wake fan -> wait ~15–30 s for the airflow to
-//! stabilise -> read a frame -> put the sensor back to sleep. The sensor must
-//! also be kept dry (condensation ruins both reading and hardware).
+//! sets sleep/work; the cycle is: wake fan -> let the airflow establish -> read
+//! frames until they settle -> put the sensor back to sleep. How long the
+//! middle step takes is decided by the readings themselves rather than by a
+//! fixed guess (see [`Sds011::warm_up`]). The sensor must also be kept dry
+//! (condensation ruins both reading and hardware).
 
 #[cfg(feature = "drivers")]
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 #[cfg(feature = "drivers")]
 use embedded_io_async::{Read, Write};
 #[cfg(feature = "drivers")]
@@ -34,8 +36,24 @@ pub const CMD_DATA: u8 = 0xC0;
 pub const FRAME_LEN: usize = 10;
 /// Length of a host->sensor command frame.
 pub const CMD_FRAME_LEN: usize = 19;
-/// Seconds to run the fan before trusting a reading.
-pub const WARMUP_SECS: u64 = 20;
+/// Shortest the fan must run before a frame means anything.
+///
+/// Below this the airflow has not established and the sensor reports a stable
+/// but meaningless value — usually whatever it last saw — so a settling check
+/// would happily agree with itself and stop early.
+pub const MIN_WARMUP_SECS: u64 = 10;
+/// Ceiling on the warm-up. Reached when the air genuinely will not settle
+/// (someone is cooking), in which case the latest frame is still the best
+/// answer available and is worth more than the fan time to keep waiting.
+pub const MAX_WARMUP_SECS: u64 = 30;
+/// Consecutive frames that must agree before the reading counts as settled.
+/// One repeat is luck; three in a row is airflow.
+const STABLE_FRAMES: u32 = 3;
+/// Two readings agree within 1 µg/m³ plus 5 % of the larger: an absolute floor
+/// for clean air, where the sensor's own noise dominates, and a proportional
+/// band for dirty air, where it does not.
+const AGREE_TENTHS: i32 = 10;
+const AGREE_PERCENT: i32 = 5;
 /// How long to wait for a measurement frame once the fan has warmed up. The
 /// sensor reports every ~1 s, so this is generous; exceeding it means silence.
 #[cfg(feature = "drivers")]
@@ -112,14 +130,29 @@ pub const fn sleep_work_frame(work: bool) -> [u8; CMD_FRAME_LEN] {
     f
 }
 
+/// Do two frames report the same air, within the sensor's own noise?
+pub fn frames_agree(a: &[u8; FRAME_LEN], b: &[u8; FRAME_LEN]) -> bool {
+    agree(pm_tenths(a[2], a[3]), pm_tenths(b[2], b[3]))
+        && agree(pm_tenths(a[4], a[5]), pm_tenths(b[4], b[5]))
+}
+
+/// Are two values in tenths of µg/m³ the same reading, allowing for noise?
+pub const fn agree(a: i32, b: i32) -> bool {
+    let larger = if a > b { a } else { b };
+    let tolerance = AGREE_TENTHS + larger * AGREE_PERCENT / 100;
+    let difference = if a > b { a - b } else { b - a };
+    difference <= tolerance
+}
+
 /// SDS011 on a UART, generic over the byte stream so the driver stays
 /// HAL-agnostic (esp-hal's async `Uart` implements `embedded-io-async`).
 #[cfg(feature = "drivers")]
 pub struct Sds011<U> {
     uart: U,
-    /// Seconds the fan runs before a frame is trusted. Configurable so a mains
-    /// node that samples rarely can afford a longer, more accurate warm-up.
-    pub warmup_secs: u64,
+    /// Fan time before any frame is trusted (see [`MIN_WARMUP_SECS`]).
+    pub min_warmup: Duration,
+    /// Hard ceiling on the warm-up (see [`MAX_WARMUP_SECS`]).
+    pub max_warmup: Duration,
     /// How long to wait for a frame once the fan has warmed up. Configurable
     /// for the same reason as the warm-up — and so a test does not have to sit
     /// through the real thing.
@@ -131,7 +164,8 @@ impl<U: Read + Write> Sds011<U> {
     pub fn new(uart: U) -> Self {
         Self {
             uart,
-            warmup_secs: WARMUP_SECS,
+            min_warmup: Duration::from_secs(MIN_WARMUP_SECS),
+            max_warmup: Duration::from_secs(MAX_WARMUP_SECS),
             frame_timeout: FRAME_TIMEOUT,
         }
     }
@@ -190,6 +224,42 @@ impl<U: Read + Write> Sds011<U> {
         }
     }
 
+    /// Run the fan until the readings settle, and return the last frame seen.
+    ///
+    /// The old fixed 20 s was a guess in both directions: too long for still
+    /// air, too short for air that is actually changing. Instead the driver
+    /// serves the minimum airflow time, then watches until consecutive frames
+    /// agree — typically ~3 s later, which is fan life back — and gives up at
+    /// the ceiling with whatever it has, since an unsettled reading still beats
+    /// none.
+    async fn warm_up(&mut self) -> Option<[u8; FRAME_LEN]> {
+        Timer::after(self.min_warmup).await;
+        // Everything said during the spin-up describes air that was not moving
+        // through the sensor yet.
+        self.drain().await;
+
+        let deadline = Instant::now() + self.max_warmup;
+        let mut last: Option<[u8; FRAME_LEN]> = None;
+        let mut agreeing = 0u32;
+        loop {
+            // One frame is always read, however tight the budget: an unsettled
+            // reading is worth more than an empty round.
+            let Ok(Some(frame)) = with_timeout(self.frame_timeout, self.read_frame()).await else {
+                // Silence: the sensor stopped talking, so this is all there is.
+                break;
+            };
+            agreeing = match last {
+                Some(previous) if frames_agree(&previous, &frame) => agreeing + 1,
+                _ => 1,
+            };
+            last = Some(frame);
+            if agreeing >= STABLE_FRAMES || Instant::now() >= deadline {
+                break;
+            }
+        }
+        last
+    }
+
     fn push(readings: &mut Vec<Reading, MAX_READINGS>, key: &'static str, tenths: i32) {
         let mut value = String::new();
         write_tenths(&mut value, tenths);
@@ -213,18 +283,14 @@ impl<U: Read + Write> Sensor for Sds011<U> {
         if self.set_work(true).await.is_none() {
             return out;
         }
-        // Let the airflow stabilise before believing anything the sensor says,
-        // then discard everything it said while it was still spinning up.
-        Timer::after(Duration::from_secs(self.warmup_secs)).await;
-        self.drain().await;
 
-        let frame = with_timeout(self.frame_timeout, self.read_frame()).await;
+        let frame = self.warm_up().await;
 
         // Park the fan again whatever happened — its 8000 h life is the scarce
         // resource here, so it must never be left running by an error path.
         let _ = self.set_work(false).await;
 
-        if let Ok(Some(f)) = frame {
+        if let Some(f) = frame {
             Self::push(&mut out, "pm25", pm_tenths(f[2], f[3]));
             Self::push(&mut out, "pm10", pm_tenths(f[4], f[5]));
         }
@@ -352,7 +418,8 @@ mod tests {
         let mut sensor = Sds011::new(super::super::mock::FakeUart::new(segments));
         // The fan spin-up and the patience for a stubborn sensor are the two
         // things a test must not sit through.
-        sensor.warmup_secs = 0;
+        sensor.min_warmup = Duration::from_ticks(0);
+        sensor.max_warmup = Duration::from_secs(1);
         sensor.frame_timeout = Duration::from_millis(50);
         sensor
     }
@@ -521,7 +588,7 @@ mod tests {
 
         // The write fails, so there is nothing to wait for and nothing to park.
         let mut sensor = Sds011::new(FakeUart::disconnected());
-        sensor.warmup_secs = 0;
+        sensor.min_warmup = Duration::from_ticks(0);
         assert!(block_on(sensor.measure()).is_empty());
     }
 
@@ -535,8 +602,131 @@ mod tests {
         // so the surrounding timeout could never fire: without a bound on the
         // empty reads this call would spin for ever and take the node with it.
         let mut sensor = Sds011::new(StarvedUart);
-        sensor.warmup_secs = 0;
+        sensor.min_warmup = Duration::from_ticks(0);
+        sensor.max_warmup = Duration::from_millis(50);
         sensor.frame_timeout = Duration::from_millis(50);
         assert!(block_on(sensor.measure()).is_empty());
+    }
+
+    // --- Adaptive warm-up ----------------------------------------------------
+
+    #[test]
+    fn agreement_allows_noise_but_not_a_real_change() {
+        // Clean air: the absolute floor does the work, since 5 % of nothing is
+        // nothing.
+        assert!(agree(0, 10));
+        assert!(!agree(0, 20));
+        // Ordinary indoor air, ±0.5 µg/m³ of jitter.
+        assert!(agree(200, 205));
+        assert!(agree(205, 200)); // symmetric
+        assert!(!agree(200, 260));
+        // Dirty air, where 1 µg/m³ of tolerance would never settle.
+        assert!(agree(2000, 2090));
+        assert!(!agree(2000, 2200));
+        // A value compared with itself always agrees, at any magnitude.
+        for value in [0, 1, 245, 9999, 65535] {
+            assert!(agree(value, value));
+        }
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn frames_agree_on_both_particle_sizes() {
+        // PM2.5 settling while PM10 is still climbing is not a settled reading.
+        assert!(frames_agree(&frame(245, 1000), &frame(248, 1010)));
+        assert!(!frames_agree(&frame(245, 1000), &frame(248, 1400)));
+        assert!(!frames_agree(&frame(245, 1000), &frame(600, 1010)));
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_settled_reading_stops_the_fan_early() {
+        use super::super::mock::Segment;
+
+        // Three frames that agree are enough. The fourth is wildly different
+        // and must never be reached — reading it would mean the driver kept the
+        // fan running past the point it had its answer.
+        let mut stream = Vec::new();
+        for pm in [245, 247, 246, 9999] {
+            stream.extend_from_slice(&frame(pm, 1000));
+        }
+
+        let mut sensor = sensor(vec![Segment::after_a_gap(stream)]);
+        assert_eq!(
+            readings(&mut sensor),
+            vec![("pm25", "24.6".to_string()), ("pm10", "100.0".to_string())]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn it_keeps_watching_while_the_air_is_still_changing() {
+        use super::super::mock::Segment;
+
+        // The old fixed warm-up would have grabbed the first of these and
+        // published a number the air had already left behind.
+        let mut stream = Vec::new();
+        for pm in [500, 300, 200, 205, 203] {
+            stream.extend_from_slice(&frame(pm, 1000));
+        }
+
+        let mut sensor = sensor(vec![Segment::after_a_gap(stream)]);
+        assert_eq!(
+            readings(&mut sensor),
+            vec![("pm25", "20.3".to_string()), ("pm10", "100.0".to_string())]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_ceiling_stops_the_watching_but_still_reports() {
+        use super::super::mock::Segment;
+
+        // Air that will not settle — someone is cooking — must not spin the fan
+        // for ever. One frame is always read, and an unsettled reading beats an
+        // empty round.
+        let mut stream = Vec::new();
+        for pm in [500, 100] {
+            stream.extend_from_slice(&frame(pm, 1000));
+        }
+
+        let mut sensor = sensor(vec![Segment::after_a_gap(stream)]);
+        sensor.max_warmup = Duration::from_ticks(0);
+        assert_eq!(
+            readings(&mut sensor),
+            vec![("pm25", "50.0".to_string()), ("pm10", "100.0".to_string())]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_minimum_warm_up_is_served_before_anything_is_believed() {
+        use super::super::mock::Segment;
+        use embassy_time::Instant;
+
+        // Frames arriving during the spin-up agree with each other perfectly —
+        // the sensor repeats its last value — so without a floor the settling
+        // check would stop immediately on air that is not moving yet.
+        let mut stale = Vec::new();
+        for _ in 0..3 {
+            stale.extend_from_slice(&frame(9999, 9999));
+        }
+
+        let mut sensor = sensor(vec![
+            Segment::now(stale),
+            Segment::after_a_gap({
+                let mut stream = Vec::new();
+                for pm in [245, 246, 245] {
+                    stream.extend_from_slice(&frame(pm, 1000));
+                }
+                stream
+            }),
+        ]);
+        sensor.min_warmup = Duration::from_millis(120);
+
+        let started = Instant::now();
+        let values = readings(&mut sensor);
+        assert!(Instant::now() - started >= Duration::from_millis(120));
+        assert_eq!(values[0], ("pm25", "24.5".to_string()));
     }
 }
