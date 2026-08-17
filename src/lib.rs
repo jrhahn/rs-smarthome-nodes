@@ -39,7 +39,7 @@ pub mod node;
 pub mod sensors;
 pub mod wifi;
 
-#[cfg(feature = "hal")]
+#[cfg(feature = "drivers")]
 pub mod hx711;
 #[cfg(feature = "hal")]
 pub mod platform;

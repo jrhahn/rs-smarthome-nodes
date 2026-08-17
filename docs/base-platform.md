@@ -245,6 +245,16 @@ single-shot test really does sit through the datasheet's ~5 s conversion; unlike
 the SDS011 warm-up it is a fixed sensor timing, not a policy knob, so there is
 nothing honest to shorten.
 
+The HX711 gets the same treatment through the `embedded-hal` pin traits, and it
+is the one driver that has actually been running — which is precisely why the
+bit protocol is worth pinning down. The fake pins share a line, so a test can
+check not only *what* was read but *when*: 24 bits most-significant-first, each
+sampled while the clock is high (sampling on the low phase reads the next bit on
+real hardware and produces plausible numbers rather than obvious ones), 25/26/27
+total pulses depending on gain, the clock parked low afterwards so the chip is
+not latched into power-down, and a disconnected amplifier timing out rather than
+returning noise as a weight.
+
 What this does *not* cover: timing, bus contention, anything electrical. A green
 test says the driver handles the bytes correctly, not that the SHT31 answers
 within 15 ms on the real bus.

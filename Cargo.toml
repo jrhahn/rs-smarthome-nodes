@@ -35,7 +35,12 @@ default = ["hal"]
 # `embedded-hal-async` / `embedded-io-async` traits and embassy-time. Split out
 # of `hal` so the host tests can exercise the *real* drivers against fake buses
 # (see `sensors::mock`) without dragging in the chip support crates.
-drivers = ["dep:embassy-time", "dep:embedded-hal-async", "dep:embedded-io-async"]
+drivers = [
+    "dep:embassy-time",
+    "dep:embedded-hal",
+    "dep:embedded-hal-async",
+    "dep:embedded-io-async",
+]
 
 # What the host test run enables. embassy-time needs two things to link that the
 # device gets elsewhere: a time driver (`std`, the whole reason the driver tests
@@ -105,6 +110,7 @@ embassy-time = { version = "0.3.2", optional = true }
 embassy-sync = { version = "0.6.1", optional = true }
 
 # --- Sensor bus traits (keep the drivers HAL-agnostic) ---
+embedded-hal = { version = "1.0.0", optional = true }
 embedded-hal-async = { version = "1.0.0", optional = true }
 embedded-io-async = { version = "0.6.1", optional = true }
 

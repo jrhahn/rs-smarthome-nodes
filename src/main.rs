@@ -39,6 +39,7 @@ use embassy_time::{with_timeout, Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
+    delay::Delay,
     efuse::Efuse,
     gpio::{Input, Level, Output, OutputOpenDrain, Pull},
     peripherals::{LPWR, RADIO_CLK, RNG, TIMG1, WIFI},
@@ -190,10 +191,14 @@ macro_rules! mk_static {
     }};
 }
 
+/// The load-cell driver as this board wires it: esp-hal pins and delay. The
+/// driver itself names none of those types (see [`hx711`]).
+type Scale<'d> = Hx711<Input<'d>, Output<'d>, Delay>;
+
 /// Everything this node can measure. Absent hardware is `None`, so both power
 /// profiles run the same sampling code.
 struct Board<'d> {
-    scale: Option<Hx711<'d>>,
+    scale: Option<Scale<'d>>,
     probe: Option<Ds18b20<'d>>,
     sensors: Sensors,
 }
@@ -290,7 +295,7 @@ async fn main(spawner: Spawner) {
     let scale = node.scale.enabled.then(|| {
         let dt = Input::new(peripherals.GPIO3, Pull::Up);
         let sck = Output::new(peripherals.GPIO2, Level::Low);
-        Hx711::new(dt, sck)
+        Hx711::new(dt, sck, Delay::new())
     });
 
     // DS18B20 open-drain 1-Wire line on D2 / GPIO4 (internal pull-up backs the
