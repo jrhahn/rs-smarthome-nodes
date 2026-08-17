@@ -92,9 +92,24 @@ SHT31-D: temperature = 21.4
 SHT31-D: humidity = 48.2
 ```
 
-If instead you get `no SHT31-D at 0x44 or 0x45 — check SDA/SCL and the
-pull-ups`, the usual causes in order: SDA and SCL swapped, no pull-ups, or the
-breakout not actually powered.
+If instead you get `no SHT31-D at 0x44 or 0x45`, the firmware immediately
+sweeps the whole bus and tells you which of two very different problems you
+have:
+
+```
+I²C scan: nothing answered between 0x08 and 0x77 — the bus itself is not working
+```
+
+means SDA and SCL swapped, no pull-ups, or the breakout not actually powered.
+Whereas:
+
+```
+I²C scan: 0x76 answered
+I²C scan: the bus works, so the missing sensor is at none of those addresses
+```
+
+means the wiring is fine and you have a different device fitted, or one that
+straps its address somewhere unexpected.
 
 ---
 
@@ -145,7 +160,8 @@ SCD41: temperature = 21.4
 SCD41: humidity = 48.2
 ```
 
-If you get `no SCD41 at 0x62`, check the same three things as for the SHT31-D.
+If you get `no SCD41 at 0x62`, read the bus scan that follows it — same two
+cases as for the SHT31-D above.
 
 ---
 

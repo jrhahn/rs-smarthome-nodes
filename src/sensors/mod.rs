@@ -130,6 +130,44 @@ pub fn write_int(buf: &mut String<16>, value: i32) {
 // crate). Sensirion datasheets give CRC(0xBEEF) == 0x92.
 const _: () = assert!(crc8_sensirion(&[0xBE, 0xEF]) == 0x92);
 
+// --- Bus diagnostics ---------------------------------------------------------
+
+/// Lowest and highest 7-bit addresses that can belong to a device. Everything
+/// below `0x08` and above `0x77` is reserved by the I²C specification.
+pub const SCAN_FIRST: u8 = 0x08;
+pub const SCAN_LAST: u8 = 0x77;
+/// Most devices worth reporting from one sweep. Two is the realistic number
+/// here; the headroom is for a bus that turns out to have more on it than
+/// anyone expected, which is exactly the case worth seeing.
+pub const MAX_FOUND: usize = 8;
+
+/// Sweep the bus and return every address that answers.
+///
+/// This exists to settle the one question the targeted probes cannot: a missing
+/// sensor and a dead bus both read as "not responding". If the sweep finds
+/// *something*, the wiring and the pull-ups are fine and the device is simply
+/// not where it was expected; if it finds nothing, the bus itself is the
+/// problem.
+///
+/// The probe is a zero-length write, which puts the address on the bus and
+/// looks at the acknowledgement without transferring data — the same thing an
+/// `i2cdetect` does, and side-effect-free on any device that is not there.
+///
+/// Worth ~110 transactions, so callers run it only when something is already
+/// wrong.
+#[cfg(feature = "drivers")]
+pub async fn scan_bus<I: embedded_hal_async::i2c::I2c>(bus: &mut I) -> Vec<u8, MAX_FOUND> {
+    let mut found = Vec::new();
+    for addr in SCAN_FIRST..=SCAN_LAST {
+        if bus.write(addr, &[]).await.is_ok() && found.push(addr).is_err() {
+            // More devices than we can report says everything the caller needs
+            // to know already.
+            break;
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +288,70 @@ mod tests {
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
             }
         }
+    }
+
+    // --- Bus scan -----------------------------------------------------------
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_scan_reports_every_address_that_answers() {
+        use super::mock::{block_on, FakeI2c};
+
+        // The realistic case: both I²C sensors of the outdoor node.
+        let mut bus = FakeI2c::with_devices([sht31::ADDR, scd41::ADDR]);
+        let found = block_on(scan_bus(&mut bus));
+        assert_eq!(found.as_slice(), &[sht31::ADDR, scd41::ADDR]);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_dead_bus_answers_nowhere() {
+        // Nothing answering anywhere is the signal that the bus itself is the
+        // problem — wiring, pull-ups or power — rather than one absent sensor.
+        use super::mock::{block_on, FakeI2c};
+
+        let mut bus = FakeI2c::empty();
+        assert!(block_on(scan_bus(&mut bus)).is_empty());
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_device_at_an_unexpected_address_is_still_found() {
+        // The case that makes the scan worth its ~110 transactions: the bus is
+        // healthy and the breakout is simply somewhere else.
+        use super::mock::{block_on, FakeI2c};
+
+        let mut bus = FakeI2c::with_devices([0x76]); // e.g. a BME280
+        assert_eq!(block_on(scan_bus(&mut bus)).as_slice(), &[0x76]);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_scan_stays_inside_the_addressable_range() {
+        // Addressing a reserved range is not merely useless: 0x00 is the
+        // general-call address, which every device on the bus listens to.
+        use super::mock::{block_on, FakeI2c};
+
+        let mut bus = FakeI2c::empty();
+        let _ = block_on(scan_bus(&mut bus));
+        let addressed = bus.addressed();
+        assert_eq!(addressed.len(), (SCAN_LAST - SCAN_FIRST + 1) as usize);
+        assert!(addressed
+            .iter()
+            .all(|a| (SCAN_FIRST..=SCAN_LAST).contains(a)));
+        assert_eq!(addressed.first(), Some(&SCAN_FIRST));
+        assert_eq!(addressed.last(), Some(&SCAN_LAST));
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_crowded_bus_does_not_overrun_the_report() {
+        // A bus where everything answers means SDA is stuck low, which is worth
+        // surviving rather than panicking on.
+        use super::mock::{block_on, FakeI2c};
+
+        let mut bus = FakeI2c::with_devices(SCAN_FIRST..=SCAN_LAST);
+        let found = block_on(scan_bus(&mut bus));
+        assert_eq!(found.len(), MAX_FOUND);
     }
 }

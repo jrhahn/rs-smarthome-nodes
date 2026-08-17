@@ -171,6 +171,7 @@ impl Sensors {
     /// breakouts differ on how they strap ADDR.
     async fn probe_i2c(&mut self) {
         let Some(bus) = self.bus else { return };
+        let mut missing = false;
 
         if self.sht31.is_some() {
             let primary = acks(bus, sht31::ADDR, sht31::CMD_READ_STATUS).await;
@@ -184,11 +185,14 @@ impl Sensors {
                     );
                     self.sht31 = Some(Sht31::with_address(bus, sht31::ADDR_ALT));
                 }
-                (false, false) => warn!(
-                    "no SHT31-D at 0x{:02X} or 0x{:02X} — check SDA/SCL and the pull-ups",
-                    sht31::ADDR,
-                    sht31::ADDR_ALT
-                ),
+                (false, false) => {
+                    missing = true;
+                    warn!(
+                        "no SHT31-D at 0x{:02X} or 0x{:02X}",
+                        sht31::ADDR,
+                        sht31::ADDR_ALT
+                    );
+                }
             }
         }
 
@@ -196,12 +200,41 @@ impl Sensors {
             if acks(bus, scd41::ADDR, scd41::CMD_GET_DATA_READY).await {
                 info!("SCD41 found at 0x{:02X}", scd41::ADDR);
             } else {
-                warn!(
-                    "no SCD41 at 0x{:02X} — check SDA/SCL and the pull-ups",
-                    scd41::ADDR
-                );
+                missing = true;
+                warn!("no SCD41 at 0x{:02X}", scd41::ADDR);
             }
         }
+
+        // Only now, and only because something is already wrong: sweep the bus
+        // to tell "the bus is dead" from "the bus is fine and the device is
+        // somewhere else". Those two look identical from a targeted probe, and
+        // they have completely different fixes.
+        if missing {
+            self.report_scan(bus).await;
+        }
+    }
+
+    /// Sweep the whole bus and say what that means, in the terms someone
+    /// holding a soldering iron can act on.
+    async fn report_scan(&self, mut bus: SharedI2c) {
+        let found = crate::sensors::scan_bus(&mut bus).await;
+        if found.is_empty() {
+            warn!(
+                "I²C scan: nothing answered between 0x{:02X} and 0x{:02X} — \
+                 the bus itself is not working (SDA/SCL swapped, no pull-ups, or no power)",
+                crate::sensors::SCAN_FIRST,
+                crate::sensors::SCAN_LAST
+            );
+            return;
+        }
+        // Something answered, so the wiring and the pull-ups are fine.
+        for addr in &found {
+            info!("I²C scan: 0x{:02X} answered", addr);
+        }
+        warn!(
+            "I²C scan: the bus works, so the missing sensor is at none of those \
+             addresses — check which device is actually fitted and how it straps its address"
+        );
     }
 
     /// Measure every populated sensor and append the readings to `out`.
