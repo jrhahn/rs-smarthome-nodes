@@ -211,6 +211,18 @@ the failures that would otherwise show up as an entity stuck at "unknown".
 Compile-time assertions stay: they fail the build rather than a test run, and
 they cover invariants a test cannot reach.
 
+### Telling a dead bus from a missing sensor
+
+A targeted probe cannot distinguish them: "no SHT31-D at 0x44" is what you get
+whether the sensor is absent, at another address, or the bus is not working at
+all — and those have completely different fixes. So when an expected device is
+missing, and only then, the firmware sweeps `0x08`–`0x77` with zero-length
+writes and reports what answered. Anything answering proves the wiring and the
+pull-ups are fine; nothing answering proves they are not.
+
+It is ~110 transactions, which is why it is a reaction to a problem rather than
+part of every boot.
+
 ### Driver tests against fake buses
 
 Making the drivers generic over `embedded-hal-async` / `embedded-io-async` was

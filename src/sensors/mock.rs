@@ -67,6 +67,27 @@ impl FakeI2c {
         }
     }
 
+    /// A bus carrying several devices, none of which has canned replies — for
+    /// address-level probing rather than conversation.
+    pub fn with_devices(addrs: impl IntoIterator<Item = u8>) -> Self {
+        Self {
+            replies: VecDeque::new(),
+            present: addrs.into_iter().collect(),
+            events: Vec::new(),
+        }
+    }
+
+    /// Every address a transaction was attempted on, in order.
+    pub fn addressed(&self) -> Vec<u8> {
+        self.events
+            .iter()
+            .map(|e| match e {
+                I2cEvent::Write { addr, .. } => *addr,
+                I2cEvent::Read { addr, .. } => *addr,
+            })
+            .collect()
+    }
+
     /// A bus with nothing on it: every transaction NACKs.
     pub fn empty() -> Self {
         Self {
