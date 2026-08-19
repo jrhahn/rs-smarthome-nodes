@@ -37,9 +37,14 @@ const FLAG_PRESENT: u32 = 1 << 1;
 /// deep-sleep wake would just spend battery on airtime.
 const FLAG_DISCOVERY: u32 = 1 << 2;
 /// Set at the end of the first boot of a power cycle. RTC RAM is wiped by a
-/// cold power-on (and by a reflash) but survives deep sleep, so an unset flag
-/// means "the board was just plugged in", which is the moment someone might be
-/// waiting at the serial console.
+/// cold power-on but survives deep sleep, so an unset flag means "the board was
+/// just plugged in", which is the moment someone might be waiting at the serial
+/// console.
+///
+/// It survives a **reflash** too — verified on hardware 2026-08-19, an
+/// `espflash flash` plus the reset it performs left these flags standing. Only
+/// removing power clears them. So a board that has already booted once will not
+/// re-open the console window just because you flashed it.
 const FLAG_BOOTED: u32 = 1 << 3;
 
 fn flags() -> u32 {
@@ -88,8 +93,12 @@ pub fn set_bird_present(present: bool) {
 }
 
 /// Whether Home Assistant discovery has already been published since the last
-/// cold power-on. A fresh power-up (battery swap, reflash) clears RTC RAM, so
-/// the configs are re-announced exactly when the broker might have lost them.
+/// cold power-on. A fresh power-up (battery swap, unplugging the USB cable)
+/// clears RTC RAM, so the configs are re-announced exactly when the broker might
+/// have lost them.
+///
+/// Note that **reflashing does not clear this** (see [`FLAG_BOOTED`]): to force
+/// a re-announce you have to pull power, not just flash and reset.
 pub fn discovery_published() -> bool {
     flags() & FLAG_DISCOVERY != 0
 }
@@ -116,8 +125,9 @@ pub fn set_idle_wakes(value: u32) {
     unsafe { core::ptr::addr_of_mut!(IDLE_WAKES).write(value) }
 }
 
-/// Is this the first boot since the board was powered up or reflashed, rather
-/// than a wake from deep sleep?
+/// Is this the first boot since the board was **powered up** — power actually
+/// removed and reapplied — rather than a wake from deep sleep? A reflash or a
+/// reset does not count; see [`FLAG_BOOTED`].
 pub fn is_cold_boot() -> bool {
     flags() & FLAG_BOOTED == 0
 }
