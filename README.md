@@ -233,8 +233,9 @@ is what you build from.
 ## Wi-Fi credentials without a rebuild
 
 A board that cannot join the network cannot be told anything over the network,
-so the way in is the serial console. On a **cold boot** (a power-up or a
-reflash — not a deep-sleep wake) the firmware listens briefly:
+so the way in is the serial console. On a **cold boot** — power actually removed
+and reapplied, not a deep-sleep wake and not a reflash — the firmware listens
+briefly:
 
 ```
 wifi: 'your-ssid' (built in)

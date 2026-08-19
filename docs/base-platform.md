@@ -105,7 +105,11 @@ the device (identifiers = node id) and all its entities. State topics are
 
 "Once per power cycle" is a flag in RTC RAM: the messages are retained, so
 re-sending them on every deep-sleep wake would only cost battery, while a cold
-power-on (or a reflash) re-announces exactly when the broker may have lost them.
+power-on re-announces exactly when the broker may have lost them.
+
+Power cycle means power cycle. RTC fast RAM survives a reflash and the reset
+that follows it, so flashing a board does not re-announce its entities — pull
+the power for that.
 
 The bird scale keeps its historical `birds/scale/…` namespace, and its weight is
 still mirrored to the pre-discovery `birds/scale/state` topic, so the migration

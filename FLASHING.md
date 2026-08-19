@@ -256,10 +256,17 @@ readings *and* for its calibration/tuning controls. Nothing is declared by hand;
 see [`home-assistant/README.md`](home-assistant/README.md) for the entity list
 and for calibrating the scale.
 
-> Re-flashing clears RTC RAM, so the next boot re-announces discovery. If you
-> ever need to force it without a reflash, clear the retained configs with
-> `mosquitto_pub -h <broker-ip> -t 'homeassistant/sensor/<node>/<key>/config' -r -n`
-> and power-cycle the board.
+> **Re-flashing does *not* re-announce discovery.** The "already announced" flag
+> lives in RTC fast RAM, which survives both the flash and the reset that
+> follows it — confirmed on hardware. Only removing power clears it, so to force
+> a re-announce, **unplug the USB cable and plug it back in**. A board that has
+> published its discovery configs once will otherwise stay quiet on that topic
+> however many times you flash it.
+>
+> If Home Assistant has lost the entities and you also want the broker's copies
+> gone, clear the retained configs first with
+> `mosquitto_pub -h <broker-ip> -t 'homeassistant/sensor/<node>/<key>/config' -r -n`,
+> then power-cycle.
 
 ---
 
