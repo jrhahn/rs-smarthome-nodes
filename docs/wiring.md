@@ -296,6 +296,44 @@ Two consequences for how you build it:
 - **The 5V pad is dead** on battery, which is why the SDS011 is not on this node.
 - **Keep the sensors on 3V3 from the XIAO**, so they go down with it in sleep.
 
+#### Protection board
+
+The XIAO charges the cell but does **not** protect it: there is no low-voltage
+cutoff, so a flat battery keeps being drained until it is damaged. Unless your
+pack already has a protection PCB tucked under the tape at the tab end — many
+do — put a 1S board inline between the cell and the board.
+
+```
+LiPo  +  ──►  B+  ┌──────────────────┐  P+  ──►  XIAO  B+
+                  │  1S protection    │
+LiPo  −  ──►  B−  └──────────────────┘  P−  ──►  XIAO  B−
+                      (B = battery)        (P = load)
+```
+
+**Read the silkscreen before soldering.** Plenty of 1S boards expose only three
+pads — `B+`, `B-`, `P-` — because the positive rail passes straight through and
+the MOSFETs switch the *negative* side. On those, the XIAO's `B+` comes from the
+board's `B+` and only the negative goes through `P-`. Both layouts are fine;
+wiring one as though it were the other is not.
+
+Solder the board to the cell first (`B-`, then `B+`), insulate it, and only then
+run the load wires to the XIAO — a bare 2000 mAh pouch will deliver tens of amps
+into a slipped iron. Nothing on the XIAO side has reverse-polarity protection.
+
+What such a board does **not** do is keep the cell healthy. The common DW01A-class
+part cuts off around 2.4-2.5 V, far below the ~3.0 V where a LiPo starts losing
+capacity for good. It is a safety device against fire and deep-discharge damage,
+not a longevity one.
+
+Keeping the cell above 3.0 V would be the firmware's job, and it cannot do it
+today: **the XIAO has no battery-sense path at all** — `B+` reaches the charger
+and the regulator, never an ADC — so nothing can read the cell voltage without a
+divider (100 kΩ/100 kΩ from `B+` to GND, 100 nF at the tap). That divider needs
+an ADC1 pin, and on the ESP32-C3 those are GPIO2/3/4 only — `D0`, `D1`, `D2` on
+this board, all three already taken by the HX711 and the DS18B20. `D3` is on
+ADC2, which is unusable while Wi-Fi is up. So battery monitoring on this node
+costs the DS18B20 its pin; the SHT31-D measures air temperature anyway.
+
 ### Outdoors
 
 The DS18B20 is the only waterproof part. The board, the HX711 and the SHT31-D
