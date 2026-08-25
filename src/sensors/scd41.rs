@@ -158,6 +158,16 @@ impl<I2C: I2cBus> Scd41<I2C> {
         match self.mode {
             Mode::Periodic => {
                 if !self.started {
+                    // The sensor is powered from 3V3 and never sees the ESP's
+                    // reset, so it can still be measuring from a previous boot.
+                    // In periodic mode it accepts only read_measurement,
+                    // get_data_ready_status and stop_periodic_measurement, and
+                    // refuses `start_periodic` — leaving `started` false, so
+                    // every later round retried the same refused command and the
+                    // node never produced a reading until someone pulled power.
+                    // Observed on `schlafzimmer` after a monitor-triggered
+                    // reset, 2026-08-25. Stopping first costs 500 ms once.
+                    self.stop_periodic().await;
                     self.command(CMD_START_PERIODIC).await?;
                     self.started = true;
                     // The first conversion needs ~5 s; report nothing this round
@@ -335,6 +345,33 @@ mod tests {
         assert!(readings(&mut sensor).is_empty());
         assert_eq!(sent(&sensor, CMD_START_PERIODIC), 1);
         assert_eq!(sent(&sensor, CMD_READ_MEASUREMENT), 0);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn periodic_mode_stops_a_measurement_left_running_by_a_previous_boot() {
+        use super::super::mock::FakeI2c;
+
+        // The SCD41 is powered from 3V3 and does not see the ESP's reset, so it
+        // can still be measuring when the firmware restarts. `start_periodic` is
+        // refused in that state, which used to leave the driver retrying it for
+        // ever — the node found the sensor at 0x62 and then published nothing
+        // until the board was unplugged. Stop before starting, always.
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, []), Mode::Periodic);
+        let _ = readings(&mut sensor);
+
+        assert_eq!(sent(&sensor, CMD_STOP_PERIODIC), 1);
+        let order: Vec<&[u8]> = sensor.i2c.writes();
+        let stop = order
+            .iter()
+            .position(|w| *w == CMD_STOP_PERIODIC.to_be_bytes());
+        let start = order
+            .iter()
+            .position(|w| *w == CMD_START_PERIODIC.to_be_bytes());
+        assert!(
+            stop < start,
+            "stop_periodic must precede start_periodic, got {order:?}"
+        );
     }
 
     #[cfg(feature = "drivers")]
