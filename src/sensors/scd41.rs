@@ -362,8 +362,12 @@ mod tests {
 
         assert_eq!(sent(&sensor, CMD_STOP_PERIODIC), 1);
         let order: Vec<&[u8]> = sensor.i2c.writes();
-        let stop = order.iter().position(|w| *w == CMD_STOP_PERIODIC.to_be_bytes());
-        let start = order.iter().position(|w| *w == CMD_START_PERIODIC.to_be_bytes());
+        let stop = order
+            .iter()
+            .position(|w| *w == CMD_STOP_PERIODIC.to_be_bytes());
+        let start = order
+            .iter()
+            .position(|w| *w == CMD_START_PERIODIC.to_be_bytes());
         assert!(
             stop < start,
             "stop_periodic must precede start_periodic, got {order:?}"
