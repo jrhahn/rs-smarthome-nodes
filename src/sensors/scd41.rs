@@ -54,6 +54,12 @@ pub const CMD_STOP_PERIODIC: u16 = 0x3F86;
 pub const CMD_GET_DATA_READY: u16 = 0xE4B8;
 pub const CMD_SET_TEMPERATURE_OFFSET: u16 = 0x241D;
 pub const CMD_GET_TEMPERATURE_OFFSET: u16 = 0x2318;
+/// Returns three words forming a unique 48-bit serial, big-endian.
+pub const CMD_GET_SERIAL_NUMBER: u16 = 0x3682;
+/// End-of-line self test. One word: zero means no malfunction detected.
+pub const CMD_PERFORM_SELF_TEST: u16 = 0x3639;
+/// Datasheet execution time for the self test. It really is ten seconds.
+pub const SELF_TEST_MS: u64 = 10_000;
 /// Single-shot conversion time (ms) before `read_measurement`.
 pub const SINGLE_SHOT_MS: u64 = 5000;
 /// Datasheet execution time for the short commands (ms).
@@ -141,6 +147,17 @@ pub const fn offset_centi(raw: u16) -> i32 {
 /// "no measurement pending".
 pub const fn data_ready(status: u16) -> bool {
     status & 0x07FF != 0
+}
+
+/// A self-test reply: zero means no malfunction detected. Note the inversion —
+/// unlike [`data_ready`], here zero is the good news.
+pub const fn self_test_passed(status: u16) -> bool {
+    status == 0
+}
+
+/// Assemble the three `get_serial_number` words into the 48-bit id.
+pub const fn serial_from_words(words: [u16; 3]) -> u64 {
+    (words[0] as u64) << 32 | (words[1] as u64) << 16 | words[2] as u64
 }
 
 /// Where the last measurement attempt fell over.
@@ -331,6 +348,47 @@ impl<I2C: I2cBus> Scd41<I2C> {
         Some(())
     }
 
+    /// `get_serial_number` — a unique 48-bit id, and the cheapest proof that a
+    /// real Sensirion part is on the bus.
+    ///
+    /// Worth logging once per boot: it says which physical sensor is in which
+    /// node, and counterfeits (the SCD4x is among the most-copied parts around)
+    /// tend to give themselves away here, returning zeroes or the same number
+    /// on every unit.
+    ///
+    /// Only valid while the sensor is idle, so this stops a running measurement.
+    pub async fn serial_number(&mut self) -> Option<u64> {
+        self.ensure_idle().await;
+        self.command(CMD_GET_SERIAL_NUMBER).await?;
+        let mut buf = [0u8; 9];
+        self.i2c.read(ADDR, &mut buf).await.ok()?;
+        Some(serial_from_words([
+            crc_word(&buf[0..3])?,
+            crc_word(&buf[3..6])?,
+            crc_word(&buf[6..9])?,
+        ]))
+    }
+
+    /// `perform_self_test` — ask the sensor whether it believes it is healthy.
+    ///
+    /// `Some(true)` means no malfunction detected, `Some(false)` a malfunction,
+    /// `None` that the sensor did not answer. This is the one call that
+    /// separates "the reading is wrong" from "the hardware is broken", and it
+    /// is worth every bit of the ten seconds it takes — the alternative is an
+    /// evening of swapping wires and supplies (2026-08-26).
+    ///
+    /// Blocks for [`SELF_TEST_MS`], so this is not something to run per round.
+    /// Only valid while the sensor is idle, so it stops a running measurement;
+    /// periodic mode restarts by itself on the next sample.
+    pub async fn self_test(&mut self) -> Option<bool> {
+        self.ensure_idle().await;
+        self.command(CMD_PERFORM_SELF_TEST).await?;
+        Timer::after(Duration::from_millis(SELF_TEST_MS)).await;
+        let mut buf = [0u8; 3];
+        self.i2c.read(ADDR, &mut buf).await.ok()?;
+        Some(self_test_passed(crc_word(&buf)?))
+    }
+
     /// `get_data_ready_status` — cheap poll so periodic mode never reads a
     /// stale/unfinished measurement.
     async fn ready(&mut self) -> Option<bool> {
@@ -510,6 +568,8 @@ mod tests {
             CMD_GET_DATA_READY,
             CMD_SET_TEMPERATURE_OFFSET,
             CMD_GET_TEMPERATURE_OFFSET,
+            CMD_GET_SERIAL_NUMBER,
+            CMD_PERFORM_SELF_TEST,
         ];
         for (i, a) in commands.iter().enumerate() {
             for b in &commands[i + 1..] {
@@ -861,5 +921,83 @@ mod tests {
 
         assert_eq!(offset_writes(&sensor), vec![offset_raw(245)]);
         assert_eq!(sent(&sensor, CMD_STOP_PERIODIC), 0);
+    }
+
+    // --- Identity and self test ----------------------------------------------
+
+    #[test]
+    fn the_serial_number_matches_the_datasheet_example() {
+        // Datasheet v1.5, Table 25: words f896 / 9f07 / 3bbe are documented as
+        // serial number 273'325'796'834'238.
+        assert_eq!(
+            serial_from_words([0xf896, 0x9f07, 0x3bbe]),
+            273_325_796_834_238
+        );
+        assert_eq!(serial_from_words([0, 0, 0]), 0);
+        assert_eq!(serial_from_words([0xffff, 0xffff, 0xffff]), (1 << 48) - 1);
+    }
+
+    #[test]
+    fn zero_is_the_good_news_for_the_self_test() {
+        // Inverted against `data_ready`, where zero means "nothing yet". Getting
+        // this backwards would report every healthy sensor as broken, and — far
+        // worse — every broken one as healthy.
+        assert!(self_test_passed(0x0000));
+        assert!(!self_test_passed(0x0001));
+        assert!(!self_test_passed(0xFFFF));
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_serial_number_is_read_off_the_bus() {
+        use super::super::mock::{block_on, FakeI2c};
+
+        let mut reply = word(0xf896);
+        reply.extend(word(0x9f07));
+        reply.extend(word(0x3bbe));
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, vec![reply]), Mode::Periodic);
+
+        assert_eq!(block_on(sensor.serial_number()), Some(273_325_796_834_238));
+        // The command is only valid while the sensor is idle, and at boot we do
+        // not know that it is — it keeps its own rail across an ESP reset.
+        assert_eq!(sent(&sensor, CMD_STOP_PERIODIC), 1);
+        assert_eq!(sent(&sensor, CMD_GET_SERIAL_NUMBER), 1);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_corrupt_serial_number_is_refused_rather_than_invented() {
+        use super::super::mock::{block_on, FakeI2c};
+
+        // A wrong CRC must not become a plausible-looking id: this number is
+        // used to decide whether a part is genuine.
+        let mut reply = word(0xf896);
+        reply.extend(word(0x9f07));
+        reply.extend(word(0x3bbe));
+        let last = reply.len() - 1;
+        reply[last] ^= 0xFF;
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, vec![reply]), Mode::Periodic);
+
+        assert_eq!(block_on(sensor.serial_number()), None);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_self_test_reports_both_verdicts() {
+        use super::super::mock::{block_on, FakeI2c};
+
+        // Like the single-shot test, this really does wait the datasheet's ten
+        // seconds — a fixed sensor timing, not a policy knob.
+        let mut healthy = Scd41::new(FakeI2c::new(ADDR, vec![word(0x0000)]), Mode::Periodic);
+        assert_eq!(block_on(healthy.self_test()), Some(true));
+        assert_eq!(sent(&healthy, CMD_PERFORM_SELF_TEST), 1);
+        assert_eq!(sent(&healthy, CMD_STOP_PERIODIC), 1);
+
+        let mut broken = Scd41::new(FakeI2c::new(ADDR, vec![word(0x0100)]), Mode::Periodic);
+        assert_eq!(block_on(broken.self_test()), Some(false));
+
+        // A sensor that says nothing is not a sensor that says "healthy".
+        let mut absent = Scd41::new(FakeI2c::new(0x00, []), Mode::Periodic);
+        assert_eq!(block_on(absent.self_test()), None);
     }
 }
