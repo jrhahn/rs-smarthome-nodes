@@ -178,6 +178,12 @@ const HX711_TIMEOUT: Duration = Duration::from_millis(500);
 /// happens before this window, so a slow sensor never eats into it.
 const WIFI_BUDGET: Duration = Duration::from_secs(20);
 
+/// How long to wait for the MQTT DISCONNECT and the TCP FIN to actually leave
+/// the board at the end of a round. Short on purpose: the readings are already
+/// out by then, so this only buys a tidy shutdown, and it is spent inside
+/// [`WIFI_BUDGET`].
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
+
 /// Exponential-decay shift for empty-house baseline drift tracking. Each idle
 /// cycle nudges the baseline by `delta >> BASELINE_DRIFT_SHIFT` to absorb slow
 /// thermal / mechanical creep without chasing a real load.
@@ -749,8 +755,10 @@ async fn publish_samples(
 
     let mut recv_buffer = [0u8; MQTT_BUFFER];
     let mut write_buffer = [0u8; MQTT_BUFFER];
+    // By reference, so the socket outlives the client: the graceful shutdown at
+    // the end of this function needs it back (see there).
     let mut client = MqttClient::new(
-        socket,
+        &mut socket,
         &mut write_buffer,
         MQTT_BUFFER,
         &mut recv_buffer,
@@ -925,9 +933,26 @@ async fn publish_samples(
 
     // Say goodbye properly. A DISCONNECT tells the broker to *discard* the will,
     // so a node that simply finished its round is not announced as dead — the
-    // will then only fires when the link really breaks. Best-effort: if it
-    // fails, the worst case is a spurious `offline` that the next round clears.
+    // will then only fires when the link really breaks.
     let _ = client.disconnect().await;
+
+    // ...but writing it is not sending it. `rust-mqtt` hands the packet to the
+    // socket and returns; embassy-net leaves it sitting in the TX buffer until
+    // the stack next polls, and `Drop for TcpSocket` just removes the socket
+    // from the set, taking anything still queued with it. The broker therefore
+    // saw every round end as an abrupt drop, and published the retained will on
+    // the next connect — which is the `offline` that flickered immediately
+    // before every `online` (observed on `bad` and `schlafzimmer`, 2026-08-26)
+    // and made the availability history useless.
+    //
+    // So: drop the client to get the socket back, flush until the send queue is
+    // empty, then close and let the FIN drain. Both waits are bounded — a dead
+    // link must not hold the round open, and by this point the readings are
+    // already published, so giving up here costs only the tidy shutdown.
+    drop(client);
+    let _ = with_timeout(SHUTDOWN_BUDGET, socket.flush()).await;
+    socket.close();
+    let _ = with_timeout(SHUTDOWN_BUDGET, socket.flush()).await;
 
     // Becoming a different node means rebooting, so this is the last thing we
     // do with the connection. Any tuning picked up in the loop above is dropped
