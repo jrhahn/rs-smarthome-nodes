@@ -143,6 +143,56 @@ pub const fn data_ready(status: u16) -> bool {
     status & 0x07FF != 0
 }
 
+/// Where the last measurement attempt fell over.
+///
+/// The SCD41 fails in ways that look the same from the publish path — an empty
+/// round — but mean very different things on the bench. It acknowledging its
+/// address (which the boot probe checks) only proves the bus works; everything
+/// below can still fail after that.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The sensor would not take the temperature-offset write. It only accepts
+    /// config commands while idle, so this means the stop did not take.
+    OffsetRejected,
+    /// `start_periodic_measurement` was not acknowledged.
+    StartRejected,
+    /// Started, but `get_data_ready_status` never reported a sample. Expected
+    /// once right after the start (the first conversion needs ~5 s); persisting
+    /// past that is not.
+    NeverReady,
+    /// The data-ready poll itself did not answer, or answered with a bad CRC.
+    ReadyUnreadable,
+    /// `read_measurement` did not answer, or one of its three words failed CRC.
+    MeasurementUnreadable,
+    /// A well-formed reply reporting 0 ppm, which is the sensor's way of saying
+    /// it has nothing valid yet.
+    NoValidSample,
+    /// Not a fault: the measurement was just started and the first conversion
+    /// needs ~5 s. Expected exactly once per periodic start, and worth saying
+    /// out loud so it is not mistaken for one of the failures above.
+    Warming,
+}
+
+impl Fault {
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Fault::OffsetRejected => {
+                "refused the temperature-offset write (it only accepts config commands while idle)"
+            }
+            Fault::StartRejected => "refused start_periodic_measurement",
+            Fault::NeverReady => "started, but never reported a ready measurement",
+            Fault::ReadyUnreadable => {
+                "did not answer the data-ready poll, or answered with a bad CRC"
+            }
+            Fault::MeasurementUnreadable => {
+                "did not answer read_measurement, or answered with a bad CRC"
+            }
+            Fault::NoValidSample => "reported 0 ppm, i.e. no valid measurement yet",
+            Fault::Warming => "measurement just started; first conversion takes ~5 s",
+        }
+    }
+}
+
 /// Whether this node drives the SCD41 in single-shot mode (battery) or
 /// continuous periodic mode (mains). Ties into the power-profile work (#17).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -171,6 +221,8 @@ pub struct Scd41<I2C> {
     /// False at boot on purpose: the SCD41 keeps its own 3V3 rail across an ESP
     /// reset, so "we just started" says nothing about what it is doing.
     known_idle: bool,
+    /// Where the last empty round fell over, for the log.
+    fault: Option<Fault>,
 }
 
 #[cfg(feature = "drivers")]
@@ -183,7 +235,15 @@ impl<I2C: I2cBus> Scd41<I2C> {
             offset_centi: DEFAULT_OFFSET_CENTI,
             written_offset: None,
             known_idle: false,
+            fault: None,
         }
+    }
+
+    /// Record where a round failed and hand back `None`, so the call sites stay
+    /// one line each.
+    fn fail<T>(&mut self, fault: Fault) -> Option<T> {
+        self.fault = Some(fault);
+        None
     }
 
     /// Ask for a different temperature offset, in hundredths of °C.
@@ -260,8 +320,13 @@ impl<I2C: I2cBus> Scd41<I2C> {
         if self.mode == Mode::Periodic {
             self.ensure_idle().await;
         }
-        self.write_word(CMD_SET_TEMPERATURE_OFFSET, offset_raw(self.offset_centi))
-            .await?;
+        if self
+            .write_word(CMD_SET_TEMPERATURE_OFFSET, offset_raw(self.offset_centi))
+            .await
+            .is_none()
+        {
+            return self.fail(Fault::OffsetRejected);
+        }
         self.written_offset = Some(self.offset_centi);
         Some(())
     }
@@ -293,6 +358,7 @@ impl<I2C: I2cBus> Scd41<I2C> {
         // Before anything else: a pending offset change has to land while the
         // sensor is idle, and in periodic mode applying it stops the
         // measurement, so the restart below has to see the result.
+        self.fault = None;
         self.sync_offset().await?;
         match self.mode {
             Mode::Periodic => {
@@ -308,22 +374,34 @@ impl<I2C: I2cBus> Scd41<I2C> {
                     // reset, 2026-08-25. Stopping first costs 500 ms once —
                     // `ensure_idle` skips it when `sync_offset` just stopped.
                     self.ensure_idle().await;
-                    self.command(CMD_START_PERIODIC).await?;
+                    if self.command(CMD_START_PERIODIC).await.is_none() {
+                        return self.fail(Fault::StartRejected);
+                    }
                     self.started = true;
                     self.known_idle = false;
                     // The first conversion needs ~5 s; report nothing this round
                     // rather than blocking the publish path.
-                    return None;
+                    return self.fail(Fault::Warming);
                 }
-                if !self.ready().await? {
-                    return None;
+                match self.ready().await {
+                    None => return self.fail(Fault::ReadyUnreadable),
+                    Some(false) => return self.fail(Fault::NeverReady),
+                    Some(true) => {}
                 }
-                self.read_measurement().await
+                match self.read_measurement().await {
+                    Some(sample) => Some(sample),
+                    None => self.fail(Fault::MeasurementUnreadable),
+                }
             }
             Mode::SingleShot => {
-                self.command(CMD_MEASURE_SINGLE_SHOT).await?;
+                if self.command(CMD_MEASURE_SINGLE_SHOT).await.is_none() {
+                    return self.fail(Fault::StartRejected);
+                }
                 Timer::after(Duration::from_millis(SINGLE_SHOT_MS)).await;
-                self.read_measurement().await
+                match self.read_measurement().await {
+                    Some(sample) => Some(sample),
+                    None => self.fail(Fault::MeasurementUnreadable),
+                }
             }
         }
     }
@@ -358,12 +436,17 @@ impl<I2C: I2cBus> Sensor for Scd41<I2C> {
         };
         // 0 ppm is the sensor's "no valid measurement yet" answer, not air.
         if co2_raw == 0 {
+            self.fault = Some(Fault::NoValidSample);
             return out;
         }
         Self::push_int(&mut out, "co2", co2_ppm(co2_raw));
         Self::push_tenths(&mut out, "temperature", temp_tenths(t_raw));
         Self::push_tenths(&mut out, "humidity", rh_tenths(rh_raw));
         out
+    }
+
+    fn fault(&self) -> Option<&'static str> {
+        self.fault.map(Fault::describe)
     }
 }
 

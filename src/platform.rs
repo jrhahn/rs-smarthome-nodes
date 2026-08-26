@@ -284,7 +284,13 @@ async fn acks(mut bus: SharedI2c, addr: u8, probe_cmd: u16) -> bool {
 async fn collect<S: Sensor>(sensor: &mut S, slot: Slot, out: &mut Samples) {
     let readings = sensor.measure().await;
     if readings.is_empty() {
-        warn!("{} not responding; skipping its readings", sensor.kind());
+        match sensor.fault() {
+            // The driver knows where it fell over. Say that instead: the boot
+            // probe only proves the sensor acknowledges its address, so "not
+            // responding" is actively misleading once it does.
+            Some(why) => warn!("{} {}; skipping its readings", sensor.kind(), why),
+            None => warn!("{} not responding; skipping its readings", sensor.kind()),
+        }
         return;
     }
     for reading in readings {
