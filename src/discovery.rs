@@ -124,7 +124,10 @@ pub fn config_topic(node: &NodeConfig, entity: &Entity) -> String<96> {
     let _ = write!(
         t,
         "{}/sensor/{}/{}{}/config",
-        PREFIX, node.id, entity.slot.prefix, entity.desc.key
+        PREFIX,
+        node.id,
+        entity.slot.prefix_for(entity.desc.key),
+        entity.desc.key
     );
     t
 }
@@ -155,12 +158,16 @@ pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) 
         },
         ns = node.namespace,
         id = node.id,
-        label = slot.label,
+        label = slot.label_for(desc.key),
         // A slot label like "Luft" prefixes the entity name; an empty label must
         // not leave a leading space behind.
-        sep = if slot.label.is_empty() { "" } else { " " },
+        sep = if slot.label_for(desc.key).is_empty() {
+            ""
+        } else {
+            " "
+        },
         name = desc.name,
-        prefix = slot.prefix,
+        prefix = slot.prefix_for(desc.key),
         key = desc.key,
         unit = desc.unit,
         dev_cla = desc.device_class,
@@ -446,7 +453,8 @@ mod tests {
             for entity in entities(node) {
                 let payload = parse(&config_payload(node, &entity, &avail).unwrap());
                 let announced = expand(payload["stat_t"].as_str().unwrap(), node);
-                let published = node.state_topic(entity.slot.prefix, entity.desc.key);
+                let published =
+                    node.state_topic(entity.slot.prefix_for(entity.desc.key), entity.desc.key);
                 assert_eq!(announced.as_str(), published.as_str());
             }
         }
@@ -497,6 +505,43 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_bedroom_publishes_the_sht31_as_the_rooms_temperature_and_humidity() {
+        // The concrete result of the two-sensor arrangement, spelled out the way
+        // Home Assistant sees it: the SHT31-D owns the plain entities, the
+        // SCD41's own pair is clearly marked as the sensor's own, and CO₂ keeps
+        // the id its history is filed under.
+        let node = crate::node::by_name("schlafzimmer").unwrap();
+        let avail = availability_of(&node);
+        let topics: Vec<String> = announcements(&node, &avail)
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect();
+
+        for expected in [
+            "homeassistant/sensor/schlafzimmer/temperature/config",
+            "homeassistant/sensor/schlafzimmer/humidity/config",
+            "homeassistant/sensor/schlafzimmer/co2/config",
+            "homeassistant/sensor/schlafzimmer/scd41_temperature/config",
+            "homeassistant/sensor/schlafzimmer/scd41_humidity/config",
+        ] {
+            assert!(topics.contains(&expected.to_string()), "missing {expected}");
+        }
+        assert!(!topics.contains(&"homeassistant/sensor/schlafzimmer/scd41_co2/config".to_string()));
+
+        // And the state topic the firmware publishes to has to agree with the
+        // one the discovery payload points at.
+        for entity in entities(&node) {
+            let published =
+                node.state_topic(entity.slot.prefix_for(entity.desc.key), entity.desc.key);
+            let payload = parse(&config_payload(&node, &entity, &avail).unwrap());
+            assert_eq!(
+                expand(payload["stat_t"].as_str().unwrap(), &node),
+                published.as_str()
+            );
         }
     }
 

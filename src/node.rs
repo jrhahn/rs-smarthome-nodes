@@ -58,6 +58,15 @@ pub struct Slot {
     pub enabled: bool,
     pub prefix: &'static str,
     pub label: &'static str,
+    /// Keys that keep their plain form even though the slot carries a prefix.
+    ///
+    /// The prefix exists to stop two sensors on one node claiming the same
+    /// entity. A quantity only this sensor measures has nothing to collide
+    /// with, and renaming it would throw away its Home Assistant history for
+    /// nothing — `co2` on a node whose SCD41 shares the bus with an SHT31 is
+    /// exactly that case: the SHT31 takes over `temperature` and `humidity`,
+    /// while the CO₂ curve carries on under the id it has always had.
+    pub unprefixed: &'static [&'static str],
 }
 
 impl Slot {
@@ -67,6 +76,7 @@ impl Slot {
             enabled: true,
             prefix: "",
             label: "",
+            unprefixed: &[],
         }
     }
 
@@ -78,7 +88,13 @@ impl Slot {
             enabled: true,
             prefix,
             label,
+            unprefixed: &[],
         }
+    }
+
+    /// Exempt these keys from the slot's prefix (see [`Slot::unprefixed`]).
+    pub const fn keeping(self, unprefixed: &'static [&'static str]) -> Slot {
+        Slot { unprefixed, ..self }
     }
 
     /// Not populated on this node.
@@ -87,7 +103,31 @@ impl Slot {
             enabled: false,
             prefix: "",
             label: "",
+            unprefixed: &[],
         }
+    }
+
+    /// The key prefix that applies to `key` — empty for an exempted one.
+    pub fn prefix_for(&self, key: &str) -> &'static str {
+        if self.is_exempt(key) {
+            ""
+        } else {
+            self.prefix
+        }
+    }
+
+    /// The entity-name label that applies to `key`, same rule as
+    /// [`Slot::prefix_for`] so the id and the display name never disagree.
+    pub fn label_for(&self, key: &str) -> &'static str {
+        if self.is_exempt(key) {
+            ""
+        } else {
+            self.label
+        }
+    }
+
+    fn is_exempt(&self, key: &str) -> bool {
+        self.unprefixed.contains(&key)
     }
 }
 
@@ -201,6 +241,15 @@ const DRAUSSEN: NodeConfig = NodeConfig {
     legacy_weight_topic: Some("birds/scale/state"),
 };
 
+/// Bedroom air. The SHT31-D is not redundant with the SCD41's built-in RH/T:
+/// the SCD4x datasheet specifies its humidity at ±6 %RH (±9 outside 15–35 °C /
+/// 20–65 %RH) against the SHT31-D's ±2 %, because it sits on a die that heats
+/// itself for the CO₂ measurement. Measured side by side on 2026-08-26 the two
+/// disagreed by 15 points. So the SHT31-D owns `temperature` and `humidity`,
+/// and the SCD41's own pair is published under `scd41_` — still worth having,
+/// because calibrating its temperature offset against a reference is exactly
+/// Sensirion's field procedure and needs both numbers visible. `co2` keeps its
+/// plain key: nothing collides with it, and its history is worth preserving.
 const SCHLAFZIMMER: NodeConfig = NodeConfig {
     id: "schlafzimmer",
     name: "Schlafzimmer",
@@ -209,12 +258,13 @@ const SCHLAFZIMMER: NodeConfig = NodeConfig {
     sample_secs: 60,
     scale: Slot::off(),
     ds18b20: Slot::off(),
-    sht31: Slot::off(),
-    scd41: Slot::on(),
+    sht31: Slot::on(),
+    scd41: Slot::on_as("scd41_", "SCD41").keeping(&["co2"]),
     sds011: Slot::off(),
     legacy_weight_topic: None,
 };
 
+/// Same build as [`SCHLAFZIMMER`], same reasoning.
 const WOHNZIMMER: NodeConfig = NodeConfig {
     id: "wohnzimmer",
     name: "Wohnzimmer",
@@ -223,8 +273,8 @@ const WOHNZIMMER: NodeConfig = NodeConfig {
     sample_secs: 60,
     scale: Slot::off(),
     ds18b20: Slot::off(),
-    sht31: Slot::off(),
-    scd41: Slot::on(),
+    sht31: Slot::on(),
+    scd41: Slot::on_as("scd41_", "SCD41").keeping(&["co2"]),
     sds011: Slot::off(),
     legacy_weight_topic: None,
 };
@@ -459,6 +509,53 @@ const _: () = {
 mod tests {
     use super::*;
     use crate::config::NODE_NAME_MAX;
+
+    #[test]
+    fn an_exempt_key_keeps_its_plain_form() {
+        // The prefix is there to stop two sensors claiming one entity. `co2`
+        // has no rival on the node, so prefixing it would only cost its Home
+        // Assistant history.
+        let slot = Slot::on_as("scd41_", "SCD41").keeping(&["co2"]);
+        assert_eq!(slot.prefix_for("co2"), "");
+        assert_eq!(slot.label_for("co2"), "");
+        assert_eq!(slot.prefix_for("temperature"), "scd41_");
+        assert_eq!(slot.label_for("temperature"), "SCD41");
+    }
+
+    #[test]
+    fn the_key_and_the_name_are_exempted_together() {
+        // An id that says `co2` under a name that says "SCD41 CO₂" would be a
+        // confusing half-rename, so both sides consult the same rule.
+        for slot in [
+            Slot::on(),
+            Slot::on_as("air_", "Luft"),
+            Slot::on_as("scd41_", "SCD41").keeping(&["co2"]),
+        ] {
+            for key in ["co2", "temperature", "humidity"] {
+                assert_eq!(
+                    slot.prefix_for(key).is_empty(),
+                    slot.label_for(key).is_empty(),
+                    "{key} is prefixed on only one side"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_node_carrying_both_i2c_sensors_gives_the_room_readings_to_the_sht31() {
+        // The SCD4x specifies its humidity at ±6 %RH against the SHT31-D's ±2 %,
+        // so the plain `temperature`/`humidity` entities — the ones a dashboard
+        // reaches for — must come from the SHT31-D.
+        for name in ["schlafzimmer", "wohnzimmer"] {
+            let node = by_name(name).unwrap();
+            assert!(node.sht31.enabled, "{name} has no SHT31-D");
+            assert!(node.scd41.enabled, "{name} has no SCD41");
+            assert_eq!(node.sht31.prefix_for("humidity"), "");
+            assert_ne!(node.scd41.prefix_for("humidity"), "");
+            // ...while CO₂, which only one of them measures, stays put.
+            assert_eq!(node.scd41.prefix_for("co2"), "");
+        }
+    }
 
     #[test]
     fn every_fleet_name_resolves_and_nothing_else_does() {
