@@ -18,6 +18,21 @@
 //!   CO₂[ppm] = raw
 //!   T[°C]    = -45 + 175 · raw / 65535
 //!   RH[%]    = 100 · raw / 65535
+//!
+//! ## Temperature offset
+//!
+//! The SCD41 measures on a die that heats itself, and cancels that with a
+//! *temperature offset* (`set_temperature_offset`, 0x241D) — 4 °C out of the
+//! box. The offset is not cosmetic: the humidity signal is compensated to the
+//! offset-corrected temperature, so an offset that does not match the board's
+//! real self-heating skews **both** outputs, temperature low and humidity high.
+//! Seen head-to-head against an SHT31-D in the same room on 2026-08-26: 24.7 °C
+//! / 70.9 % against 26.3 °C / 53.6 %.
+//!
+//! [`Scd41::set_temperature_offset`] takes hundredths of °C and writes the
+//! register lazily, at the next sample. The value is *not* persisted to the
+//! sensor's EEPROM (`persist_settings` has a finite write budget); it is
+//! rewritten from the node's flash config on every boot.
 
 #[cfg(feature = "drivers")]
 use embassy_time::{Duration, Timer};
@@ -28,7 +43,7 @@ use heapless::{String, Vec};
 
 use super::EntityDescriptor;
 #[cfg(feature = "drivers")]
-use super::{crc_word, write_int, write_tenths, Reading, Sensor, MAX_READINGS};
+use super::{crc8_sensirion, crc_word, write_int, write_tenths, Reading, Sensor, MAX_READINGS};
 
 pub const ADDR: u8 = 0x62;
 pub const CMD_START_PERIODIC: u16 = 0x21B1;
@@ -37,10 +52,27 @@ pub const CMD_READ_MEASUREMENT: u16 = 0xEC05;
 pub const CMD_MEASURE_SINGLE_SHOT: u16 = 0x219D;
 pub const CMD_STOP_PERIODIC: u16 = 0x3F86;
 pub const CMD_GET_DATA_READY: u16 = 0xE4B8;
+pub const CMD_SET_TEMPERATURE_OFFSET: u16 = 0x241D;
+pub const CMD_GET_TEMPERATURE_OFFSET: u16 = 0x2318;
 /// Single-shot conversion time (ms) before `read_measurement`.
 pub const SINGLE_SHOT_MS: u64 = 5000;
 /// Datasheet execution time for the short commands (ms).
 pub const CMD_DELAY_MS: u64 = 2;
+
+/// The sensor's own power-on temperature offset, in hundredths of °C.
+///
+/// 4 °C is what Sensirion ships, chosen for a board that runs the sensor
+/// *continuously* — that is the self-heating it cancels. Any node that samples
+/// less hard, or that mounts the SCD41 where it can shed heat, needs less than
+/// this, and every 0.01 °C too much shows up twice: the temperature reads low,
+/// and the humidity — which the sensor compensates to that same temperature —
+/// reads high.
+pub const DEFAULT_OFFSET_CENTI: i32 = 400;
+
+/// Largest offset we will program, in hundredths of °C. The register itself
+/// spans the whole 0..175 °C transfer function, but an offset beyond ~20 °C is
+/// a typo rather than a calibration, and it would silently wreck both signals.
+pub const MAX_OFFSET_CENTI: i32 = 2000;
 
 pub const DESCRIPTORS: &[EntityDescriptor] = &[
     EntityDescriptor {
@@ -81,6 +113,30 @@ pub const fn rh_tenths(raw: u16) -> i32 {
     (1000 * raw as i32) / 65535
 }
 
+/// Temperature offset in hundredths of °C -> the raw word the offset register
+/// takes. Same transfer function as the temperature signal, minus the -45 °C
+/// zero point: `raw = offset / 175 · 65535`.
+///
+/// Out-of-range values are clamped rather than rejected: this sits behind a
+/// Home Assistant slider, and refusing a bad value would leave the sensor on
+/// whatever it had before with nothing to show for it.
+pub const fn offset_raw(centi: i32) -> u16 {
+    let clamped = if centi < 0 {
+        0
+    } else if centi > MAX_OFFSET_CENTI {
+        MAX_OFFSET_CENTI
+    } else {
+        centi
+    };
+    // 2000 · 65535 stays well inside i32.
+    ((clamped * 65535) / 17500) as u16
+}
+
+/// Inverse of [`offset_raw`], for reading the register back.
+pub const fn offset_centi(raw: u16) -> i32 {
+    (17500 * raw as i32) / 65535
+}
+
 /// A data-ready reply carries the status in the low 11 bits; all-zero means
 /// "no measurement pending".
 pub const fn data_ready(status: u16) -> bool {
@@ -103,6 +159,18 @@ pub struct Scd41<I2C> {
     /// Periodic mode only: whether `start_periodic_measurement` has been sent
     /// this boot. A mains node stays powered, so this happens once.
     started: bool,
+    /// Temperature offset we want the sensor to use, in hundredths of °C.
+    offset_centi: i32,
+    /// The offset actually programmed into the sensor, once we have written one
+    /// this boot. `None` forces a write on the next sample — which is also the
+    /// state after a reboot, because we deliberately never `persist_settings`
+    /// (that register is EEPROM with a finite write budget, and the value comes
+    /// back from flash config on every boot anyway).
+    written_offset: Option<i32>,
+    /// Whether we *know* the sensor is idle, i.e. accepting config commands.
+    /// False at boot on purpose: the SCD41 keeps its own 3V3 rail across an ESP
+    /// reset, so "we just started" says nothing about what it is doing.
+    known_idle: bool,
 }
 
 #[cfg(feature = "drivers")]
@@ -112,12 +180,47 @@ impl<I2C: I2cBus> Scd41<I2C> {
             i2c,
             mode,
             started: false,
+            offset_centi: DEFAULT_OFFSET_CENTI,
+            written_offset: None,
+            known_idle: false,
         }
+    }
+
+    /// Ask for a different temperature offset, in hundredths of °C.
+    ///
+    /// Cheap and I²C-free: it only records the wish. The register is written at
+    /// the next [`Self::sample`], which is the one place that knows whether the
+    /// sensor is in a state that accepts config commands.
+    pub fn set_temperature_offset(&mut self, centi: i32) {
+        if centi != self.offset_centi {
+            self.offset_centi = centi;
+            self.written_offset = None;
+        }
+    }
+
+    /// The offset currently requested, in hundredths of °C.
+    pub fn temperature_offset(&self) -> i32 {
+        self.offset_centi
     }
 
     /// Send a bare command word and give the sensor its execution time.
     async fn command(&mut self, cmd: u16) -> Option<()> {
         self.i2c.write(ADDR, &cmd.to_be_bytes()).await.ok()?;
+        Timer::after(Duration::from_millis(CMD_DELAY_MS)).await;
+        Some(())
+    }
+
+    /// Send a command word followed by one argument word and its CRC.
+    async fn write_word(&mut self, cmd: u16, arg: u16) -> Option<()> {
+        let arg = arg.to_be_bytes();
+        let frame = [
+            cmd.to_be_bytes()[0],
+            cmd.to_be_bytes()[1],
+            arg[0],
+            arg[1],
+            crc8_sensirion(&arg),
+        ];
+        self.i2c.write(ADDR, &frame).await.ok()?;
         Timer::after(Duration::from_millis(CMD_DELAY_MS)).await;
         Some(())
     }
@@ -129,6 +232,38 @@ impl<I2C: I2cBus> Scd41<I2C> {
             Timer::after(Duration::from_millis(500)).await;
         }
         self.started = false;
+        self.known_idle = true;
+    }
+
+    /// Stop the sensor unless we already know it is idle, so the 500 ms is paid
+    /// once rather than by every caller that needs a quiet bus.
+    async fn ensure_idle(&mut self) {
+        if !self.known_idle {
+            self.stop_periodic().await;
+        }
+    }
+
+    /// Program the temperature offset if it is not already what we want.
+    ///
+    /// The offset register is only writable while the sensor is **idle**: in
+    /// periodic mode the SCD41 NACKs everything except `read_measurement`,
+    /// `get_data_ready_status` and `stop_periodic_measurement`. Clearing
+    /// `started` (via [`Self::stop_periodic`]) makes the caller restart it.
+    ///
+    /// Costs 500 ms, but only on the rounds where the offset actually changed —
+    /// and on a periodic node that is the boot round plus whenever someone moves
+    /// the slider in Home Assistant.
+    async fn sync_offset(&mut self) -> Option<()> {
+        if self.written_offset == Some(self.offset_centi) {
+            return Some(());
+        }
+        if self.mode == Mode::Periodic {
+            self.ensure_idle().await;
+        }
+        self.write_word(CMD_SET_TEMPERATURE_OFFSET, offset_raw(self.offset_centi))
+            .await?;
+        self.written_offset = Some(self.offset_centi);
+        Some(())
     }
 
     /// `get_data_ready_status` — cheap poll so periodic mode never reads a
@@ -155,6 +290,10 @@ impl<I2C: I2cBus> Scd41<I2C> {
     /// One sample according to the configured mode, or `None` when the sensor is
     /// absent, still busy, or answered with a bad CRC.
     async fn sample(&mut self) -> Option<(u16, u16, u16)> {
+        // Before anything else: a pending offset change has to land while the
+        // sensor is idle, and in periodic mode applying it stops the
+        // measurement, so the restart below has to see the result.
+        self.sync_offset().await?;
         match self.mode {
             Mode::Periodic => {
                 if !self.started {
@@ -166,10 +305,12 @@ impl<I2C: I2cBus> Scd41<I2C> {
                     // every later round retried the same refused command and the
                     // node never produced a reading until someone pulled power.
                     // Observed on `schlafzimmer` after a monitor-triggered
-                    // reset, 2026-08-25. Stopping first costs 500 ms once.
-                    self.stop_periodic().await;
+                    // reset, 2026-08-25. Stopping first costs 500 ms once —
+                    // `ensure_idle` skips it when `sync_offset` just stopped.
+                    self.ensure_idle().await;
                     self.command(CMD_START_PERIODIC).await?;
                     self.started = true;
+                    self.known_idle = false;
                     // The first conversion needs ~5 s; report nothing this round
                     // rather than blocking the publish path.
                     return None;
@@ -232,6 +373,11 @@ const _: () = {
     assert!(rh_tenths(65535) == 1000);
     assert!(!data_ready(0x8000)); // only the reserved high bits set -> not ready
     assert!(data_ready(0x8001));
+    assert!(offset_raw(0) == 0);
+    // A negative offset has no representation in the register, and an absurd
+    // one would wreck both signals; both ends clamp instead of wrapping.
+    assert!(offset_raw(-1) == 0);
+    assert!(offset_raw(MAX_OFFSET_CENTI + 1) == offset_raw(MAX_OFFSET_CENTI));
 };
 
 #[cfg(test)]
@@ -279,12 +425,38 @@ mod tests {
             CMD_MEASURE_SINGLE_SHOT,
             CMD_STOP_PERIODIC,
             CMD_GET_DATA_READY,
+            CMD_SET_TEMPERATURE_OFFSET,
+            CMD_GET_TEMPERATURE_OFFSET,
         ];
         for (i, a) in commands.iter().enumerate() {
             for b in &commands[i + 1..] {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn the_offset_transfer_function_round_trips() {
+        // Register resolution is 175/65535 ≈ 0.0027 °C, so a hundredth of a
+        // degree survives the round trip to within one count of truncation.
+        for centi in [0, 100, 245, 400, 1234, MAX_OFFSET_CENTI] {
+            let back = offset_centi(offset_raw(centi));
+            assert!(
+                (back - centi).abs() <= 1,
+                "{centi} centi -> {} -> {back}",
+                offset_raw(centi)
+            );
+        }
+    }
+
+    #[test]
+    fn the_offset_shares_the_temperature_scale() {
+        // Same 175 °C span as the temperature signal, just without its -45 °C
+        // zero point: a full-scale offset word is 175 °C, and the datasheet's
+        // own worked example (4 °C) has to land where the sensor ships.
+        assert_eq!(offset_centi(65535), 17500);
+        assert_eq!(offset_raw(DEFAULT_OFFSET_CENTI), 1497);
+        assert_eq!(temp_tenths(65535) - temp_tenths(0), 1750);
     }
 
     // --- Driver, against a fake bus -----------------------------------------
@@ -511,5 +683,100 @@ mod tests {
         assert_eq!(sent(&sensor, CMD_START_PERIODIC), 0);
         assert_eq!(sent(&sensor, CMD_GET_DATA_READY), 0);
         assert_eq!(sent(&sensor, CMD_READ_MEASUREMENT), 1);
+    }
+
+    // --- Temperature offset --------------------------------------------------
+
+    /// Every `set_temperature_offset` frame on the bus, as the raw word it
+    /// carried. The offset write is command + argument + CRC, so `sent()` (which
+    /// matches bare two-byte command frames) cannot see it.
+    #[cfg(feature = "drivers")]
+    fn offset_writes(sensor: &Scd41<super::super::mock::FakeI2c>) -> Vec<u16> {
+        sensor
+            .i2c
+            .writes()
+            .into_iter()
+            .filter(|w| w.len() == 5 && w[0..2] == CMD_SET_TEMPERATURE_OFFSET.to_be_bytes())
+            .map(|w| {
+                assert_eq!(
+                    w[4],
+                    super::super::crc8_sensirion(&w[2..4]),
+                    "bad offset CRC"
+                );
+                u16::from_be_bytes([w[2], w[3]])
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn the_offset_is_programmed_once_per_boot_and_again_when_it_changes() {
+        use super::super::mock::FakeI2c;
+
+        // The offset register is volatile — we never `persist_settings`, so it
+        // has to be rewritten every boot or the sensor silently falls back to
+        // its 4 °C default.
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, []), Mode::Periodic);
+        sensor.set_temperature_offset(245);
+        let _ = readings(&mut sensor);
+        assert_eq!(offset_writes(&sensor), vec![offset_raw(245)]);
+
+        // Re-sending the same value must not touch the bus: on a periodic node
+        // every write costs a stop/start and five wasted seconds of warm-up.
+        sensor.set_temperature_offset(245);
+        let _ = readings(&mut sensor);
+        assert_eq!(offset_writes(&sensor), vec![offset_raw(245)]);
+
+        // A new value from Home Assistant does go through.
+        sensor.set_temperature_offset(180);
+        let _ = readings(&mut sensor);
+        assert_eq!(
+            offset_writes(&sensor),
+            vec![offset_raw(245), offset_raw(180)]
+        );
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn programming_the_offset_stops_the_sensor_exactly_once() {
+        use super::super::mock::FakeI2c;
+
+        // The register is only writable while the sensor is idle, and
+        // `start_periodic` is only accepted while it is idle. Both needs are
+        // real, but the 500 ms stop that satisfies them should be paid once —
+        // the naive version stopped in the offset path and then again in the
+        // start path, doubling the boot round's dead time.
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, []), Mode::Periodic);
+        sensor.set_temperature_offset(245);
+        let _ = readings(&mut sensor);
+
+        assert_eq!(sent(&sensor, CMD_STOP_PERIODIC), 1);
+        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 1);
+
+        // ...and in the right order: stop, set the offset, then start, so the
+        // measurement that follows is the one running on the new offset.
+        let order: Vec<&[u8]> = sensor.i2c.writes();
+        let pos = |pred: &dyn Fn(&&[u8]) -> bool| order.iter().position(|w| pred(w));
+        let stop = pos(&|w| **w == CMD_STOP_PERIODIC.to_be_bytes());
+        let set = pos(&|w| w.len() == 5 && w[0..2] == CMD_SET_TEMPERATURE_OFFSET.to_be_bytes());
+        let start = pos(&|w| **w == CMD_START_PERIODIC.to_be_bytes());
+        assert!(stop < set && set < start, "{stop:?} {set:?} {start:?}");
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn single_shot_mode_programs_the_offset_without_stopping_anything() {
+        use super::super::mock::FakeI2c;
+
+        // A battery node cold-boots into an idle sensor every round, so the
+        // write needs no stop — and paying 500 ms per wake-up for one would be
+        // a real dent in the power budget.
+        let replies = vec![measurement(812, 24_900, 32_768)];
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, replies), Mode::SingleShot);
+        sensor.set_temperature_offset(245);
+        let _ = readings(&mut sensor);
+
+        assert_eq!(offset_writes(&sensor), vec![offset_raw(245)]);
+        assert_eq!(sent(&sensor, CMD_STOP_PERIODIC), 0);
     }
 }

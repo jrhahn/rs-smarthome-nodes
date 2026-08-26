@@ -254,6 +254,22 @@ const SCALE_CONTROLS: &[Control] = &[
     },
 ];
 
+/// Knobs that only exist on a node carrying an SCD41.
+///
+/// The offset is a *calibration*, read off a comparison against a trusted
+/// hygrometer rather than computed, so it belongs on the device card next to the
+/// readings it corrects — not in a rebuild. Sensirion's own procedure is
+/// `new = old + (scd41_reading - reference_reading)`, which is why the range
+/// allows more than the 4 °C default: a badly ventilated enclosure needs more,
+/// an open breakout in moving air needs much less.
+const SCD41_CONTROLS: &[Control] = &[Control {
+    component: "number",
+    key: "scd41_temp_offset",
+    name: "Temperatur-Offset",
+    reads_back: true,
+    spec: "\"min\":0,\"max\":20,\"step\":0.05,\"unit_of_meas\":\"°C\",\"mode\":\"box\",",
+}];
+
 /// Knobs that only do anything on a battery node. A mains node samples on its
 /// build-time cadence and never sleeps, so exposing these would put four dead
 /// controls on its device card.
@@ -294,6 +310,7 @@ pub fn controls(node: &NodeConfig) -> Vec<&'static Control, MAX_CONTROLS> {
     for control in SCALE_CONTROLS
         .iter()
         .filter(|_| node.scale.enabled)
+        .chain(SCD41_CONTROLS.iter().filter(|_| node.scd41.enabled))
         .chain(BATTERY_CONTROLS.iter().filter(|_| node.power.is_battery()))
     {
         let _ = out.push(control);
@@ -357,7 +374,10 @@ pub fn control_payload(
 }
 
 const _: () = {
-    assert!(SCALE_CONTROLS.len() + BATTERY_CONTROLS.len() <= MAX_CONTROLS);
+    // The worst case is one node carrying all three groups at once; `controls`
+    // returns a fixed-capacity Vec, so overflowing this would silently drop the
+    // last entities rather than fail to build.
+    assert!(SCALE_CONTROLS.len() + SCD41_CONTROLS.len() + BATTERY_CONTROLS.len() <= MAX_CONTROLS);
 };
 
 #[cfg(test)]
@@ -367,7 +387,7 @@ mod tests {
     use super::{
         availability, config_payload, config_topic, control_payload, control_topic, controls,
         entities, Availability, Config, NodeConfig, BATTERY_CONTROLS, MIN_EXPIRY_SECS,
-        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS,
+        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS, SCD41_CONTROLS,
     };
     use crate::node::FLEET;
     use serde_json::Value;
@@ -600,6 +620,14 @@ mod tests {
                     control.key
                 );
             }
+            for control in SCD41_CONTROLS {
+                assert_eq!(
+                    keys.contains(&control.key),
+                    node.scd41.enabled,
+                    "{name}: {}",
+                    control.key
+                );
+            }
             for control in BATTERY_CONTROLS {
                 assert_eq!(
                     keys.contains(&control.key),
@@ -612,14 +640,25 @@ mod tests {
     }
 
     #[test]
-    fn a_mains_node_without_a_load_cell_has_no_knobs_at_all() {
-        // Nothing tunable at runtime today — better an empty Configuration
-        // section than four controls that do nothing.
+    fn a_node_with_nothing_to_tune_has_no_knobs_at_all() {
+        // Better an empty Configuration section than controls that do nothing.
+        // `kueche` is the case today: mains, no load cell, and an SDS011 whose
+        // duty cycle is a per-node constant rather than a runtime knob.
         for (name, node) in FLEET {
-            if !node.power.is_battery() && !node.scale.enabled {
+            if !node.power.is_battery() && !node.scale.enabled && !node.scd41.enabled {
                 assert!(controls(node).is_empty(), "{name} exposes dead controls");
             }
         }
+    }
+
+    #[test]
+    fn an_scd41_node_gets_the_offset_knob_and_nothing_else() {
+        // The regression this guards: the temperature offset is the *only*
+        // reason a plain mains sensor node has a Configuration section at all,
+        // so it must not drag the battery or load-cell knobs in with it.
+        let bedroom = crate::node::by_name("schlafzimmer").unwrap();
+        let keys: Vec<&str> = controls(&bedroom).iter().map(|c| c.key).collect();
+        assert_eq!(keys, vec!["scd41_temp_offset"]);
     }
 
     #[test]

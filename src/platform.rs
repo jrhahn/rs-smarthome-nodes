@@ -162,6 +162,15 @@ impl Sensors {
         }
     }
 
+    /// Hand the SCD41 its temperature offset (hundredths of °C) from the live
+    /// config. A no-op on a node without one, and cheap enough to call every
+    /// round — the driver only touches the bus when the value actually changed.
+    pub fn set_scd41_offset(&mut self, centi: i32) {
+        if let Some(scd41) = self.scd41.as_mut() {
+            scd41.set_temperature_offset(centi);
+        }
+    }
+
     /// Ask each expected I²C address whether anything is there, and say so in
     /// the log. Without this a wiring fault, a missing pull-up and a strapped
     /// address all look identical from the outside: "not responding".

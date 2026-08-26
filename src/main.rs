@@ -557,6 +557,13 @@ async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) 
         }
     }
 
+    // Push the live calibration down before sampling, so a slider moved in Home
+    // Assistant takes effect on this round rather than the next one. Doing it
+    // here rather than at construction means it also survives a config change
+    // arriving mid-run: the driver compares against what it last wrote and only
+    // touches the bus on a real change.
+    board.sensors.set_scd41_offset(cfg.scd41_offset_centi);
+
     board.sensors.measure_all(&mut samples).await;
     samples
 }
