@@ -113,55 +113,164 @@ straps its address somewhere unexpected.
 
 ---
 
-## `NODE=schlafzimmer` / `NODE=wohnzimmer` — SCD41 only
+## `NODE=schlafzimmer` / `NODE=wohnzimmer` — SCD41 **and** SHT31-D
 
 Identical hardware; the two names differ only in which room they publish as.
 
-**You need:** XIAO ESP32-C3, SCD41 breakout, USB-C supply.
+> **Do not peel the white film off the SCD41's metal cap.** It is not a
+> protective sticker or a shipping label — it is the gas-permeable membrane over
+> the sensor opening, and it is part of the sensor. Removing it leaves the
+> optical path exposed, and the sensor then answers every command perfectly
+> while reporting `0 ppm` for ever. That failure cost a module on 2026-08-26 and
+> looks exactly like a wiring or supply fault from the outside, so it is worth
+> being sure: the film stays on.
 
-| SCD41 pin | XIAO pad | GPIO |
-| --- | --- | --- |
-| VIN / VDD | 3V3 | — |
-| GND | GND | — |
-| SDA | D4 | 6 |
-| SCL | D5 | 7 |
+**You need:** XIAO ESP32-C3, SCD41 breakout, SHT31-D breakout, USB-C supply.
 
-**Address** is fixed at `0x62`; there is nothing to strap.
+### Why two sensors
 
-**Supply.** The SCD41 pulls a substantial burst of current while it measures —
-far more than its idle draw. Feed it from the XIAO's `3V3` pad with short wires,
-and do not put it at the end of a long thin lead shared with anything else. A
-brown-out here shows up as a sensor that answers the probe and then returns
-nothing.
+The SCD41 has a temperature and humidity sensor built in, and it is the weaker
+one. Sensirion specifies it at **±6 %RH** (±9 outside 15–35 °C / 20–65 %RH)
+against the SHT31-D's **±2 %**, because it sits on a die that heats itself for
+the CO₂ measurement. So the SHT31-D measures the room, and the SCD41 measures
+CO₂ — plus its own temperature and humidity, which are published separately
+under `scd41_` because you need them to calibrate its offset (below).
 
-**Placement matters more than the wiring.** It measures the air it sits in: not
-inside a sealed enclosure, not in the exhaust of the board's own warmth, and not
-where someone breathes directly on it. Its automatic self-calibration assumes
+### Wiring
+
+Both sensors share one I²C bus. Four wires leave the XIAO; both breakouts tap
+them.
+
+| Sensor pin | XIAO pad | GPIO | Note |
+| --- | --- | --- | --- |
+| VIN / VDD | 3V3 | — | see *Supply* |
+| GND | GND | — | |
+| SDA | D4 | 6 | both sensors in parallel |
+| SCL | D5 | 7 | both sensors in parallel |
+
+**Addresses** do not collide: the SCD41 is fixed at `0x62`, the SHT31-D sits at
+`0x44` or `0x45` and the firmware adopts whichever answers. Nothing to strap.
+
+**Pull-ups.** Both breakouts usually fit their own, which puts them in parallel:
+two 10 kΩ become 5 kΩ, and even 2.2 kΩ against 10 kΩ lands near 1.8 kΩ. That is
+still inside the 3 mA sink current the SCD4x datasheet guarantees its low level
+for, so leave both fitted and only unsolder one set if the bus actually
+misbehaves.
+
+**Supply — and this is the one place the topology matters.** The SCD41 draws
+175 mA typical, 205 mA maximum while its IR source fires, against microamps
+between measurements. Sensirion allows **30 mV** of ripple at the sensor, which
+over a 205 mA pulse is a total resistance budget of about **146 mΩ** — for the
+regulator, both leads, and every contact on the way. Four DuPont contacts alone
+eat most of that, which is why this node wants soldered joints rather than
+jumper headers. Ten centimetres of 26 AWG is only ~27 mΩ for the pair, so length
+is cheap and distance from the board is affordable.
+
+Run 3V3 and GND from the XIAO **directly to the SCD41** as their own pair rather
+than daisy-chaining its supply through the SHT31-D breakout — that would put
+extra pads and contacts in the path that carries the pulse. The SHT31-D draws
+almost nothing and may branch off anywhere. SDA and SCL carry milliamps, so
+those can be looped through in any order.
+
+```
+XIAO   3V3 ─────────────────► SCD41 VDD      own pair, short, soldered
+       GND ─────────────────► SCD41 GND
+        └┬─────────────────► SHT31 VIN       may branch off
+         └─────────────────► SHT31 GND
+
+       D4  ──┬─────────────► SCD41 SDA       bus, order irrelevant
+             └─────────────► SHT31 SDA
+       D5  ──┬─────────────► SCD41 SCL
+             └─────────────► SHT31 SCL
+```
+
+### Placement
+
+**Both sensors in the same air, both away from the board.** Same air, because
+the offset calibration below is the difference between their two temperatures —
+mount them next to each other or it measures nothing useful. Away from the
+board, because Sensirion's design-in guide names the Wi-Fi module explicitly as
+a heat source and asks for maximum distance from self-heating components; a
+fixed offset cannot compensate a heat source that varies with radio traffic.
+
+Otherwise as for any air sensor: not inside a sealed enclosure, not where
+someone breathes directly on it. The SCD41's automatic self-calibration assumes
 the room reaches roughly outdoor CO₂ at some point in a week — a room that is
 never aired will drift.
 
-**Power.** Mains, always on. The firmware runs the sensor in *periodic* mode on
+**Power.** Mains, always on. The firmware runs the SCD41 in *periodic* mode on
 mains, which is what its self-calibration expects, and samples every 60 s.
 
-**Expected at boot:**
+### Expected at boot
 
 ```
 node 'schlafzimmer' (Schlafzimmer) booted, mains profile
+SHT31-D found at 0x44
 SCD41 found at 0x62
+SCD41 serial 0x41AC3D073BD4
 ```
 
-The **first round after a power-up reports nothing** — the first conversion
-needs about five seconds and the firmware does not block the publish path
-waiting for it. Readings appear on the next round:
+The serial number is worth a glance. It identifies the physical sensor, and it
+is the cheapest counterfeit check available — the SCD4x is widely copied, and
+fakes tend to answer with zeroes or with the same number on every unit, which
+the firmware calls out. Two genuine modules must return different numbers.
+
+The **first SCD41 round after a power-up reports nothing** — the first
+conversion needs about five seconds and the firmware does not block the publish
+path waiting for it. Readings appear on the next round:
 
 ```
-SCD41: co2 = 812
-SCD41: temperature = 21.4
-SCD41: humidity = 48.2
+SHT31-D: temperature = 26.3
+SHT31-D: humidity = 52.9
+SCD41: co2 = 367
+SCD41: scd41_temperature = 26.6
+SCD41: scd41_humidity = 55.9
 ```
 
-If you get `no SCD41 at 0x62`, read the bus scan that follows it — same two
-cases as for the SHT31-D above.
+### Calibrating the temperature offset
+
+The SCD41 cancels its own self-heating with a temperature offset, 4 °C out of
+the box — a figure chosen for continuous operation in a particular enclosure,
+not for yours. It is not cosmetic: the humidity output is compensated to the
+offset-corrected temperature, so an offset that does not match the real
+self-heating skews **both** signals, temperature low and humidity high. The
+datasheet only claims its RH/T accuracy if the offset is set correctly.
+
+Do this once per node, after the sensors are mounted where they will live:
+
+1. Let it run **at least 15 minutes** in place. Sensirion asks for that much for
+   complete thermal equilibration, and the reading really does still drift for
+   the first several minutes.
+2. Read `temperature` (the SHT31-D) and `scd41_temperature` off the device card.
+3. New offset = `4.00 + (scd41_temperature − temperature)`, i.e. subtract however
+   much the SCD41 reads *colder* than the reference.
+4. Enter it in the **Temperatur-Offset** number entity on the node's device card.
+
+The value is written to the sensor on the next round — which costs one round,
+because applying it stops and restarts the measurement. It is deliberately not
+persisted to the sensor's own EEPROM (limited write cycles); the firmware keeps
+it in flash and reprograms it on every boot.
+
+Calibrate in the final position and enclosure. On a bench, dangling off a USB
+cable, the self-heating is different and so is the answer.
+
+### If something is wrong
+
+`no SCD41 at 0x62` or `no SHT31-D at 0x44 or 0x45` — read the bus scan that
+follows it, same two cases as for the SHT31-D-only node above.
+
+If a sensor is *found* but produces no readings, the log says where it fell
+over rather than just "not responding": whether it refused to start, never
+reported a ready measurement, answered with a bad CRC, or returned a well-formed
+measurement it considers invalid (`reported 0 ppm`). After three empty rounds
+the firmware runs the SCD41's built-in self test, which settles the only
+question that matters:
+
+```
+SCD41 self test reports a malfunction — the part itself is faulty
+SCD41 self test passed — the sensor believes it is healthy, so look at
+wiring, supply or placement rather than the part
+```
 
 ---
 

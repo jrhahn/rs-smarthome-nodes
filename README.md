@@ -37,8 +37,8 @@ also be **provisioned** to another identity afterwards, without a rebuild — se
 | `NODE=` | Room | Sensors | Power |
 | --- | --- | --- | --- |
 | `draussen` (default) | Draußen | HX711 load cell + DS18B20 + SHT31-D | battery, deep sleep |
-| `schlafzimmer` | Schlafzimmer | SCD41 | mains |
-| `wohnzimmer` | Wohnzimmer | SCD41 | mains |
+| `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains |
+| `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D | mains |
 | `kueche` | Küche | SDS011 | mains (fan) |
 | `bad` | Bad | SHT31-D | mains |
 
