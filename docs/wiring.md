@@ -12,8 +12,8 @@ the two ever disagree, the source wins and this page is the bug.
 > the supply choices are what the firmware expects and what the datasheets say —
 > not what a working board on a bench has confirmed. Check each connection
 > against your own modules' silkscreen before powering anything up. The bird
-> scale's HX711 and DS18B20 wiring is the exception: that combination has been
-> running.
+> scale's HX711 wiring is the exception: that part has been running. Its battery
+> divider and protection board are new and unbuilt, like everything else here.
 
 ## The board
 
@@ -24,7 +24,7 @@ are *not* the GPIO numbers the datasheet and the firmware use:
 | --- | --- | --- | --- |
 | D0  | 2  | HX711 SCK | `draussen` |
 | D1  | 3  | HX711 DT | `draussen` |
-| D2  | 4  | DS18B20 data (1-Wire) | `draussen` |
+| D2  | 4  | Battery divider tap (ADC1); a DS18B20 1-Wire line on a node that has one instead | `draussen` |
 | D3  | 5  | UART RX ← SDS011 TX | `kueche` |
 | D4  | 6  | I²C SDA | `draussen`, `schlafzimmer`, `wohnzimmer`, `bad` |
 | D5  | 7  | I²C SCL | `draussen`, `schlafzimmer`, `wohnzimmer`, `bad` |
@@ -337,11 +337,13 @@ SDS011: pm10 = 100.0
 
 ## `NODE=draussen` — the bird scale
 
-The busiest board: three sensors, two buses and a battery. This is the one that
-already exists; the others are simplifications of it.
+The busiest board: two sensors, two buses, a battery and the only analogue
+measurement in the fleet. This is the one that already exists; the others are
+simplifications of it.
 
 **You need:** XIAO ESP32-C3, 1 kg straight-bar load cell, HX711 breakout,
-DS18B20 waterproof probe, SHT31-D breakout, one 4.7 kΩ resistor, LiPo cell.
+SHT31-D breakout, 1S protection board, two 100 kΩ resistors, one 100 nF
+capacitor, LiPo cell.
 
 ### Load cell → HX711
 
@@ -371,27 +373,26 @@ reads as permanently "not ready" and times out cleanly instead of feeding you
 floating garbage. That is deliberate: a scale reading nonsense is worse than one
 reading nothing.
 
-### DS18B20 → XIAO
-
-| DS18B20 lead | XIAO pad | GPIO | Note |
-| --- | --- | --- | --- |
-| Red (VCC) | 3V3 | — | |
-| Black (GND) | GND | — | |
-| Yellow (DATA) | D2 | 4 | **plus 4.7 kΩ from DATA to 3V3** |
-
-The pull-up is **not optional**. The internal one is enabled as a backup, but it
-is far too weak for the metre or so of probe cable; without the external
-resistor you get intermittent CRC failures that look like a flaky sensor.
-
 ### SHT31-D → XIAO
 
 Exactly as for `NODE=bad`: 3V3, GND, SDA→D4, SCL→D5.
 
 On this node the SHT31-D's readings are published under `air_temperature` and
-`air_humidity`, because the DS18B20 already owns the plain `temperature` key —
-the probe measures the feeder, the SHT31-D measures the air. Nothing about the
-wiring changes; it is worth knowing when you go looking for the entity in Home
-Assistant.
+`air_humidity`. That prefix is older than the current build — it was there to
+leave the plain `temperature` key to a DS18B20 that is no longer fitted — and it
+stays because renaming the entity would orphan its history in Home Assistant.
+Nothing about the wiring changes; it is worth knowing when you go looking for
+the entity.
+
+### No DS18B20 on this node
+
+The probe used to sit on D2 with a 4.7 kΩ pull-up. The battery divider below
+needs the same pad, and there is no second candidate (see *Battery sense*), so
+the probe came off. If you are rebuilding an older board: **remove the 4.7 kΩ**,
+or it will pull the divider's tap towards 3V3 and every voltage reading with it.
+
+The DS18B20 driver and its node slot are still in the firmware — the pin is a
+per-node choice, and the build fails if any node ever enables both.
 
 ### Power
 
@@ -432,23 +433,79 @@ into a slipped iron. Nothing on the XIAO side has reverse-polarity protection.
 What such a board does **not** do is keep the cell healthy. The common DW01A-class
 part cuts off around 2.4-2.5 V, far below the ~3.0 V where a LiPo starts losing
 capacity for good. It is a safety device against fire and deep-discharge damage,
-not a longevity one.
+not a longevity one. Noticing the difference is what the divider below is for.
 
-Keeping the cell above 3.0 V would be the firmware's job, and it cannot do it
-today: **the XIAO has no battery-sense path at all** — `B+` reaches the charger
-and the regulator, never an ADC — so nothing can read the cell voltage without a
-divider (100 kΩ/100 kΩ from `B+` to GND, 100 nF at the tap). That divider needs
-an ADC1 pin, and on the ESP32-C3 those are GPIO2/3/4 only — `D0`, `D1`, `D2` on
-this board, all three already taken by the HX711 and the DS18B20. `D3` is on
-ADC2, which is unusable while Wi-Fi is up. So battery monitoring on this node
-costs the DS18B20 its pin; the SHT31-D measures air temperature anyway.
+#### Battery sense
+
+**The XIAO has no battery-sense path at all** — `B+` reaches the charger and the
+regulator, never an ADC — so reading the cell means fitting a divider:
+
+```
+  XIAO B+ (= P+)
+        │
+      [ R1 ]  100 kΩ
+        │
+        ├──────────────────►  D2 / GPIO4
+        │
+        ├────────┐
+        │        │
+      [ R2 ]   [ C ]
+      100 kΩ   100 nF
+        │        │
+  XIAO GND ──────┴───────  (= P−)
+```
+
+As a netlist, which is harder to misread than any diagram:
+
+| Part | From | To |
+| --- | --- | --- |
+| R1 100 kΩ | XIAO `B+` | node **A** |
+| R2 100 kΩ | node **A** | XIAO `GND` |
+| C 100 nF | node **A** | XIAO `GND` |
+| wire | node **A** | XIAO `D2` |
+
+Node **A** is the tap: four legs meet there, and the two resistors are always in
+series between `B+` and ground — never a bridge across one of them.
+
+**Why D2, and why it costs the probe its pin.** The divider needs an ADC1 input.
+On the ESP32-C3 those are GPIO2/3/4 = `D0`, `D1`, `D2`, and the HX711 has the
+first two. `D3` is on ADC2, which is unusable while Wi-Fi is up, so `D2` is the
+only candidate — and the DS18B20 wanted it. The SHT31-D measures air temperature
+anyway. `node.rs` fails the build if a node ever asks for both.
+
+**Why the foot goes to `GND` and not to the cell.** The XIAO's ground is the
+protection board's `P−`, the switched side. Tie the divider there and the
+low-voltage cutoff switches it off along with everything else; tie it straight to
+the cell's `B−` and it keeps drawing ~21 µA *after* the cutoff — exactly the deep
+discharge the board was fitted to prevent.
+
+**Numbers.** 4.2 V full becomes 2.1 V at the pin, 3.0 V empty becomes 1.5 V; both
+sit inside the ~2.5 V that 11 dB attenuation spans, with no over-range while
+charging. The 100 nF supplies the ADC's sampling charge, so the 50 kΩ source
+impedance does not skew the reading. Standing draw is ~21 µA, about 184 mAh a
+year — roughly 9 % of a 2000 mAh pack. Two 1 MΩ resistors would cut that to ~2 µA
+if it ever matters.
+
+Use 1 % metal film. The firmware calibrates the *ADC* against the chip's eFuse
+reference, so readings arrive in millivolts already corrected for that part — but
+nothing corrects the resistors. If a multimeter disagrees, the fix is
+`R_TOP_KOHM` / `R_BOTTOM_KOHM` in [`src/battery.rs`](../src/battery.rs) and a
+reflash; there is no runtime knob for it yet.
+
+The reading is published as `birds/scale/battery_voltage`, and the log warns
+below 3.0 V. A reading under 2.0 V is not published at all — that is not a flat
+cell, it is a divider that is not there, and it says so:
+
+```
+battery reads 41 mV, which is no cell at all — check the divider is fitted
+between B+ and GND with its tap on D2, and that a cell is connected
+```
 
 ### Outdoors
 
-The DS18B20 is the only waterproof part. The board, the HX711 and the SHT31-D
-all need an enclosure — but the SHT31-D needs to *breathe*, or it reports the
-humidity of the inside of your box. A vent with a membrane, or a shielded
-underside opening, not a sealed lid.
+Nothing on this node is waterproof, so all of it needs an enclosure — but the
+SHT31-D needs to *breathe*, or it reports the humidity of the inside of your box.
+A vent with a membrane, or a shielded underside opening, not a sealed lid.
 
 **Expected at boot:**
 
@@ -457,6 +514,7 @@ node 'scale' (Draußen) booted, battery profile
 provision topic: smarthome/provision/a1b2c3d4e5f6
 SHT31-D found at 0x44
 HX711 raw reading: 8402913
+battery = 4.03 V
 ```
 
 Note the node **id** is `scale`, not `draussen` — the name selects it at build
@@ -484,7 +542,8 @@ a pin:
 2. No 5 V anywhere near a GPIO — only the SDS011's supply pin.
 3. SDA and SCL not swapped (the single commonest mistake on these boards).
 4. SDS011 TX→RX crossed.
-5. The DS18B20's 4.7 kΩ actually fitted, and to 3V3 rather than to 5 V.
+5. On `draussen`: the divider's foot on the XIAO's `GND` (the protection board's
+   `P−`), not on the cell's `B−` — and no 4.7 kΩ left over from a DS18B20 on D2.
 
 Then plug in USB and watch the log — every node reports what it found on its
 buses within the first second of booting, which is precisely so that a wiring

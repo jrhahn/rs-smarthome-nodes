@@ -11,7 +11,7 @@
 //! | --- | --- | --- |
 //! | D0 | 2  | HX711 SCK |
 //! | D1 | 3  | HX711 DT |
-//! | D2 | 4  | DS18B20 1-Wire |
+//! | D2 | 4  | DS18B20 1-Wire, *or* the battery divider's tap on ADC1 |
 //! | D3 | 5  | SDS011 UART RX (sensor TX) |
 //! | D4 | 6  | I²C SDA (SHT31-D, SCD41) |
 //! | D5 | 7  | I²C SCL |
@@ -43,7 +43,8 @@ use crate::sensors::{scd41, scd41::Scd41, sds011::Sds011, sht31, sht31::Sht31, R
 const SDS011_BAUD: u32 = 9600;
 
 /// Upper bound on the readings one round can produce: weight + probe
-/// temperature + SHT31 (2) + SCD41 (3) + SDS011 (2), with headroom.
+/// temperature + SHT31 (2) + SCD41 (3) + SDS011 (2) + cell voltage, with
+/// headroom.
 pub const MAX_SAMPLES: usize = 12;
 
 /// One reading plus the node-level key prefix that disambiguates it (see
@@ -366,8 +367,9 @@ async fn collect<S: Sensor>(sensor: &mut S, slot: Slot, out: &mut Samples) -> bo
     true
 }
 
-/// Append a reading produced outside the [`Sensor`] trait (the HX711 weight and
-/// the DS18B20 temperature, which both need `main`'s state).
+/// Append a reading produced outside the [`Sensor`] trait (the HX711 weight, the
+/// DS18B20 temperature and the battery voltage — all of which need `main`'s
+/// state or its peripherals).
 pub fn push_sample(out: &mut Samples, slot: Slot, key: &'static str, value: heapless::String<16>) {
     let _ = out.push(Sample {
         prefix: slot.prefix_for(key),

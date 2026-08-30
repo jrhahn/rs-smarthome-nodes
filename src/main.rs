@@ -64,8 +64,9 @@ use rust_mqtt::{
 };
 
 use node::Provision;
-use rs_smarthome_nodes::{config, discovery, ds18b20, hx711, node, platform, state, wifi};
+use rs_smarthome_nodes::{battery, config, discovery, ds18b20, hx711, node, platform, state, wifi};
 
+use battery::Battery;
 use config::Config;
 use ds18b20::Ds18b20;
 use hx711::Hx711;
@@ -206,6 +207,7 @@ type Scale<'d> = Hx711<Input<'d>, Output<'d>, Delay>;
 struct Board<'d> {
     scale: Option<Scale<'d>>,
     probe: Option<Ds18b20<'d>>,
+    battery: Option<Battery<'d>>,
     sensors: Sensors,
 }
 
@@ -304,19 +306,33 @@ async fn main(spawner: Spawner) {
         Hx711::new(dt, sck, Delay::new())
     });
 
-    // DS18B20 open-drain 1-Wire line on D2 / GPIO4 (internal pull-up backs the
-    // external 4.7 kΩ).
-    let probe = node.ds18b20.enabled.then(|| {
-        Ds18b20::new(OutputOpenDrain::new(
-            peripherals.GPIO4,
-            Level::High,
-            Pull::Up,
-        ))
-    });
+    // D2 / GPIO4 has two possible jobs and can only do one of them, so exactly
+    // one arm below claims the pin:
+    //   * the DS18B20's open-drain 1-Wire line (internal pull-up backing the
+    //     external 4.7 kΩ), or
+    //   * the battery divider's tap, the only ADC1 pad the HX711 leaves free.
+    // `node.rs` fails the build if a node asks for both, so the order here can
+    // never silently decide it.
+    let (probe, battery) = match (node.ds18b20.enabled, node.battery.enabled) {
+        (true, _) => (
+            Some(Ds18b20::new(OutputOpenDrain::new(
+                peripherals.GPIO4,
+                Level::High,
+                Pull::Up,
+            ))),
+            None,
+        ),
+        (_, true) => (
+            None,
+            Some(Battery::new(peripherals.ADC1, peripherals.GPIO4)),
+        ),
+        _ => (None, None),
+    };
 
     let mut board = Board {
         scale,
         probe,
+        battery,
         sensors: Sensors::new(platform::Peripherals {
             i2c0: peripherals.I2C0,
             sda: peripherals.GPIO6,
@@ -537,7 +553,8 @@ async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
 /// Measure everything this node has and format the readings for MQTT.
 ///
 /// Called on publish cycles only, so the DS18B20's 750 ms conversion and the
-/// SDS011's 10–30 s fan warm-up never run on the cheap idle polls. `raw` is the
+/// SDS011's 10–30 s fan warm-up never run on the cheap idle polls (the battery
+/// ADC is microseconds either way, but it belongs with the rest). `raw` is the
 /// load-cell reading already taken by the caller (it drives the presence logic),
 /// converted to grams here with the stored calibration.
 async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) -> Samples {
@@ -560,6 +577,34 @@ async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) 
                 platform::push_sample(&mut samples, node.ds18b20, "temperature", value);
             }
             None => warn!("DS18B20 not responding; skipping temperature"),
+        }
+    }
+
+    if let Some(sense) = board.battery.as_mut() {
+        match sense.read_millivolts() {
+            // Below the plausible floor this is not a discharged cell but an
+            // absent one, or a divider that is not there — publishing it would
+            // put a convincing "flat battery" in Home Assistant and trip
+            // whatever watches for one. Say what it actually means instead.
+            Some(mv) if mv < battery::MIN_PLAUSIBLE_CELL_MV => warn!(
+                "battery reads {} mV, which is no cell at all — check the divider is fitted \
+                 between B+ and GND with its tap on D2, and that a cell is connected",
+                mv
+            ),
+            Some(mv) => {
+                let mut value = heapless::String::new();
+                battery::write_volts(&mut value, mv);
+                info!("battery = {} V", value);
+                if mv < battery::LOW_CELL_MV {
+                    warn!(
+                        "battery below {} mV: the protection board does not cut off until far \
+                         lower, so the cell loses capacity from here on",
+                        battery::LOW_CELL_MV
+                    );
+                }
+                platform::push_sample(&mut samples, node.battery, "voltage", value);
+            }
+            None => warn!("battery ADC never finished a conversion; skipping voltage"),
         }
     }
 

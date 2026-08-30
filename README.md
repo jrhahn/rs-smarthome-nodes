@@ -36,7 +36,7 @@ also be **provisioned** to another identity afterwards, without a rebuild — se
 
 | `NODE=` | Room | Sensors | Power |
 | --- | --- | --- | --- |
-| `draussen` (default) | Draußen | HX711 load cell + DS18B20 + SHT31-D | battery, deep sleep |
+| `draussen` (default) | Draußen | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
 | `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains |
 | `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D | mains |
 | `kueche` | Küche | SDS011 | mains (fan) |
@@ -89,6 +89,7 @@ and the SDS011's duty-cycled fan both rule out deep sleep. On a battery node the
 | Amplifier        | HX711 24-bit ADC                                   |
 | Temperature      | DS18B20 waterproof 1-Wire probe (stainless steel) |
 | T / RH           | SHT31-D breakout, I²C `0x44`                       |
+| Cell voltage     | 100 kΩ/100 kΩ divider + 100 nF on ADC1              |
 | CO₂ / T / RH     | SCD41 breakout, I²C `0x62`                         |
 | PM2.5 / PM10     | SDS011, UART 9600 8N1, **5 V supply** (fan)        |
 
@@ -98,7 +99,7 @@ and the SDS011's duty-cycled fan both rule out deep sleep. On a battery node the
 | --- | --- | --- |
 | D0  | 2  | HX711 SCK |
 | D1  | 3  | HX711 DT |
-| D2  | 4  | DS18B20 1-Wire (4.7 kΩ pull-up to 3V3) |
+| D2  | 4  | DS18B20 1-Wire (4.7 kΩ pull-up to 3V3) **or** battery divider tap (ADC1) |
 | D3  | 5  | SDS011 UART RX ← sensor TX |
 | D4  | 6  | I²C SDA (SHT31-D + SCD41) |
 | D5  | 7  | I²C SCL |
@@ -107,6 +108,12 @@ and the SDS011's duty-cycled fan both rule out deep sleep. On a battery node the
 The two I²C sensors share one bus (their addresses do not clash). The SDS011
 deliberately avoids D6/D7 (GPIO21/20), which are the console UART pads the log
 output uses.
+
+D2 has two possible jobs and can only do one of them: the DS18B20's 1-Wire line,
+or the battery divider's tap. ADC2 is unusable while Wi-Fi is up, and of the
+ADC1 pins only D0/D1/D2 are broken out on this board — the first two are the
+HX711's — so cell voltage costs the probe its pin. `NODE=draussen` takes that
+trade; the build fails if a node table entry ever asks for both.
 
 ### Wiring (load cell → HX711)
 
@@ -155,6 +162,38 @@ visit, and on the periodic **heartbeat** (see below) — so the ~750 ms conversi
 never runs on the low-power idle-poll cycles. It is published to
 `birds/scale/temperature` in °C.
 
+**No node ships with this today.** The outdoor node traded its probe for the
+battery sense below; the DS18B20 slot and driver stay, because the pin is a
+per-node choice rather than a firmware one.
+
+### Wiring (battery divider → XIAO ESP32-C3)
+
+The XIAO charges a cell but cannot measure one: `B+` reaches the charger and the
+regulator, never an ADC. An external divider from the battery rail to ground
+gives ADC1 something to read.
+
+| Component | From | To |
+| --- | --- | --- |
+| R1 100 kΩ | XIAO `B+` | tap |
+| R2 100 kΩ | tap | XIAO `GND` |
+| C 100 nF | tap | XIAO `GND` |
+| wire | tap | GPIO4 / D2 |
+
+Two details are not optional. The divider's foot goes to the **XIAO's ground**,
+which on a node with a 1S protection board is the `P−` (load) side — there the
+board's cutoff switches the divider off with everything else, where wiring it
+straight to the cell's own `B−` would keep drawing ~21 µA past the cutoff and
+deep-discharge the pack the protection was fitted to save. And the DS18B20's
+4.7 kΩ pull-up must come **off** the pin: it would drag the tap towards 3V3.
+
+Conversions are calibrated against the chip's eFuse reference, so the driver
+works in millivolts; the divider ratio is undone in
+[`src/battery.rs`](src/battery.rs). That corrects the ADC, not the resistors —
+use 1 % parts, and trim `R_TOP_KOHM` / `R_BOTTOM_KOHM` and reflash if a
+multimeter disagrees. Published to `birds/scale/battery_voltage` in volts. Below
+3.0 V the log says so: the common DW01A-class protection board does not cut off
+until ~2.4 V, far past where a LiPo starts losing capacity for good.
+
 ## Firmware architecture
 
 | Concern            | Implementation                                                    |
@@ -165,6 +204,7 @@ never runs on the low-power idle-poll cycles. It is published to
 | Board wiring       | [`src/platform.rs`](src/platform.rs) — concrete buses; one shared I²C handle so both I²C drivers can own their bus |
 | Load-cell driver   | [`src/hx711.rs`](src/hx711.rs) — async `wait_ready()` with timeout, blocking 24+N clock read, two's-complement sign-extend to `i32`; generic over the `embedded-hal` pin traits, so the bit protocol is tested against fake pins |
 | Temperature driver | [`src/ds18b20.rs`](src/ds18b20.rs) — bit-bang 1-Wire on an open-drain pin, blocking time slots, async 750 ms conversion wait, CRC-checked scratchpad |
+| Battery sense      | [`src/battery.rs`](src/battery.rs) — ADC1 one-shots with eFuse curve calibration (so readings arrive in mV), averaged, divider undone in fixed point; an implausibly low reading is reported as the wiring fault it is rather than published |
 | SHT31-D / SCD41    | [`sht31.rs`](src/sensors/sht31.rs) / [`scd41.rs`](src/sensors/scd41.rs) — single-shot and periodic I²C reads, every word CRC-checked (Sensirion CRC-8), fixed-point conversions |
 | SDS011             | [`sds011.rs`](src/sensors/sds011.rs) — 10-byte UART frames with checksum + resync, fan woken only for the measurement and parked again on every exit path, warm-up ended by the readings settling rather than by a fixed wait |
 | HA discovery       | [`src/discovery.rs`](src/discovery.rs) — retained `homeassistant/sensor/<node>/<key>/config` per reading, all entities grouped under one device |
@@ -308,7 +348,7 @@ and its entities without any YAML. Values are ready to use — grams, °C, %, pp
 
 | Node | State topics |
 | --- | --- |
-| `draussen` | `birds/scale/weight`, `birds/scale/temperature` (DS18B20), `birds/scale/air_temperature`, `birds/scale/air_humidity` (SHT31-D) |
+| `draussen` | `birds/scale/weight`, `birds/scale/air_temperature`, `birds/scale/air_humidity` (SHT31-D), `birds/scale/battery_voltage` |
 | `schlafzimmer` / `wohnzimmer` | `smarthome/<node>/co2`, `/temperature`, `/humidity` |
 | `kueche` | `smarthome/kueche/pm25`, `/pm10` |
 | `bad` | `smarthome/bad/temperature`, `/humidity` |

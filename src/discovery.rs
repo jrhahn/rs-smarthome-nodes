@@ -23,13 +23,14 @@ use core::fmt::Write as _;
 
 use heapless::{String, Vec};
 
+use crate::battery;
 use crate::config::Config;
 use crate::ds18b20;
 use crate::node::{NodeConfig, Slot};
 use crate::sensors::{scale, scd41, sds011, sht31, EntityDescriptor};
 
 /// Upper bound on entities a node can expose (weight, probe temperature,
-/// SHT31 ×2, SCD41 ×3, SDS011 ×2), with headroom.
+/// SHT31 ×2, SCD41 ×3, SDS011 ×2, cell voltage), with headroom.
 pub const MAX_ENTITIES: usize = 12;
 /// Upper bound on command entities (the calibration and tuning knobs).
 pub const MAX_CONTROLS: usize = 12;
@@ -107,6 +108,7 @@ pub fn entities(node: &NodeConfig) -> Vec<Entity, MAX_ENTITIES> {
         (node.sht31, sht31::DESCRIPTORS),
         (node.scd41, scd41::DESCRIPTORS),
         (node.sds011, sds011::DESCRIPTORS),
+        (node.battery, battery::DESCRIPTORS),
     ] {
         if !slot.enabled {
             continue;
@@ -491,8 +493,8 @@ mod tests {
     #[test]
     fn topics_and_unique_ids_do_not_collide() {
         // Two entities sharing either one would silently overwrite each other in
-        // Home Assistant — exactly what the outdoor node's two temperature
-        // sources would do without their slot prefix.
+        // Home Assistant — exactly what the bedroom's two temperature sources
+        // would do without their slot prefix.
         for (name, node) in FLEET {
             let avail = availability_of(node);
             let messages = announcements(node, &avail);
@@ -543,6 +545,37 @@ mod tests {
                 published.as_str()
             );
         }
+    }
+
+    #[test]
+    fn the_outdoor_node_announces_its_cell_voltage_and_no_probe() {
+        // The concrete result of trading the DS18B20 for the divider: one new
+        // entity under the battery's own name, and nothing left announcing a
+        // probe that is no longer soldered to anything.
+        let scale = crate::node::by_name("draussen").unwrap();
+        let avail = availability_of(&scale);
+        let topics: Vec<String> = announcements(&scale, &avail)
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect();
+
+        assert!(topics.contains(&"homeassistant/sensor/scale/battery_voltage/config".to_string()));
+        // `air_temperature` stays; the plain key the probe used must be gone.
+        assert!(topics.contains(&"homeassistant/sensor/scale/air_temperature/config".to_string()));
+        assert!(!topics.contains(&"homeassistant/sensor/scale/temperature/config".to_string()));
+
+        let entity = entities(&scale)
+            .into_iter()
+            .find(|e| e.desc.key == "voltage")
+            .expect("the outdoor node exposes a cell voltage");
+        let payload = parse(&config_payload(&scale, &entity, &avail).unwrap());
+        assert_eq!(payload["dev_cla"], "voltage");
+        assert_eq!(payload["unit_of_meas"], "V");
+        assert_eq!(payload["name"], "Batterie Spannung");
+        assert_eq!(
+            expand(payload["stat_t"].as_str().unwrap(), &scale),
+            "birds/scale/battery_voltage"
+        );
     }
 
     #[test]

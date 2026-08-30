@@ -262,6 +262,7 @@ mod tests {
             scd41::DESCRIPTORS,
             sds011::DESCRIPTORS,
             crate::ds18b20::DESCRIPTORS,
+            crate::battery::DESCRIPTORS,
         ] {
             assert!(descriptors.len() <= MAX_READINGS);
             assert!(!descriptors.is_empty());
@@ -289,6 +290,7 @@ mod tests {
             scd41::DESCRIPTORS,
             sds011::DESCRIPTORS,
             crate::ds18b20::DESCRIPTORS,
+            crate::battery::DESCRIPTORS,
         ] {
             for d in descriptors {
                 assert!(!d.key.is_empty() && !d.name.is_empty());
