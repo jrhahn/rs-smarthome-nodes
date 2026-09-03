@@ -195,6 +195,36 @@ sleeping and CO₂/PM continuity to lose, so it ignores it. The SCD41 follows th
 profile too: periodic measurement on mains (what its self-calibration expects),
 single-shot on battery.
 
+### Staying awake is a thermal problem
+
+A mains node never sleeps, so everything it burns turns into heat inside the
+enclosure — and the sensors then measure their own board instead of the room.
+Measured on `schlafzimmer` against a reference thermometer, 2026-09-03: the air
+at the electronics sat ~1.5 °C above the room, and both the SHT31-D and the
+SCD41 reported it faithfully. Worse, the SCD41's temperature offset had been
+calibrated against that same warm SHT31-D, so the error had been copied into it
+and the two agreeing with each other proved nothing.
+
+Three things came out of that, in order of how much they were worth:
+
+1. **Mount the sensors away from the board.** No firmware can undo a sensor
+   sitting in warm air. This is the fix; the rest are refinements.
+2. **80 MHz instead of 160.** The minimum esp-wifi will run the radio at
+   (`MIN_CLOCK` in its `init`), and dynamic power scales with the clock. A round
+   is a few I²C transactions and one publish, and I²C/UART timing comes off APB
+   rather than the CPU clock, so nothing here notices the difference.
+3. **Modem sleep, `PowerSaveMode::Maximum`.** esp-wifi never calls
+   `esp_wifi_set_ps` by itself and the stack below comes up in MIN_MODEM, so
+   `Minimum` would have been a no-op — `Maximum` is the setting that actually
+   changes something. It costs up to ~300 ms before an inbound packet is
+   collected; everything inbound here is a Home Assistant knob, and outbound
+   traffic never waits on the sleep schedule.
+
+Deliberately *not* done: a software temperature offset for the SHT31-D. The
+overtemperature is roughly constant (P·R_th), so an offset is defensible in
+principle, but it hides the problem rather than fixing it, depends on airflow,
+and would have to correct the humidity alongside the temperature.
+
 ## Testing
 
 `cargo test` cannot link for `riscv32imc`, and the crate used to be a single

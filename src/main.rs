@@ -50,6 +50,7 @@ use esp_hal::{
     usb_serial_jtag::UsbSerialJtag,
 };
 use esp_wifi::{
+    config::PowerSaveMode,
     wifi::{
         ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiStaDevice,
         WifiState,
@@ -225,7 +226,25 @@ async fn main(spawner: Spawner) {
     // --- 1. HAL & async runtime --------------------------------------------
     let hal_config = {
         let mut c = esp_hal::Config::default();
-        c.cpu_clock = CpuClock::max();
+        // 80 MHz rather than the 160 this chip will do. That is exactly the
+        // minimum esp-wifi documents for the radio (`MIN_CLOCK` in its `init`,
+        // which rejects anything below it), and dynamic power scales with the
+        // clock — so this roughly halves what the core burns while idling in
+        // the executor.
+        //
+        // It is a thermal fix, not a power one. A mains node never sleeps, so
+        // whatever the core burns ends up as heat in the enclosure and the
+        // sensors read their own board rather than the room: measured against
+        // a reference thermometer on `schlafzimmer`, 2026-09-03, the air at the
+        // electronics sat ~1 °C above the room.
+        //
+        // Nothing here needs the speed. A round is a handful of I²C
+        // transactions and one MQTT publish, and the I²C and UART baud rates
+        // derive from APB, not from the CPU clock, so their timing is
+        // unchanged. On a battery node the trade is roughly neutral rather than
+        // a win — half the clock means twice as long awake for the same work —
+        // but the radio-idle stretches, which dominate a wake, still cost less.
+        c.cpu_clock = CpuClock::Clock80MHz;
         c
     };
     let peripherals = esp_hal::init(hal_config);
@@ -1155,6 +1174,29 @@ async fn connection(mut controller: WifiController<'static>) {
             if !matches!(controller.is_started(), Ok(true)) {
                 info!("Starting Wi-Fi controller");
                 controller.start_async().await.unwrap();
+                // Modem sleep, set on every start because it is the radio's
+                // own state and a restart is exactly when it would be lost.
+                //
+                // `Maximum` rather than `Minimum` deliberately. esp-wifi never
+                // calls `esp_wifi_set_ps` on its own — the setting only exists
+                // if we make it — and the stack underneath already comes up in
+                // MIN_MODEM, so asking for `Minimum` would be a no-op dressed
+                // up as a change. MAX_MODEM sleeps through `listen_interval`
+                // beacons (3 by default, so ~300 ms at a 100 ms beacon) instead
+                // of waking for every DTIM.
+                //
+                // What that costs: up to ~300 ms before an inbound packet is
+                // collected from the AP's buffer. Everything reaching these
+                // nodes is a Home Assistant knob — a slider, a button — where
+                // nobody can tell. Everything time-critical is outbound, and
+                // transmitting never waits for the sleep schedule.
+                match controller.set_power_saving(PowerSaveMode::Maximum) {
+                    Ok(()) => info!("Wi-Fi modem sleep: max"),
+                    // Not fatal: it only means the radio idles hotter than it
+                    // could. Saying so beats a node that is silently drawing
+                    // more than the comment above claims.
+                    Err(e) => warn!("Wi-Fi modem sleep refused: {:?}; running without it", e),
+                }
             }
         }
 
