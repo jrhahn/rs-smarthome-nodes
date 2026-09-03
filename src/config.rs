@@ -26,6 +26,8 @@ use embedded_storage::{ReadStorage, Storage};
 use esp_storage::FlashStorage;
 use heapless::String;
 
+use crate::sensors::scd41;
+
 /// Flash byte-offset of the config blob. Matches the `nvs` partition in
 /// espflash's default table; we only touch the first sector of it.
 const FLASH_OFFSET: u32 = 0x9000;
@@ -45,9 +47,9 @@ const WIFI_OFFSET: u32 = 0xB000;
 /// `"BIRD"` little-endian — marks an initialised blob.
 const MAGIC: u32 = 0x4449_5242;
 /// Bump when the on-flash layout changes; an old version reverts to defaults.
-const VERSION: u8 = 3;
-/// Serialised length: magic(4) + version(1) + pad(3) + eight 4-byte fields + crc(4).
-const BLOB_LEN: usize = 4 + 4 + 4 * 8 + 4;
+const VERSION: u8 = 4;
+/// Serialised length: magic(4) + version(1) + pad(3) + nine 4-byte fields + crc(4).
+const BLOB_LEN: usize = 4 + 4 + 4 * 9 + 4;
 
 /// All runtime-tunable settings. `f32` calibration fields are compared bitwise
 /// for change detection, which is exactly what we want (a re-sent identical
@@ -78,6 +80,13 @@ pub struct Config {
     /// Home Assistant keeps a fresh reading. Realised as a whole number of idle
     /// wake-ups (see [`Config::heartbeat_wakes`]).
     pub heartbeat_secs: u32,
+    /// SCD41 temperature offset in hundredths of °C — the self-heating the
+    /// sensor subtracts from both its temperature *and* its humidity output.
+    /// Stored in hundredths rather than as an `f32` because it is a calibration
+    /// figure read off a comparison, not a computed quantity, and 0.01 °C is
+    /// already four times finer than the register resolves. Only consulted on a
+    /// node carrying an SCD41 (see [`crate::sensors::scd41`]).
+    pub scd41_offset_centi: i32,
 }
 
 impl Config {
@@ -97,6 +106,9 @@ impl Config {
         // resolved at runtime from flash.
         deep_sleep: true,
         heartbeat_secs: 600, // 10 min
+        // The sensor's own power-on value, so an un-calibrated node behaves
+        // exactly as it did before this knob existed.
+        scd41_offset_centi: scd41::DEFAULT_OFFSET_CENTI,
     };
 
     /// The presence threshold expressed in raw HX711 ticks, i.e. what `main`
@@ -195,6 +207,19 @@ impl Config {
                     self.heartbeat_secs = v;
                 }
             }
+            // Home Assistant sends this as degrees ("2.45"); the sensor and the
+            // blob want hundredths. Out-of-range values are clamped rather than
+            // dropped, matching `scd41::offset_raw` — the slider has already
+            // moved, so silently keeping the old value would be the confusing
+            // outcome.
+            "scd41_temp_offset" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    if v.is_finite() {
+                        let centi = (v * 100.0) as i32;
+                        self.scd41_offset_centi = centi.clamp(0, scd41::MAX_OFFSET_CENTI);
+                    }
+                }
+            }
             "tare" => {
                 if !value.is_empty() {
                     // Two ways to ask for a re-zero, both landing here:
@@ -238,8 +263,9 @@ impl Config {
         b[28..32].copy_from_slice(&self.tare_token.to_le_bytes());
         b[32..36].copy_from_slice(&(self.deep_sleep as u32).to_le_bytes());
         b[36..40].copy_from_slice(&self.heartbeat_secs.to_le_bytes());
-        let crc = crc32(&b[0..40]);
-        b[40..44].copy_from_slice(&crc.to_le_bytes());
+        b[40..44].copy_from_slice(&self.scd41_offset_centi.to_le_bytes());
+        let crc = crc32(&b[0..44]);
+        b[44..48].copy_from_slice(&crc.to_le_bytes());
         b
     }
 
@@ -247,7 +273,7 @@ impl Config {
         if u32::from_le_bytes(b[0..4].try_into().ok()?) != MAGIC || b[4] != VERSION {
             return None;
         }
-        if u32::from_le_bytes(b[40..44].try_into().ok()?) != crc32(&b[0..40]) {
+        if u32::from_le_bytes(b[44..48].try_into().ok()?) != crc32(&b[0..44]) {
             return None;
         }
         Some(Config {
@@ -259,6 +285,7 @@ impl Config {
             tare_token: u32::from_le_bytes(b[28..32].try_into().ok()?),
             deep_sleep: u32::from_le_bytes(b[32..36].try_into().ok()?) != 0,
             heartbeat_secs: u32::from_le_bytes(b[36..40].try_into().ok()?),
+            scd41_offset_centi: i32::from_le_bytes(b[40..44].try_into().ok()?),
         })
     }
 }
@@ -509,6 +536,7 @@ mod tests {
             tare_token: 99,
             deep_sleep: false,
             heartbeat_secs: 1234,
+            scd41_offset_centi: 245,
         }
     }
 

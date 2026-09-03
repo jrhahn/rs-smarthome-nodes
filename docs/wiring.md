@@ -12,8 +12,8 @@ the two ever disagree, the source wins and this page is the bug.
 > the supply choices are what the firmware expects and what the datasheets say —
 > not what a working board on a bench has confirmed. Check each connection
 > against your own modules' silkscreen before powering anything up. The bird
-> scale's HX711 and DS18B20 wiring is the exception: that combination has been
-> running.
+> scale's HX711 wiring is the exception: that part has been running. Its battery
+> divider and protection board are new and unbuilt, like everything else here.
 
 ## The board
 
@@ -24,7 +24,7 @@ are *not* the GPIO numbers the datasheet and the firmware use:
 | --- | --- | --- | --- |
 | D0  | 2  | HX711 SCK | `draussen` |
 | D1  | 3  | HX711 DT | `draussen` |
-| D2  | 4  | DS18B20 data (1-Wire) | `draussen` |
+| D2  | 4  | Battery divider tap (ADC1); a DS18B20 1-Wire line on a node that has one instead | `draussen` |
 | D3  | 5  | UART RX ← SDS011 TX | `kueche` |
 | D4  | 6  | I²C SDA | `draussen`, `schlafzimmer`, `wohnzimmer`, `bad` |
 | D5  | 7  | I²C SCL | `draussen`, `schlafzimmer`, `wohnzimmer`, `bad` |
@@ -113,55 +113,164 @@ straps its address somewhere unexpected.
 
 ---
 
-## `NODE=schlafzimmer` / `NODE=wohnzimmer` — SCD41 only
+## `NODE=schlafzimmer` / `NODE=wohnzimmer` — SCD41 **and** SHT31-D
 
 Identical hardware; the two names differ only in which room they publish as.
 
-**You need:** XIAO ESP32-C3, SCD41 breakout, USB-C supply.
+> **Do not peel the white film off the SCD41's metal cap.** It is not a
+> protective sticker or a shipping label — it is the gas-permeable membrane over
+> the sensor opening, and it is part of the sensor. Removing it leaves the
+> optical path exposed, and the sensor then answers every command perfectly
+> while reporting `0 ppm` for ever. That failure cost a module on 2026-08-26 and
+> looks exactly like a wiring or supply fault from the outside, so it is worth
+> being sure: the film stays on.
 
-| SCD41 pin | XIAO pad | GPIO |
-| --- | --- | --- |
-| VIN / VDD | 3V3 | — |
-| GND | GND | — |
-| SDA | D4 | 6 |
-| SCL | D5 | 7 |
+**You need:** XIAO ESP32-C3, SCD41 breakout, SHT31-D breakout, USB-C supply.
 
-**Address** is fixed at `0x62`; there is nothing to strap.
+### Why two sensors
 
-**Supply.** The SCD41 pulls a substantial burst of current while it measures —
-far more than its idle draw. Feed it from the XIAO's `3V3` pad with short wires,
-and do not put it at the end of a long thin lead shared with anything else. A
-brown-out here shows up as a sensor that answers the probe and then returns
-nothing.
+The SCD41 has a temperature and humidity sensor built in, and it is the weaker
+one. Sensirion specifies it at **±6 %RH** (±9 outside 15–35 °C / 20–65 %RH)
+against the SHT31-D's **±2 %**, because it sits on a die that heats itself for
+the CO₂ measurement. So the SHT31-D measures the room, and the SCD41 measures
+CO₂ — plus its own temperature and humidity, which are published separately
+under `scd41_` because you need them to calibrate its offset (below).
 
-**Placement matters more than the wiring.** It measures the air it sits in: not
-inside a sealed enclosure, not in the exhaust of the board's own warmth, and not
-where someone breathes directly on it. Its automatic self-calibration assumes
+### Wiring
+
+Both sensors share one I²C bus. Four wires leave the XIAO; both breakouts tap
+them.
+
+| Sensor pin | XIAO pad | GPIO | Note |
+| --- | --- | --- | --- |
+| VIN / VDD | 3V3 | — | see *Supply* |
+| GND | GND | — | |
+| SDA | D4 | 6 | both sensors in parallel |
+| SCL | D5 | 7 | both sensors in parallel |
+
+**Addresses** do not collide: the SCD41 is fixed at `0x62`, the SHT31-D sits at
+`0x44` or `0x45` and the firmware adopts whichever answers. Nothing to strap.
+
+**Pull-ups.** Both breakouts usually fit their own, which puts them in parallel:
+two 10 kΩ become 5 kΩ, and even 2.2 kΩ against 10 kΩ lands near 1.8 kΩ. That is
+still inside the 3 mA sink current the SCD4x datasheet guarantees its low level
+for, so leave both fitted and only unsolder one set if the bus actually
+misbehaves.
+
+**Supply — and this is the one place the topology matters.** The SCD41 draws
+175 mA typical, 205 mA maximum while its IR source fires, against microamps
+between measurements. Sensirion allows **30 mV** of ripple at the sensor, which
+over a 205 mA pulse is a total resistance budget of about **146 mΩ** — for the
+regulator, both leads, and every contact on the way. Four DuPont contacts alone
+eat most of that, which is why this node wants soldered joints rather than
+jumper headers. Ten centimetres of 26 AWG is only ~27 mΩ for the pair, so length
+is cheap and distance from the board is affordable.
+
+Run 3V3 and GND from the XIAO **directly to the SCD41** as their own pair rather
+than daisy-chaining its supply through the SHT31-D breakout — that would put
+extra pads and contacts in the path that carries the pulse. The SHT31-D draws
+almost nothing and may branch off anywhere. SDA and SCL carry milliamps, so
+those can be looped through in any order.
+
+```
+XIAO   3V3 ─────────────────► SCD41 VDD      own pair, short, soldered
+       GND ─────────────────► SCD41 GND
+        └┬─────────────────► SHT31 VIN       may branch off
+         └─────────────────► SHT31 GND
+
+       D4  ──┬─────────────► SCD41 SDA       bus, order irrelevant
+             └─────────────► SHT31 SDA
+       D5  ──┬─────────────► SCD41 SCL
+             └─────────────► SHT31 SCL
+```
+
+### Placement
+
+**Both sensors in the same air, both away from the board.** Same air, because
+the offset calibration below is the difference between their two temperatures —
+mount them next to each other or it measures nothing useful. Away from the
+board, because Sensirion's design-in guide names the Wi-Fi module explicitly as
+a heat source and asks for maximum distance from self-heating components; a
+fixed offset cannot compensate a heat source that varies with radio traffic.
+
+Otherwise as for any air sensor: not inside a sealed enclosure, not where
+someone breathes directly on it. The SCD41's automatic self-calibration assumes
 the room reaches roughly outdoor CO₂ at some point in a week — a room that is
 never aired will drift.
 
-**Power.** Mains, always on. The firmware runs the sensor in *periodic* mode on
+**Power.** Mains, always on. The firmware runs the SCD41 in *periodic* mode on
 mains, which is what its self-calibration expects, and samples every 60 s.
 
-**Expected at boot:**
+### Expected at boot
 
 ```
 node 'schlafzimmer' (Schlafzimmer) booted, mains profile
+SHT31-D found at 0x44
 SCD41 found at 0x62
+SCD41 serial 0x41AC3D073BD4
 ```
 
-The **first round after a power-up reports nothing** — the first conversion
-needs about five seconds and the firmware does not block the publish path
-waiting for it. Readings appear on the next round:
+The serial number is worth a glance. It identifies the physical sensor, and it
+is the cheapest counterfeit check available — the SCD4x is widely copied, and
+fakes tend to answer with zeroes or with the same number on every unit, which
+the firmware calls out. Two genuine modules must return different numbers.
+
+The **first SCD41 round after a power-up reports nothing** — the first
+conversion needs about five seconds and the firmware does not block the publish
+path waiting for it. Readings appear on the next round:
 
 ```
-SCD41: co2 = 812
-SCD41: temperature = 21.4
-SCD41: humidity = 48.2
+SHT31-D: temperature = 26.3
+SHT31-D: humidity = 52.9
+SCD41: co2 = 367
+SCD41: scd41_temperature = 26.6
+SCD41: scd41_humidity = 55.9
 ```
 
-If you get `no SCD41 at 0x62`, read the bus scan that follows it — same two
-cases as for the SHT31-D above.
+### Calibrating the temperature offset
+
+The SCD41 cancels its own self-heating with a temperature offset, 4 °C out of
+the box — a figure chosen for continuous operation in a particular enclosure,
+not for yours. It is not cosmetic: the humidity output is compensated to the
+offset-corrected temperature, so an offset that does not match the real
+self-heating skews **both** signals, temperature low and humidity high. The
+datasheet only claims its RH/T accuracy if the offset is set correctly.
+
+Do this once per node, after the sensors are mounted where they will live:
+
+1. Let it run **at least 15 minutes** in place. Sensirion asks for that much for
+   complete thermal equilibration, and the reading really does still drift for
+   the first several minutes.
+2. Read `temperature` (the SHT31-D) and `scd41_temperature` off the device card.
+3. New offset = `4.00 + (scd41_temperature − temperature)`, i.e. subtract however
+   much the SCD41 reads *colder* than the reference.
+4. Enter it in the **Temperatur-Offset** number entity on the node's device card.
+
+The value is written to the sensor on the next round — which costs one round,
+because applying it stops and restarts the measurement. It is deliberately not
+persisted to the sensor's own EEPROM (limited write cycles); the firmware keeps
+it in flash and reprograms it on every boot.
+
+Calibrate in the final position and enclosure. On a bench, dangling off a USB
+cable, the self-heating is different and so is the answer.
+
+### If something is wrong
+
+`no SCD41 at 0x62` or `no SHT31-D at 0x44 or 0x45` — read the bus scan that
+follows it, same two cases as for the SHT31-D-only node above.
+
+If a sensor is *found* but produces no readings, the log says where it fell
+over rather than just "not responding": whether it refused to start, never
+reported a ready measurement, answered with a bad CRC, or returned a well-formed
+measurement it considers invalid (`reported 0 ppm`). After three empty rounds
+the firmware runs the SCD41's built-in self test, which settles the only
+question that matters:
+
+```
+SCD41 self test reports a malfunction — the part itself is faulty
+SCD41 self test passed — the sensor believes it is healthy, so look at
+wiring, supply or placement rather than the part
+```
 
 ---
 
@@ -228,11 +337,13 @@ SDS011: pm10 = 100.0
 
 ## `NODE=draussen` — the bird scale
 
-The busiest board: three sensors, two buses and a battery. This is the one that
-already exists; the others are simplifications of it.
+The busiest board: two sensors, two buses, a battery and the only analogue
+measurement in the fleet. This is the one that already exists; the others are
+simplifications of it.
 
 **You need:** XIAO ESP32-C3, 1 kg straight-bar load cell, HX711 breakout,
-DS18B20 waterproof probe, SHT31-D breakout, one 4.7 kΩ resistor, LiPo cell.
+SHT31-D breakout, 1S protection board, two 100 kΩ resistors, one 100 nF
+capacitor, LiPo cell.
 
 ### Load cell → HX711
 
@@ -262,27 +373,26 @@ reads as permanently "not ready" and times out cleanly instead of feeding you
 floating garbage. That is deliberate: a scale reading nonsense is worse than one
 reading nothing.
 
-### DS18B20 → XIAO
-
-| DS18B20 lead | XIAO pad | GPIO | Note |
-| --- | --- | --- | --- |
-| Red (VCC) | 3V3 | — | |
-| Black (GND) | GND | — | |
-| Yellow (DATA) | D2 | 4 | **plus 4.7 kΩ from DATA to 3V3** |
-
-The pull-up is **not optional**. The internal one is enabled as a backup, but it
-is far too weak for the metre or so of probe cable; without the external
-resistor you get intermittent CRC failures that look like a flaky sensor.
-
 ### SHT31-D → XIAO
 
 Exactly as for `NODE=bad`: 3V3, GND, SDA→D4, SCL→D5.
 
 On this node the SHT31-D's readings are published under `air_temperature` and
-`air_humidity`, because the DS18B20 already owns the plain `temperature` key —
-the probe measures the feeder, the SHT31-D measures the air. Nothing about the
-wiring changes; it is worth knowing when you go looking for the entity in Home
-Assistant.
+`air_humidity`. That prefix is older than the current build — it was there to
+leave the plain `temperature` key to a DS18B20 that is no longer fitted — and it
+stays because renaming the entity would orphan its history in Home Assistant.
+Nothing about the wiring changes; it is worth knowing when you go looking for
+the entity.
+
+### No DS18B20 on this node
+
+The probe used to sit on D2 with a 4.7 kΩ pull-up. The battery divider below
+needs the same pad, and there is no second candidate (see *Battery sense*), so
+the probe came off. If you are rebuilding an older board: **remove the 4.7 kΩ**,
+or it will pull the divider's tap towards 3V3 and every voltage reading with it.
+
+The DS18B20 driver and its node slot are still in the firmware — the pin is a
+per-node choice, and the build fails if any node ever enables both.
 
 ### Power
 
@@ -296,12 +406,106 @@ Two consequences for how you build it:
 - **The 5V pad is dead** on battery, which is why the SDS011 is not on this node.
 - **Keep the sensors on 3V3 from the XIAO**, so they go down with it in sleep.
 
+#### Protection board
+
+The XIAO charges the cell but does **not** protect it: there is no low-voltage
+cutoff, so a flat battery keeps being drained until it is damaged. Unless your
+pack already has a protection PCB tucked under the tape at the tab end — many
+do — put a 1S board inline between the cell and the board.
+
+```
+LiPo  +  ──►  B+  ┌──────────────────┐  P+  ──►  XIAO  B+
+                  │  1S protection    │
+LiPo  −  ──►  B−  └──────────────────┘  P−  ──►  XIAO  B−
+                      (B = battery)        (P = load)
+```
+
+**Read the silkscreen before soldering.** Plenty of 1S boards expose only three
+pads — `B+`, `B-`, `P-` — because the positive rail passes straight through and
+the MOSFETs switch the *negative* side. On those, the XIAO's `B+` comes from the
+board's `B+` and only the negative goes through `P-`. Both layouts are fine;
+wiring one as though it were the other is not.
+
+Solder the board to the cell first (`B-`, then `B+`), insulate it, and only then
+run the load wires to the XIAO — a bare 2000 mAh pouch will deliver tens of amps
+into a slipped iron. Nothing on the XIAO side has reverse-polarity protection.
+
+What such a board does **not** do is keep the cell healthy. The common DW01A-class
+part cuts off around 2.4-2.5 V, far below the ~3.0 V where a LiPo starts losing
+capacity for good. It is a safety device against fire and deep-discharge damage,
+not a longevity one. Noticing the difference is what the divider below is for.
+
+#### Battery sense
+
+**The XIAO has no battery-sense path at all** — `B+` reaches the charger and the
+regulator, never an ADC — so reading the cell means fitting a divider:
+
+```
+  XIAO B+ (= P+)
+        │
+      [ R1 ]  100 kΩ
+        │
+        ├──────────────────►  D2 / GPIO4
+        │
+        ├────────┐
+        │        │
+      [ R2 ]   [ C ]
+      100 kΩ   100 nF
+        │        │
+  XIAO GND ──────┴───────  (= P−)
+```
+
+As a netlist, which is harder to misread than any diagram:
+
+| Part | From | To |
+| --- | --- | --- |
+| R1 100 kΩ | XIAO `B+` | node **A** |
+| R2 100 kΩ | node **A** | XIAO `GND` |
+| C 100 nF | node **A** | XIAO `GND` |
+| wire | node **A** | XIAO `D2` |
+
+Node **A** is the tap: four legs meet there, and the two resistors are always in
+series between `B+` and ground — never a bridge across one of them.
+
+**Why D2, and why it costs the probe its pin.** The divider needs an ADC1 input.
+On the ESP32-C3 those are GPIO2/3/4 = `D0`, `D1`, `D2`, and the HX711 has the
+first two. `D3` is on ADC2, which is unusable while Wi-Fi is up, so `D2` is the
+only candidate — and the DS18B20 wanted it. The SHT31-D measures air temperature
+anyway. `node.rs` fails the build if a node ever asks for both.
+
+**Why the foot goes to `GND` and not to the cell.** The XIAO's ground is the
+protection board's `P−`, the switched side. Tie the divider there and the
+low-voltage cutoff switches it off along with everything else; tie it straight to
+the cell's `B−` and it keeps drawing ~21 µA *after* the cutoff — exactly the deep
+discharge the board was fitted to prevent.
+
+**Numbers.** 4.2 V full becomes 2.1 V at the pin, 3.0 V empty becomes 1.5 V; both
+sit inside the ~2.5 V that 11 dB attenuation spans, with no over-range while
+charging. The 100 nF supplies the ADC's sampling charge, so the 50 kΩ source
+impedance does not skew the reading. Standing draw is ~21 µA, about 184 mAh a
+year — roughly 9 % of a 2000 mAh pack. Two 1 MΩ resistors would cut that to ~2 µA
+if it ever matters.
+
+Use 1 % metal film. The firmware calibrates the *ADC* against the chip's eFuse
+reference, so readings arrive in millivolts already corrected for that part — but
+nothing corrects the resistors. If a multimeter disagrees, the fix is
+`R_TOP_KOHM` / `R_BOTTOM_KOHM` in [`src/battery.rs`](../src/battery.rs) and a
+reflash; there is no runtime knob for it yet.
+
+The reading is published as `birds/scale/battery_voltage`, and the log warns
+below 3.0 V. A reading under 2.0 V is not published at all — that is not a flat
+cell, it is a divider that is not there, and it says so:
+
+```
+battery reads 41 mV, which is no cell at all — check the divider is fitted
+between B+ and GND with its tap on D2, and that a cell is connected
+```
+
 ### Outdoors
 
-The DS18B20 is the only waterproof part. The board, the HX711 and the SHT31-D
-all need an enclosure — but the SHT31-D needs to *breathe*, or it reports the
-humidity of the inside of your box. A vent with a membrane, or a shielded
-underside opening, not a sealed lid.
+Nothing on this node is waterproof, so all of it needs an enclosure — but the
+SHT31-D needs to *breathe*, or it reports the humidity of the inside of your box.
+A vent with a membrane, or a shielded underside opening, not a sealed lid.
 
 **Expected at boot:**
 
@@ -310,6 +514,7 @@ node 'scale' (Draußen) booted, battery profile
 provision topic: smarthome/provision/a1b2c3d4e5f6
 SHT31-D found at 0x44
 HX711 raw reading: 8402913
+battery = 4.03 V
 ```
 
 Note the node **id** is `scale`, not `draussen` — the name selects it at build
@@ -337,7 +542,8 @@ a pin:
 2. No 5 V anywhere near a GPIO — only the SDS011's supply pin.
 3. SDA and SCL not swapped (the single commonest mistake on these boards).
 4. SDS011 TX→RX crossed.
-5. The DS18B20's 4.7 kΩ actually fitted, and to 3V3 rather than to 5 V.
+5. On `draussen`: the divider's foot on the XIAO's `GND` (the protection board's
+   `P−`), not on the cell's `B−` — and no 4.7 kΩ left over from a DS18B20 on D2.
 
 Then plug in USB and watch the log — every node reports what it found on its
 buses within the first second of booting, which is precisely so that a wiring

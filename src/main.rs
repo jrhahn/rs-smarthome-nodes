@@ -64,8 +64,9 @@ use rust_mqtt::{
 };
 
 use node::Provision;
-use rs_smarthome_nodes::{config, discovery, ds18b20, hx711, node, platform, state, wifi};
+use rs_smarthome_nodes::{battery, config, discovery, ds18b20, hx711, node, platform, state, wifi};
 
+use battery::Battery;
 use config::Config;
 use ds18b20::Ds18b20;
 use hx711::Hx711;
@@ -178,6 +179,12 @@ const HX711_TIMEOUT: Duration = Duration::from_millis(500);
 /// happens before this window, so a slow sensor never eats into it.
 const WIFI_BUDGET: Duration = Duration::from_secs(20);
 
+/// How long to wait for the MQTT DISCONNECT and the TCP FIN to actually leave
+/// the board at the end of a round. Short on purpose: the readings are already
+/// out by then, so this only buys a tidy shutdown, and it is spent inside
+/// [`WIFI_BUDGET`].
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
+
 /// Exponential-decay shift for empty-house baseline drift tracking. Each idle
 /// cycle nudges the baseline by `delta >> BASELINE_DRIFT_SHIFT` to absorb slow
 /// thermal / mechanical creep without chasing a real load.
@@ -200,6 +207,7 @@ type Scale<'d> = Hx711<Input<'d>, Output<'d>, Delay>;
 struct Board<'d> {
     scale: Option<Scale<'d>>,
     probe: Option<Ds18b20<'d>>,
+    battery: Option<Battery<'d>>,
     sensors: Sensors,
 }
 
@@ -298,19 +306,33 @@ async fn main(spawner: Spawner) {
         Hx711::new(dt, sck, Delay::new())
     });
 
-    // DS18B20 open-drain 1-Wire line on D2 / GPIO4 (internal pull-up backs the
-    // external 4.7 kΩ).
-    let probe = node.ds18b20.enabled.then(|| {
-        Ds18b20::new(OutputOpenDrain::new(
-            peripherals.GPIO4,
-            Level::High,
-            Pull::Up,
-        ))
-    });
+    // D2 / GPIO4 has two possible jobs and can only do one of them, so exactly
+    // one arm below claims the pin:
+    //   * the DS18B20's open-drain 1-Wire line (internal pull-up backing the
+    //     external 4.7 kΩ), or
+    //   * the battery divider's tap, the only ADC1 pad the HX711 leaves free.
+    // `node.rs` fails the build if a node asks for both, so the order here can
+    // never silently decide it.
+    let (probe, battery) = match (node.ds18b20.enabled, node.battery.enabled) {
+        (true, _) => (
+            Some(Ds18b20::new(OutputOpenDrain::new(
+                peripherals.GPIO4,
+                Level::High,
+                Pull::Up,
+            ))),
+            None,
+        ),
+        (_, true) => (
+            None,
+            Some(Battery::new(peripherals.ADC1, peripherals.GPIO4)),
+        ),
+        _ => (None, None),
+    };
 
     let mut board = Board {
         scale,
         probe,
+        battery,
         sensors: Sensors::new(platform::Peripherals {
             i2c0: peripherals.I2C0,
             sda: peripherals.GPIO6,
@@ -531,7 +553,8 @@ async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
 /// Measure everything this node has and format the readings for MQTT.
 ///
 /// Called on publish cycles only, so the DS18B20's 750 ms conversion and the
-/// SDS011's 10–30 s fan warm-up never run on the cheap idle polls. `raw` is the
+/// SDS011's 10–30 s fan warm-up never run on the cheap idle polls (the battery
+/// ADC is microseconds either way, but it belongs with the rest). `raw` is the
 /// load-cell reading already taken by the caller (it drives the presence logic),
 /// converted to grams here with the stored calibration.
 async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) -> Samples {
@@ -556,6 +579,41 @@ async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) 
             None => warn!("DS18B20 not responding; skipping temperature"),
         }
     }
+
+    if let Some(sense) = board.battery.as_mut() {
+        match sense.read_millivolts() {
+            // Below the plausible floor this is not a discharged cell but an
+            // absent one, or a divider that is not there — publishing it would
+            // put a convincing "flat battery" in Home Assistant and trip
+            // whatever watches for one. Say what it actually means instead.
+            Some(mv) if mv < battery::MIN_PLAUSIBLE_CELL_MV => warn!(
+                "battery reads {} mV, which is no cell at all — check the divider is fitted \
+                 between B+ and GND with its tap on D2, and that a cell is connected",
+                mv
+            ),
+            Some(mv) => {
+                let mut value = heapless::String::new();
+                battery::write_volts(&mut value, mv);
+                info!("battery = {} V", value);
+                if mv < battery::LOW_CELL_MV {
+                    warn!(
+                        "battery below {} mV: the protection board does not cut off until far \
+                         lower, so the cell loses capacity from here on",
+                        battery::LOW_CELL_MV
+                    );
+                }
+                platform::push_sample(&mut samples, node.battery, "voltage", value);
+            }
+            None => warn!("battery ADC never finished a conversion; skipping voltage"),
+        }
+    }
+
+    // Push the live calibration down before sampling, so a slider moved in Home
+    // Assistant takes effect on this round rather than the next one. Doing it
+    // here rather than at construction means it also survives a config change
+    // arriving mid-run: the driver compares against what it last wrote and only
+    // touches the bus on a real change.
+    board.sensors.set_scd41_offset(cfg.scd41_offset_centi);
 
     board.sensors.measure_all(&mut samples).await;
     samples
@@ -742,8 +800,10 @@ async fn publish_samples(
 
     let mut recv_buffer = [0u8; MQTT_BUFFER];
     let mut write_buffer = [0u8; MQTT_BUFFER];
+    // By reference, so the socket outlives the client: the graceful shutdown at
+    // the end of this function needs it back (see there).
     let mut client = MqttClient::new(
-        socket,
+        &mut socket,
         &mut write_buffer,
         MQTT_BUFFER,
         &mut recv_buffer,
@@ -918,9 +978,26 @@ async fn publish_samples(
 
     // Say goodbye properly. A DISCONNECT tells the broker to *discard* the will,
     // so a node that simply finished its round is not announced as dead — the
-    // will then only fires when the link really breaks. Best-effort: if it
-    // fails, the worst case is a spurious `offline` that the next round clears.
+    // will then only fires when the link really breaks.
     let _ = client.disconnect().await;
+
+    // ...but writing it is not sending it. `rust-mqtt` hands the packet to the
+    // socket and returns; embassy-net leaves it sitting in the TX buffer until
+    // the stack next polls, and `Drop for TcpSocket` just removes the socket
+    // from the set, taking anything still queued with it. The broker therefore
+    // saw every round end as an abrupt drop, and published the retained will on
+    // the next connect — which is the `offline` that flickered immediately
+    // before every `online` (observed on `bad` and `schlafzimmer`, 2026-08-26)
+    // and made the availability history useless.
+    //
+    // So: drop the client to get the socket back, flush until the send queue is
+    // empty, then close and let the FIN drain. Both waits are bounded — a dead
+    // link must not hold the round open, and by this point the readings are
+    // already published, so giving up here costs only the tidy shutdown.
+    drop(client);
+    let _ = with_timeout(SHUTDOWN_BUDGET, socket.flush()).await;
+    socket.close();
+    let _ = with_timeout(SHUTDOWN_BUDGET, socket.flush()).await;
 
     // Becoming a different node means rebooting, so this is the last thing we
     // do with the connection. Any tuning picked up in the loop above is dropped

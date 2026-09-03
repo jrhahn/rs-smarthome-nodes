@@ -74,6 +74,19 @@ pub trait Sensor {
     /// and simply omitted from the publish, never fatal (same contract as the
     /// existing DS18B20 path).
     async fn measure(&mut self) -> Vec<Reading, MAX_READINGS>;
+
+    /// Why the last [`Self::measure`] came back empty, in terms someone holding
+    /// the board can act on.
+    ///
+    /// "Not responding" covers a wide spread of causes — a sensor that never
+    /// acknowledged anything, one that acknowledges commands but refuses to
+    /// start, and one that answers with corrupt data all look identical from
+    /// outside, and they have completely different fixes. A driver that can
+    /// tell them apart says so here; the default keeps the coarse message for
+    /// the ones that cannot.
+    fn fault(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 // --- Shared helpers ---------------------------------------------------------
@@ -249,6 +262,7 @@ mod tests {
             scd41::DESCRIPTORS,
             sds011::DESCRIPTORS,
             crate::ds18b20::DESCRIPTORS,
+            crate::battery::DESCRIPTORS,
         ] {
             assert!(descriptors.len() <= MAX_READINGS);
             assert!(!descriptors.is_empty());
@@ -276,6 +290,7 @@ mod tests {
             scd41::DESCRIPTORS,
             sds011::DESCRIPTORS,
             crate::ds18b20::DESCRIPTORS,
+            crate::battery::DESCRIPTORS,
         ] {
             for d in descriptors {
                 assert!(!d.key.is_empty() && !d.name.is_empty());

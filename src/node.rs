@@ -51,13 +51,24 @@ impl PowerProfile {
 
 /// One sensor slot on a node: whether it is populated, plus how its readings are
 /// named. `prefix` disambiguates keys when two sensors emit the same quantity
-/// (the outdoor node has both a DS18B20 and an SHT31-D temperature), and `label`
-/// does the same for the human-readable Home Assistant entity name.
+/// (the bedroom's SCD41 and SHT31-D both report temperature and humidity), and
+/// `label` does the same for the human-readable Home Assistant entity name. It
+/// also just *names* things where there is nothing to collide with — the outdoor
+/// node's `battery_voltage` is a plain voltage until the prefix says whose.
 #[derive(Clone, Copy)]
 pub struct Slot {
     pub enabled: bool,
     pub prefix: &'static str,
     pub label: &'static str,
+    /// Keys that keep their plain form even though the slot carries a prefix.
+    ///
+    /// The prefix exists to stop two sensors on one node claiming the same
+    /// entity. A quantity only this sensor measures has nothing to collide
+    /// with, and renaming it would throw away its Home Assistant history for
+    /// nothing — `co2` on a node whose SCD41 shares the bus with an SHT31 is
+    /// exactly that case: the SHT31 takes over `temperature` and `humidity`,
+    /// while the CO₂ curve carries on under the id it has always had.
+    pub unprefixed: &'static [&'static str],
 }
 
 impl Slot {
@@ -67,6 +78,7 @@ impl Slot {
             enabled: true,
             prefix: "",
             label: "",
+            unprefixed: &[],
         }
     }
 
@@ -78,7 +90,13 @@ impl Slot {
             enabled: true,
             prefix,
             label,
+            unprefixed: &[],
         }
+    }
+
+    /// Exempt these keys from the slot's prefix (see [`Slot::unprefixed`]).
+    pub const fn keeping(self, unprefixed: &'static [&'static str]) -> Slot {
+        Slot { unprefixed, ..self }
     }
 
     /// Not populated on this node.
@@ -87,7 +105,31 @@ impl Slot {
             enabled: false,
             prefix: "",
             label: "",
+            unprefixed: &[],
         }
+    }
+
+    /// The key prefix that applies to `key` — empty for an exempted one.
+    pub fn prefix_for(&self, key: &str) -> &'static str {
+        if self.is_exempt(key) {
+            ""
+        } else {
+            self.prefix
+        }
+    }
+
+    /// The entity-name label that applies to `key`, same rule as
+    /// [`Slot::prefix_for`] so the id and the display name never disagree.
+    pub fn label_for(&self, key: &str) -> &'static str {
+        if self.is_exempt(key) {
+            ""
+        } else {
+            self.label
+        }
+    }
+
+    fn is_exempt(&self, key: &str) -> bool {
+        self.unprefixed.contains(&key)
     }
 }
 
@@ -109,6 +151,11 @@ pub struct NodeConfig {
     pub sht31: Slot,
     pub scd41: Slot,
     pub sds011: Slot,
+    /// Cell-voltage sense through the external divider (see [`crate::battery`]).
+    /// Not a sensor on a bus but a property of how the board is powered, so it
+    /// only ever belongs on a node with [`PowerProfile::Battery`] — and never
+    /// alongside `ds18b20`, which wants the same pin.
+    pub battery: Slot,
     /// Extra topic the weight is mirrored to, for a node whose Home Assistant
     /// entities predate MQTT discovery (the bird scale's `birds/scale/state`).
     pub legacy_weight_topic: Option<&'static str>,
@@ -182,7 +229,7 @@ impl NodeConfig {
 
 // --- The fleet ---------------------------------------------------------------
 
-/// Outdoor bird feeder: load cell + soil/air probe + SHT31-D, on battery.
+/// Outdoor bird feeder: load cell + SHT31-D + cell-voltage sense, on battery.
 /// Keeps the historical `birds/scale/...` topics so the existing Home Assistant
 /// entities and retained config values survive the platform migration.
 const DRAUSSEN: NodeConfig = NodeConfig {
@@ -192,15 +239,29 @@ const DRAUSSEN: NodeConfig = NodeConfig {
     power: PowerProfile::Battery,
     sample_secs: 60,
     scale: Slot::on(),
-    ds18b20: Slot::on(),
-    // The probe already owns the plain `temperature` key, so the SHT31-D's
-    // air measurements are published under `air_*`.
+    // The DS18B20 is gone from this node, and it is the battery sense that
+    // displaced it: both want D2, the only ADC1 pad the HX711 has not taken.
+    ds18b20: Slot::off(),
+    // The `air_` prefix outlives its original reason — it was there to keep the
+    // probe's plain `temperature` key to itself — because renaming the entity
+    // now would orphan its Home Assistant history, and the SHT31-D really is
+    // measuring the air rather than the feeder.
     sht31: Slot::on_as("air_", "Luft"),
     scd41: Slot::off(),
     sds011: Slot::off(),
+    battery: Slot::on_as("battery_", "Batterie"),
     legacy_weight_topic: Some("birds/scale/state"),
 };
 
+/// Bedroom air. The SHT31-D is not redundant with the SCD41's built-in RH/T:
+/// the SCD4x datasheet specifies its humidity at ±6 %RH (±9 outside 15–35 °C /
+/// 20–65 %RH) against the SHT31-D's ±2 %, because it sits on a die that heats
+/// itself for the CO₂ measurement. Measured side by side on 2026-08-26 the two
+/// disagreed by 15 points. So the SHT31-D owns `temperature` and `humidity`,
+/// and the SCD41's own pair is published under `scd41_` — still worth having,
+/// because calibrating its temperature offset against a reference is exactly
+/// Sensirion's field procedure and needs both numbers visible. `co2` keeps its
+/// plain key: nothing collides with it, and its history is worth preserving.
 const SCHLAFZIMMER: NodeConfig = NodeConfig {
     id: "schlafzimmer",
     name: "Schlafzimmer",
@@ -209,12 +270,14 @@ const SCHLAFZIMMER: NodeConfig = NodeConfig {
     sample_secs: 60,
     scale: Slot::off(),
     ds18b20: Slot::off(),
-    sht31: Slot::off(),
-    scd41: Slot::on(),
+    sht31: Slot::on(),
+    scd41: Slot::on_as("scd41_", "SCD41").keeping(&["co2"]),
     sds011: Slot::off(),
+    battery: Slot::off(),
     legacy_weight_topic: None,
 };
 
+/// Same build as [`SCHLAFZIMMER`], same reasoning.
 const WOHNZIMMER: NodeConfig = NodeConfig {
     id: "wohnzimmer",
     name: "Wohnzimmer",
@@ -223,9 +286,10 @@ const WOHNZIMMER: NodeConfig = NodeConfig {
     sample_secs: 60,
     scale: Slot::off(),
     ds18b20: Slot::off(),
-    sht31: Slot::off(),
-    scd41: Slot::on(),
+    sht31: Slot::on(),
+    scd41: Slot::on_as("scd41_", "SCD41").keeping(&["co2"]),
     sds011: Slot::off(),
+    battery: Slot::off(),
     legacy_weight_topic: None,
 };
 
@@ -242,6 +306,7 @@ const KUECHE: NodeConfig = NodeConfig {
     sht31: Slot::off(),
     scd41: Slot::off(),
     sds011: Slot::on(),
+    battery: Slot::off(),
     legacy_weight_topic: None,
 };
 
@@ -256,6 +321,7 @@ const BAD: NodeConfig = NodeConfig {
     sht31: Slot::on(),
     scd41: Slot::off(),
     sds011: Slot::off(),
+    battery: Slot::off(),
     legacy_weight_topic: None,
 };
 
@@ -269,6 +335,22 @@ pub const FLEET: &[(&str, NodeConfig)] = &[
     ("kueche", KUECHE),
     ("bad", BAD),
 ];
+
+// D2 / GPIO4 carries either the DS18B20's 1-Wire line or the battery divider's
+// tap on ADC1 — the pin cannot be both, and `main` hands it to whichever slot is
+// enabled. A node asking for both would compile, then quietly give the pin to
+// the probe and leave someone wondering why the voltage never arrives; fail the
+// build here instead, where the table that caused it is on screen.
+const _: () = {
+    let mut i = 0;
+    while i < FLEET.len() {
+        assert!(
+            !(FLEET[i].1.ds18b20.enabled && FLEET[i].1.battery.enabled),
+            "a node cannot carry both a DS18B20 and a battery divider: they share D2"
+        );
+        i += 1;
+    }
+};
 
 /// The same names as one string, for error messages. Spelled out rather than
 /// built from [`FLEET`] because it is used in a const-eval `panic!`, which takes
@@ -461,6 +543,53 @@ mod tests {
     use crate::config::NODE_NAME_MAX;
 
     #[test]
+    fn an_exempt_key_keeps_its_plain_form() {
+        // The prefix is there to stop two sensors claiming one entity. `co2`
+        // has no rival on the node, so prefixing it would only cost its Home
+        // Assistant history.
+        let slot = Slot::on_as("scd41_", "SCD41").keeping(&["co2"]);
+        assert_eq!(slot.prefix_for("co2"), "");
+        assert_eq!(slot.label_for("co2"), "");
+        assert_eq!(slot.prefix_for("temperature"), "scd41_");
+        assert_eq!(slot.label_for("temperature"), "SCD41");
+    }
+
+    #[test]
+    fn the_key_and_the_name_are_exempted_together() {
+        // An id that says `co2` under a name that says "SCD41 CO₂" would be a
+        // confusing half-rename, so both sides consult the same rule.
+        for slot in [
+            Slot::on(),
+            Slot::on_as("air_", "Luft"),
+            Slot::on_as("scd41_", "SCD41").keeping(&["co2"]),
+        ] {
+            for key in ["co2", "temperature", "humidity"] {
+                assert_eq!(
+                    slot.prefix_for(key).is_empty(),
+                    slot.label_for(key).is_empty(),
+                    "{key} is prefixed on only one side"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_node_carrying_both_i2c_sensors_gives_the_room_readings_to_the_sht31() {
+        // The SCD4x specifies its humidity at ±6 %RH against the SHT31-D's ±2 %,
+        // so the plain `temperature`/`humidity` entities — the ones a dashboard
+        // reaches for — must come from the SHT31-D.
+        for name in ["schlafzimmer", "wohnzimmer"] {
+            let node = by_name(name).unwrap();
+            assert!(node.sht31.enabled, "{name} has no SHT31-D");
+            assert!(node.scd41.enabled, "{name} has no SCD41");
+            assert_eq!(node.sht31.prefix_for("humidity"), "");
+            assert_ne!(node.scd41.prefix_for("humidity"), "");
+            // ...while CO₂, which only one of them measures, stays put.
+            assert_eq!(node.scd41.prefix_for("co2"), "");
+        }
+    }
+
+    #[test]
     fn every_fleet_name_resolves_and_nothing_else_does() {
         for (name, cfg) in FLEET {
             assert_eq!(by_name(name).expect("in the table").id, cfg.id);
@@ -596,11 +725,55 @@ mod tests {
 
     #[test]
     fn slots_disambiguate_colliding_keys() {
-        // The outdoor node has two temperature sources. Without a prefix they
-        // would publish to the same topic and one would overwrite the other.
+        // The bedroom has two temperature and humidity sources. Without a prefix
+        // they would publish to the same topics and one would overwrite the
+        // other.
+        let bedroom = by_name("schlafzimmer").unwrap();
+        assert!(bedroom.scd41.enabled && bedroom.sht31.enabled);
+        assert_ne!(bedroom.scd41.prefix, bedroom.sht31.prefix);
+    }
+
+    #[test]
+    fn nothing_double_books_the_one_pin_two_things_want() {
+        // The runtime half of the const assert above: D2 belongs to the DS18B20
+        // or to the battery divider, never both.
+        for (name, node) in FLEET {
+            assert!(
+                !(node.ds18b20.enabled && node.battery.enabled),
+                "{name} claims D2 twice"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_battery_node_senses_a_cell() {
+        // A mains node has no cell to read, so the entity would sit at whatever
+        // the divider that is not fitted happens to leave on the pin.
+        for (name, node) in FLEET {
+            if node.battery.enabled {
+                assert!(
+                    node.power.is_battery(),
+                    "{name} senses a battery it does not run on"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_outdoor_sht31_keeps_the_prefix_the_probe_gave_it() {
+        // `air_` was introduced to leave the plain `temperature` key to the
+        // DS18B20, and the DS18B20 is gone. The prefix stays regardless:
+        // renaming would orphan the history behind `birds/scale/air_temperature`
+        // in Home Assistant, and the sensor really does measure the air.
         let scale = by_name("draussen").unwrap();
-        assert!(scale.ds18b20.enabled && scale.sht31.enabled);
-        assert_ne!(scale.ds18b20.prefix, scale.sht31.prefix);
+        assert!(!scale.ds18b20.enabled);
+        assert_eq!(scale.sht31.prefix, "air_");
+        assert_eq!(
+            scale
+                .state_topic(scale.battery.prefix_for("voltage"), "voltage")
+                .as_str(),
+            "birds/scale/battery_voltage"
+        );
     }
 
     // --- Provisioning -------------------------------------------------------

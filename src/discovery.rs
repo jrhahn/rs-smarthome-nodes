@@ -23,13 +23,14 @@ use core::fmt::Write as _;
 
 use heapless::{String, Vec};
 
+use crate::battery;
 use crate::config::Config;
 use crate::ds18b20;
 use crate::node::{NodeConfig, Slot};
 use crate::sensors::{scale, scd41, sds011, sht31, EntityDescriptor};
 
 /// Upper bound on entities a node can expose (weight, probe temperature,
-/// SHT31 ×2, SCD41 ×3, SDS011 ×2), with headroom.
+/// SHT31 ×2, SCD41 ×3, SDS011 ×2, cell voltage), with headroom.
 pub const MAX_ENTITIES: usize = 12;
 /// Upper bound on command entities (the calibration and tuning knobs).
 pub const MAX_CONTROLS: usize = 12;
@@ -107,6 +108,7 @@ pub fn entities(node: &NodeConfig) -> Vec<Entity, MAX_ENTITIES> {
         (node.sht31, sht31::DESCRIPTORS),
         (node.scd41, scd41::DESCRIPTORS),
         (node.sds011, sds011::DESCRIPTORS),
+        (node.battery, battery::DESCRIPTORS),
     ] {
         if !slot.enabled {
             continue;
@@ -124,7 +126,10 @@ pub fn config_topic(node: &NodeConfig, entity: &Entity) -> String<96> {
     let _ = write!(
         t,
         "{}/sensor/{}/{}{}/config",
-        PREFIX, node.id, entity.slot.prefix, entity.desc.key
+        PREFIX,
+        node.id,
+        entity.slot.prefix_for(entity.desc.key),
+        entity.desc.key
     );
     t
 }
@@ -155,12 +160,16 @@ pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) 
         },
         ns = node.namespace,
         id = node.id,
-        label = slot.label,
+        label = slot.label_for(desc.key),
         // A slot label like "Luft" prefixes the entity name; an empty label must
         // not leave a leading space behind.
-        sep = if slot.label.is_empty() { "" } else { " " },
+        sep = if slot.label_for(desc.key).is_empty() {
+            ""
+        } else {
+            " "
+        },
         name = desc.name,
-        prefix = slot.prefix,
+        prefix = slot.prefix_for(desc.key),
         key = desc.key,
         unit = desc.unit,
         dev_cla = desc.device_class,
@@ -254,6 +263,22 @@ const SCALE_CONTROLS: &[Control] = &[
     },
 ];
 
+/// Knobs that only exist on a node carrying an SCD41.
+///
+/// The offset is a *calibration*, read off a comparison against a trusted
+/// hygrometer rather than computed, so it belongs on the device card next to the
+/// readings it corrects — not in a rebuild. Sensirion's own procedure is
+/// `new = old + (scd41_reading - reference_reading)`, which is why the range
+/// allows more than the 4 °C default: a badly ventilated enclosure needs more,
+/// an open breakout in moving air needs much less.
+const SCD41_CONTROLS: &[Control] = &[Control {
+    component: "number",
+    key: "scd41_temp_offset",
+    name: "Temperatur-Offset",
+    reads_back: true,
+    spec: "\"min\":0,\"max\":20,\"step\":0.05,\"unit_of_meas\":\"°C\",\"mode\":\"box\",",
+}];
+
 /// Knobs that only do anything on a battery node. A mains node samples on its
 /// build-time cadence and never sleeps, so exposing these would put four dead
 /// controls on its device card.
@@ -294,6 +319,7 @@ pub fn controls(node: &NodeConfig) -> Vec<&'static Control, MAX_CONTROLS> {
     for control in SCALE_CONTROLS
         .iter()
         .filter(|_| node.scale.enabled)
+        .chain(SCD41_CONTROLS.iter().filter(|_| node.scd41.enabled))
         .chain(BATTERY_CONTROLS.iter().filter(|_| node.power.is_battery()))
     {
         let _ = out.push(control);
@@ -357,7 +383,10 @@ pub fn control_payload(
 }
 
 const _: () = {
-    assert!(SCALE_CONTROLS.len() + BATTERY_CONTROLS.len() <= MAX_CONTROLS);
+    // The worst case is one node carrying all three groups at once; `controls`
+    // returns a fixed-capacity Vec, so overflowing this would silently drop the
+    // last entities rather than fail to build.
+    assert!(SCALE_CONTROLS.len() + SCD41_CONTROLS.len() + BATTERY_CONTROLS.len() <= MAX_CONTROLS);
 };
 
 #[cfg(test)]
@@ -367,7 +396,7 @@ mod tests {
     use super::{
         availability, config_payload, config_topic, control_payload, control_topic, controls,
         entities, Availability, Config, NodeConfig, BATTERY_CONTROLS, MIN_EXPIRY_SECS,
-        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS,
+        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS, SCD41_CONTROLS,
     };
     use crate::node::FLEET;
     use serde_json::Value;
@@ -426,7 +455,8 @@ mod tests {
             for entity in entities(node) {
                 let payload = parse(&config_payload(node, &entity, &avail).unwrap());
                 let announced = expand(payload["stat_t"].as_str().unwrap(), node);
-                let published = node.state_topic(entity.slot.prefix, entity.desc.key);
+                let published =
+                    node.state_topic(entity.slot.prefix_for(entity.desc.key), entity.desc.key);
                 assert_eq!(announced.as_str(), published.as_str());
             }
         }
@@ -463,8 +493,8 @@ mod tests {
     #[test]
     fn topics_and_unique_ids_do_not_collide() {
         // Two entities sharing either one would silently overwrite each other in
-        // Home Assistant — exactly what the outdoor node's two temperature
-        // sources would do without their slot prefix.
+        // Home Assistant — exactly what the bedroom's two temperature sources
+        // would do without their slot prefix.
         for (name, node) in FLEET {
             let avail = availability_of(node);
             let messages = announcements(node, &avail);
@@ -478,6 +508,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_bedroom_publishes_the_sht31_as_the_rooms_temperature_and_humidity() {
+        // The concrete result of the two-sensor arrangement, spelled out the way
+        // Home Assistant sees it: the SHT31-D owns the plain entities, the
+        // SCD41's own pair is clearly marked as the sensor's own, and CO₂ keeps
+        // the id its history is filed under.
+        let node = crate::node::by_name("schlafzimmer").unwrap();
+        let avail = availability_of(&node);
+        let topics: Vec<String> = announcements(&node, &avail)
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect();
+
+        for expected in [
+            "homeassistant/sensor/schlafzimmer/temperature/config",
+            "homeassistant/sensor/schlafzimmer/humidity/config",
+            "homeassistant/sensor/schlafzimmer/co2/config",
+            "homeassistant/sensor/schlafzimmer/scd41_temperature/config",
+            "homeassistant/sensor/schlafzimmer/scd41_humidity/config",
+        ] {
+            assert!(topics.contains(&expected.to_string()), "missing {expected}");
+        }
+        assert!(!topics.contains(&"homeassistant/sensor/schlafzimmer/scd41_co2/config".to_string()));
+
+        // And the state topic the firmware publishes to has to agree with the
+        // one the discovery payload points at.
+        for entity in entities(&node) {
+            let published =
+                node.state_topic(entity.slot.prefix_for(entity.desc.key), entity.desc.key);
+            let payload = parse(&config_payload(&node, &entity, &avail).unwrap());
+            assert_eq!(
+                expand(payload["stat_t"].as_str().unwrap(), &node),
+                published.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn the_outdoor_node_announces_its_cell_voltage_and_no_probe() {
+        // The concrete result of trading the DS18B20 for the divider: one new
+        // entity under the battery's own name, and nothing left announcing a
+        // probe that is no longer soldered to anything.
+        let scale = crate::node::by_name("draussen").unwrap();
+        let avail = availability_of(&scale);
+        let topics: Vec<String> = announcements(&scale, &avail)
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect();
+
+        assert!(topics.contains(&"homeassistant/sensor/scale/battery_voltage/config".to_string()));
+        // `air_temperature` stays; the plain key the probe used must be gone.
+        assert!(topics.contains(&"homeassistant/sensor/scale/air_temperature/config".to_string()));
+        assert!(!topics.contains(&"homeassistant/sensor/scale/temperature/config".to_string()));
+
+        let entity = entities(&scale)
+            .into_iter()
+            .find(|e| e.desc.key == "voltage")
+            .expect("the outdoor node exposes a cell voltage");
+        let payload = parse(&config_payload(&scale, &entity, &avail).unwrap());
+        assert_eq!(payload["dev_cla"], "voltage");
+        assert_eq!(payload["unit_of_meas"], "V");
+        assert_eq!(payload["name"], "Batterie Spannung");
+        assert_eq!(
+            expand(payload["stat_t"].as_str().unwrap(), &scale),
+            "birds/scale/battery_voltage"
+        );
     }
 
     #[test]
@@ -600,6 +698,14 @@ mod tests {
                     control.key
                 );
             }
+            for control in SCD41_CONTROLS {
+                assert_eq!(
+                    keys.contains(&control.key),
+                    node.scd41.enabled,
+                    "{name}: {}",
+                    control.key
+                );
+            }
             for control in BATTERY_CONTROLS {
                 assert_eq!(
                     keys.contains(&control.key),
@@ -612,14 +718,25 @@ mod tests {
     }
 
     #[test]
-    fn a_mains_node_without_a_load_cell_has_no_knobs_at_all() {
-        // Nothing tunable at runtime today — better an empty Configuration
-        // section than four controls that do nothing.
+    fn a_node_with_nothing_to_tune_has_no_knobs_at_all() {
+        // Better an empty Configuration section than controls that do nothing.
+        // `kueche` is the case today: mains, no load cell, and an SDS011 whose
+        // duty cycle is a per-node constant rather than a runtime knob.
         for (name, node) in FLEET {
-            if !node.power.is_battery() && !node.scale.enabled {
+            if !node.power.is_battery() && !node.scale.enabled && !node.scd41.enabled {
                 assert!(controls(node).is_empty(), "{name} exposes dead controls");
             }
         }
+    }
+
+    #[test]
+    fn an_scd41_node_gets_the_offset_knob_and_nothing_else() {
+        // The regression this guards: the temperature offset is the *only*
+        // reason a plain mains sensor node has a Configuration section at all,
+        // so it must not drag the battery or load-cell knobs in with it.
+        let bedroom = crate::node::by_name("schlafzimmer").unwrap();
+        let keys: Vec<&str> = controls(&bedroom).iter().map(|c| c.key).collect();
+        assert_eq!(keys, vec!["scd41_temp_offset"]);
     }
 
     #[test]

@@ -32,6 +32,7 @@
 // protocol constants kept for symmetry); that is not dead code, it is the API.
 #![allow(dead_code)]
 
+pub mod battery;
 pub mod config;
 pub mod discovery;
 pub mod ds18b20;

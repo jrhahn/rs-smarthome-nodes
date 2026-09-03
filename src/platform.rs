@@ -11,7 +11,7 @@
 //! | --- | --- | --- |
 //! | D0 | 2  | HX711 SCK |
 //! | D1 | 3  | HX711 DT |
-//! | D2 | 4  | DS18B20 1-Wire |
+//! | D2 | 4  | DS18B20 1-Wire, *or* the battery divider's tap on ADC1 |
 //! | D3 | 5  | SDS011 UART RX (sensor TX) |
 //! | D4 | 6  | I²C SDA (SHT31-D, SCD41) |
 //! | D5 | 7  | I²C SCL |
@@ -43,7 +43,8 @@ use crate::sensors::{scd41, scd41::Scd41, sds011::Sds011, sht31, sht31::Sht31, R
 const SDS011_BAUD: u32 = 9600;
 
 /// Upper bound on the readings one round can produce: weight + probe
-/// temperature + SHT31 (2) + SCD41 (3) + SDS011 (2), with headroom.
+/// temperature + SHT31 (2) + SCD41 (3) + SDS011 (2) + cell voltage, with
+/// headroom.
 pub const MAX_SAMPLES: usize = 12;
 
 /// One reading plus the node-level key prefix that disambiguates it (see
@@ -107,7 +108,18 @@ pub struct Sensors {
     sds011: Option<Sds011<Uart<'static, Async>>>,
     /// Whether the I²C bring-up probe has already run this boot.
     probed: bool,
+    /// Consecutive rounds the SCD41 produced nothing, and whether its self test
+    /// has already run for this streak (see [`SCD41_SELF_TEST_AFTER`]).
+    scd41_empty_rounds: u8,
+    scd41_self_tested: bool,
 }
+
+/// Empty SCD41 rounds before the driver asks the sensor to test itself.
+///
+/// Three, because one empty round is normal — periodic mode reports nothing
+/// until the first conversion finishes — and two in a row can still be a
+/// restart. Three is a fault worth ten seconds of diagnosis.
+const SCD41_SELF_TEST_AFTER: u8 = 3;
 
 impl Sensors {
     /// Bring up only the buses this node needs and construct its drivers.
@@ -159,6 +171,17 @@ impl Sensors {
             scd41,
             sds011,
             probed: false,
+            scd41_empty_rounds: 0,
+            scd41_self_tested: false,
+        }
+    }
+
+    /// Hand the SCD41 its temperature offset (hundredths of °C) from the live
+    /// config. A no-op on a node without one, and cheap enough to call every
+    /// round — the driver only touches the bus when the value actually changed.
+    pub fn set_scd41_offset(&mut self, centi: i32) {
+        if let Some(scd41) = self.scd41.as_mut() {
+            scd41.set_temperature_offset(centi);
         }
     }
 
@@ -199,6 +222,21 @@ impl Sensors {
         if self.scd41.is_some() {
             if acks(bus, scd41::ADDR, scd41::CMD_GET_DATA_READY).await {
                 info!("SCD41 found at 0x{:02X}", scd41::ADDR);
+                // The address ACK only proves something is on the bus. The
+                // serial number says *what* — which physical sensor sits in
+                // this node, and whether it is plausibly a genuine Sensirion
+                // part at all. Counterfeits are common and tend to answer with
+                // zeroes or with the same number on every unit.
+                if let Some(s) = self.scd41.as_mut() {
+                    match s.serial_number().await {
+                        Some(0) => warn!(
+                            "SCD41 serial number is zero — that is not what a genuine \
+                             Sensirion part returns; treat its readings with suspicion"
+                        ),
+                        Some(serial) => info!("SCD41 serial 0x{:012X}", serial),
+                        None => warn!("SCD41 gave no serial number"),
+                    }
+                }
             } else {
                 missing = true;
                 warn!("no SCD41 at 0x{:02X}", scd41::ADDR);
@@ -257,7 +295,29 @@ impl Sensors {
             collect(s, node.sht31, out).await;
         }
         if let Some(s) = self.scd41.as_mut() {
-            collect(s, node.scd41, out).await;
+            if collect(s, node.scd41, out).await {
+                self.scd41_empty_rounds = 0;
+                self.scd41_self_tested = false;
+            } else {
+                self.scd41_empty_rounds = self.scd41_empty_rounds.saturating_add(1);
+                // Once a streak looks like a real fault rather than the usual
+                // warm-up, let the sensor judge itself. Ten seconds, once per
+                // streak — cheap next to the alternative, which is guessing at
+                // wiring and supplies while the sensor knows the answer.
+                if self.scd41_empty_rounds >= SCD41_SELF_TEST_AFTER && !self.scd41_self_tested {
+                    self.scd41_self_tested = true;
+                    match s.self_test().await {
+                        Some(true) => warn!(
+                            "SCD41 self test passed — the sensor believes it is healthy, \
+                             so look at wiring, supply or placement rather than the part"
+                        ),
+                        Some(false) => warn!(
+                            "SCD41 self test reports a malfunction — the part itself is faulty"
+                        ),
+                        None => warn!("SCD41 did not answer its self test"),
+                    }
+                }
+            }
         }
         if let Some(s) = self.sds011.as_mut() {
             collect(s, node.sds011, out).await;
@@ -271,39 +331,48 @@ async fn acks(mut bus: SharedI2c, addr: u8, probe_cmd: u16) -> bool {
     bus.write(addr, &probe_cmd.to_be_bytes()).await.is_ok()
 }
 
-/// Run one sensor and fold its readings into the round's samples.
-async fn collect<S: Sensor>(sensor: &mut S, slot: Slot, out: &mut Samples) {
+/// Run one sensor and fold its readings into the round's samples. Returns
+/// whether it produced anything, so a caller can act on a run of empty rounds.
+async fn collect<S: Sensor>(sensor: &mut S, slot: Slot, out: &mut Samples) -> bool {
     let readings = sensor.measure().await;
     if readings.is_empty() {
-        warn!("{} not responding; skipping its readings", sensor.kind());
-        return;
+        match sensor.fault() {
+            // The driver knows where it fell over. Say that instead: the boot
+            // probe only proves the sensor acknowledges its address, so "not
+            // responding" is actively misleading once it does.
+            Some(why) => warn!("{} {}; skipping its readings", sensor.kind(), why),
+            None => warn!("{} not responding; skipping its readings", sensor.kind()),
+        }
+        return false;
     }
     for reading in readings {
         info!(
             "{}: {}{} = {}",
             sensor.kind(),
-            slot.prefix,
+            slot.prefix_for(reading.key),
             reading.key,
             reading.value
         );
         if out
             .push(Sample {
-                prefix: slot.prefix,
+                prefix: slot.prefix_for(reading.key),
                 reading,
             })
             .is_err()
         {
             warn!("sample buffer full; dropping remaining readings");
-            return;
+            return true;
         }
     }
+    true
 }
 
-/// Append a reading produced outside the [`Sensor`] trait (the HX711 weight and
-/// the DS18B20 temperature, which both need `main`'s state).
+/// Append a reading produced outside the [`Sensor`] trait (the HX711 weight, the
+/// DS18B20 temperature and the battery voltage — all of which need `main`'s
+/// state or its peripherals).
 pub fn push_sample(out: &mut Samples, slot: Slot, key: &'static str, value: heapless::String<16>) {
     let _ = out.push(Sample {
-        prefix: slot.prefix,
+        prefix: slot.prefix_for(key),
         reading: Reading { key, value },
     });
 }
