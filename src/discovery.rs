@@ -725,6 +725,7 @@ mod tests {
     #[test]
     fn a_compensated_sds011_announces_both_the_corrected_and_the_raw_values() {
         let plain = NodeConfig {
+            sht31: Slot::off(),
             sds011: Slot::on(),
             ..crate::node::by_name("kueche").unwrap()
         };

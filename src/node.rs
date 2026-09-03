@@ -349,7 +349,24 @@ const SCHLAFZIMMER: NodeConfig = NodeConfig {
     legacy_weight_topic: None,
 };
 
-/// Same build as [`SCHLAFZIMMER`], same reasoning.
+/// The busiest mains node: the bedroom's pair plus the fleet's particulate
+/// sensor, on both buses at once.
+///
+/// The SDS011 sits here rather than in the kitchen, where the particulates
+/// actually come from, for two reasons. Its optics and fan are open to the air
+/// they measure, and kitchen air carries fat aerosol from frying — that films
+/// the optical path and drifts the calibration without ever failing outright,
+/// which is the same silent-but-plausible failure the SCD41's membrane already
+/// cost us one of. And the question worth a long time series is what reaches
+/// the room people sit in, not that cooking makes smoke.
+///
+/// It also lands where the SHT31 already is, which is what makes the humidity
+/// correction possible at all (see [`Slot::compensated`]).
+///
+/// The three sensors' natural cadences are two orders of magnitude apart, hence
+/// the per-slot period: the base round stays at the SCD41's minute, and the
+/// SDS011 sits out fourteen of every fifteen of them so its ~8000 h fan is not
+/// spent keeping up with the CO₂.
 const WOHNZIMMER: NodeConfig = NodeConfig {
     id: "wohnzimmer",
     name: "Wohnzimmer",
@@ -360,24 +377,28 @@ const WOHNZIMMER: NodeConfig = NodeConfig {
     ds18b20: Slot::off(),
     sht31: Slot::on(),
     scd41: Slot::on_as("scd41_", "SCD41").keeping(&["co2"]),
-    sds011: Slot::off(),
+    sds011: Slot::on().compensated().every(900),
     battery: Slot::off(),
     legacy_weight_topic: None,
 };
 
-/// Kitchen air quality. The SDS011 fan is duty-cycled, so samples are rare by
-/// design: 15 minutes between rounds keeps the ~8000 h fan life plausible.
+/// Kitchen climate — the same build as [`BAD`], and for the same reason: a room
+/// that gets wet on purpose, where the useful signal is humidity and how long it
+/// takes to fall again.
+///
+/// It carried the SDS011 until the particulate sensor moved to
+/// [`WOHNZIMMER`]; see there for why.
 const KUECHE: NodeConfig = NodeConfig {
     id: "kueche",
     name: "Küche",
     namespace: "smarthome",
     power: PowerProfile::Mains,
-    sample_secs: 900,
+    sample_secs: 120,
     scale: Slot::off(),
     ds18b20: Slot::off(),
-    sht31: Slot::off(),
+    sht31: Slot::on(),
     scd41: Slot::off(),
-    sds011: Slot::on(),
+    sds011: Slot::off(),
     battery: Slot::off(),
     legacy_weight_topic: None,
 };

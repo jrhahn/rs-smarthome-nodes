@@ -25,14 +25,14 @@ are *not* the GPIO numbers the datasheet and the firmware use:
 | D0  | 2  | HX711 SCK | `draussen` |
 | D1  | 3  | HX711 DT | `draussen` |
 | D2  | 4  | Battery divider tap (ADC1); a DS18B20 1-Wire line on a node that has one instead | `draussen` |
-| D3  | 5  | UART RX ← SDS011 TX | `kueche` |
-| D4  | 6  | I²C SDA | `draussen`, `schlafzimmer`, `wohnzimmer`, `bad` |
-| D5  | 7  | I²C SCL | `draussen`, `schlafzimmer`, `wohnzimmer`, `bad` |
+| D3  | 5  | UART RX ← SDS011 TX | `wohnzimmer` |
+| D4  | 6  | I²C SDA | every node but none exclusively — `draussen`, `schlafzimmer`, `wohnzimmer`, `kueche`, `bad` |
+| D5  | 7  | I²C SCL | as SDA |
 | D6  | 21 | — **console UART TX** | keep free |
 | D7  | 20 | — **console UART RX** | keep free |
 | D8  | 8  | — | free |
 | D9  | 9  | — **BOOT button** | keep free |
-| D10 | 10 | UART TX → SDS011 RX | `kueche` |
+| D10 | 10 | UART TX → SDS011 RX | `wohnzimmer` |
 
 `D6`/`D7` carry the log output. `D9` is the BOOT button, which the bootloader
 samples at reset — pulling it low with your own wiring puts the board into
@@ -57,10 +57,18 @@ regulated supply), `5V` (tied to USB VBUS — an *output* when USB is plugged in
 
 ---
 
-## `NODE=bad` — SHT31-D only
+## `NODE=bad` / `NODE=kueche` — SHT31-D only
 
 The simplest build, and the right one to start with: four wires and one sensor.
 If this works, the I²C half of every other node works.
+
+Identical hardware; the two names differ only in which room they publish as.
+Both are rooms that get wet on purpose, where the signal worth a long series is
+the humidity and how long it takes to fall again after a shower or a pot.
+
+> The kitchen carried the SDS011 particulate sensor until it moved to
+> `wohnzimmer` — see that section for why, if you are looking at an older build
+> or an older note.
 
 **You need:** XIAO ESP32-C3, SHT31-D breakout, USB-C supply.
 
@@ -83,7 +91,7 @@ has them fitted (usually 10 kΩ); if yours does not, add 4.7 kΩ on each line.
 **Power.** Mains — a USB-C phone charger. This node never sleeps and samples
 every 120 s.
 
-**Expected at boot:**
+**Expected at boot** (`kueche` says `Küche` in place of `Bad`):
 
 ```
 node 'bad' (Bad) booted, mains profile
@@ -113,9 +121,11 @@ straps its address somewhere unexpected.
 
 ---
 
-## `NODE=schlafzimmer` / `NODE=wohnzimmer` — SCD41 **and** SHT31-D
+## `NODE=schlafzimmer` — SCD41 **and** SHT31-D
 
-Identical hardware; the two names differ only in which room they publish as.
+The living room is this build plus a particulate sensor; everything in this
+section applies there too, so read it first and then the `wohnzimmer` section
+for what it adds.
 
 > **Do not peel the white film off the SCD41's metal cap.** It is not a
 > protective sticker or a shipping label — it is the gas-permeable membrane over
@@ -274,13 +284,36 @@ wiring, supply or placement rather than the part
 
 ---
 
-## `NODE=kueche` — SDS011 particulate sensor
+## `NODE=wohnzimmer` — SCD41, SHT31-D **and** SDS011
 
-The only node with a UART, the only one needing 5 V, and the only one with a
-moving part.
+The busiest mains node, and the only one on two buses at once. Build the
+`schlafzimmer` node above first — the I²C half is identical, down to the
+membrane warning and the supply budget — and then add the SDS011.
 
-**You need:** XIAO ESP32-C3, SDS011, USB-C supply that can spare ~100 mA extra
-for the fan.
+**You need:** everything the bedroom node needs, plus an SDS011 and a USB-C
+supply that can spare ~100 mA more for its fan.
+
+### Why the particulate sensor is here and not in the kitchen
+
+The kitchen is where the particulates come from, which makes it the obvious
+place and the wrong one.
+
+The SDS011 is a nephelometer: an open optical path with a fan pulling room air
+through it. Kitchen air carries fat aerosol from frying, and that films the
+optics and the fan blade. The sensor does not fail when this happens — it keeps
+answering, with a calibration that has quietly walked off. That is the same
+shape of failure as the SCD41's membrane, and it is the expensive one, because
+nothing in the log says it is happening.
+
+The second reason is that the interesting question is answerable here and not
+there. That frying makes smoke is not worth a year of data. How much of it
+reaches the room people sit in, and how long it takes to clear, is — and it is
+the number an automation can act on.
+
+It also lands where an SHT31 already is, which is what makes the humidity
+correction below possible at all.
+
+### SDS011 → XIAO
 
 | SDS011 pin | XIAO pad | GPIO | Direction |
 | --- | --- | --- | --- |
@@ -303,35 +336,104 @@ level shifter is needed in either direction. This is what the module's datasheet
 states; if you have a meter, confirming TXD idles at ~3.3 V and not ~5 V before
 connecting it to D3 costs a minute and could save the pin.
 
-**Fan life is the scarce resource.** It is rated around 8000 hours, so the
-firmware keeps it asleep and wakes it only to measure — 15 minutes between
-rounds, and it ends the warm-up as soon as consecutive readings agree rather
-than after a fixed wait. Do not "helpfully" leave it running.
+**Nothing shared with the I²C sensors** but the supply rails. Keep the SDS011's
+own 5V/GND pair away from the run that feeds the SCD41, which has a 146 mΩ
+budget of its own (see the bedroom section) and does not want a fan's current
+steps in it.
 
-**Placement.** Airflow in and out must be unobstructed, and the sensor must stay
-dry: condensation ruins both the reading and the hardware. Not directly over a
-kettle or a hob.
+### Fan life, and the two cadences
 
-**Expected at boot** — nothing about the SDS011, because it is only touched on a
-publish round. What you should *not* see is:
+The fan and laser are rated around 8000 hours, so the firmware keeps them asleep
+and wakes them only to measure. On this node that matters more than it used to,
+because the SCD41 beside it wants a reading a minute and the SDS011 must not
+have one.
+
+So the node has a **base round of 60 s** — the SCD41's and the SHT31's cadence —
+and the SDS011 sits out fourteen of every fifteen of them, giving it one round
+every 15 minutes. That is `Slot::every(900)` in
+[`src/node.rs`](../src/node.rs); Home Assistant is told about both cadences
+separately, so the PM entities are not marked stale during the fourteen minutes
+they are legitimately quiet.
+
+Do not "helpfully" leave the fan running.
+
+### Humidity correction
+
+A nephelometer infers mass from scattered light. Above roughly 60 %RH
+hygroscopic particles take up water and scatter like something bigger than
+their dry selves, so the reported mass runs high — steeply so as the air
+approaches saturation. Without a humidity figure you cannot tell a dusty room
+from a damp one.
+
+Because this node has an SHT31, the firmware corrects for it, using the
+κ-Köhler growth factor:
+
+```text
+C_dry = C_wet / (1 + κ · (RH/100) / (1 − RH/100))
+```
+
+Both values are published: `pm25` / `pm10` are corrected — build automations on
+those — and `pm25_raw` / `pm10_raw` are what the sensor actually said. You need
+the pair to judge the correction, exactly as you need `scd41_temperature` to
+judge the CO₂ sensor's offset.
+
+**κ is a property of your air, not of the sensor.** Published values run from
+about 0.25 to 0.62 for ambient aerosol; indoor aerosol sits at the low end, so
+the default is **0.25** — a starting point, not a calibration. It is a slider in
+Home Assistant (*Feuchte-Korrektur κ*, `smarthome/wohnzimmer/config/sds011_kappa`):
+watch corrected against raw over a few humid days and move it. Setting it to `0`
+turns the correction off and leaves both entities in place.
+
+Two limits worth knowing. Above **95 %RH** the correction is capped — the growth
+factor has a pole at 100 %, and air that wet is fog, where the model's premise
+has stopped holding anyway. And if the SHT31 does not answer in a round, only
+the raw values are published; the corrected ones expire rather than being
+quietly filled with uncorrected numbers.
+
+### Placement
+
+The I²C pair goes as in the bedroom section. The **SDS011 belongs next to the
+SHT31**, close enough that the humidity it is corrected against is the air it
+actually sampled — that is what makes the correction mean anything.
+
+Beyond that: airflow in and out unobstructed, and the sensor must stay dry.
+Condensation ruins both the reading and the hardware.
+
+### Expected at boot
+
+```
+node 'wohnzimmer' (Wohnzimmer) booted, mains profile
+SHT31-D found at 0x44
+SCD41 found at 0x62
+SCD41 serial 0x41AC3D073BD4
+```
+
+Nothing about the SDS011 — it is only touched on a round of its own. What you
+should *not* see is:
 
 ```
 SDS011 UART init failed: ...; sensor disabled
 ```
 
 which means the UART could not be configured at all — a build or pin problem,
-not a wiring one. A sensor that is wired wrong instead shows up per round as:
+not a wiring one. A sensor that is wired wrong instead shows up, once every 15
+minutes, as:
 
 ```
 SDS011 not responding; skipping its readings
 ```
 
-A working round takes 10–30 s from the fan starting, then:
+A working PM round takes 10–30 s from the fan starting, then:
 
 ```
-SDS011: pm25 = 24.5
-SDS011: pm10 = 100.0
+SDS011: pm25_raw = 24.5
+SDS011: pm10_raw = 100.0
+SDS011: pm25 = 18.1
+SDS011: pm10 = 74.1
 ```
+
+The corrected values being *below* the raw ones is the expected direction: the
+correction only ever removes water, never adds particles.
 
 ---
 
@@ -529,9 +631,9 @@ a pin:
 
 | Node | Free pads |
 | --- | --- |
-| `bad` | D0, D1, D2, D3, D8, D10 |
-| `schlafzimmer`, `wohnzimmer` | D0, D1, D2, D3, D8, D10 |
-| `kueche` | D0, D1, D2, D4, D5, D8 |
+| `bad`, `kueche` | D0, D1, D2, D3, D8, D10 |
+| `schlafzimmer` | D0, D1, D2, D3, D8, D10 |
+| `wohnzimmer` | D0, D1, D2, D8 |
 | `draussen` | D3, D8, D10 |
 
 `D6`, `D7` and `D9` are excluded everywhere: console UART and the BOOT button.

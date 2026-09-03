@@ -44,9 +44,9 @@ Everything below is baked in at compile time (see [`.env.example`](.env.example)
 | `NODE=` | Sensors | Power |
 | --- | --- | --- |
 | `draussen` (default) | HX711 + DS18B20 + SHT31-D | battery, deep sleep |
-| `schlafzimmer`, `wohnzimmer` | SCD41 | mains |
-| `kueche` | SDS011 | mains |
-| `bad` | SHT31-D | mains |
+| `schlafzimmer` | SCD41 + SHT31-D | mains |
+| `wohnzimmer` | SCD41 + SHT31-D + SDS011 | mains |
+| `kueche`, `bad` | SHT31-D | mains |
 
 A typo fails the build rather than flashing the wrong personality onto a board:
 
@@ -204,16 +204,23 @@ HX711 raw reading: 8388601
 Entering deep sleep for 2s
 ```
 
-**An air-quality node (`NODE=kueche`, mains)** stays associated and loops:
+**An air-quality node (`NODE=wohnzimmer`, mains)** stays associated and loops.
+Most rounds are the 60 s ones; the SDS011 joins one round in fifteen, which is
+the only time the fan is heard:
 
 ```
-node 'kueche' (Küche) booted, mains profile
+node 'wohnzimmer' (Wohnzimmer) booted, mains profile
 Wi-Fi link up, waiting for DHCP...
 Got IP: 192.168.1.51/24
-SDS011: pm25 = 8.3
-SDS011: pm10 = 12.1
-published Home Assistant discovery for node 'kueche'
-Published 8.3 to smarthome/kueche/pm25
+SHT31-D: temperature = 21.8
+SHT31-D: humidity = 61.4
+SCD41: co2 = 734
+SDS011: pm25_raw = 8.3
+SDS011: pm10_raw = 12.1
+SDS011: pm25 = 6.1
+SDS011: pm10 = 8.9
+published Home Assistant discovery for node 'wohnzimmer'
+Published 6.1 to smarthome/wohnzimmer/pm25
 ```
 
 Weight is published in **grams** (converted on-device from the flash-stored

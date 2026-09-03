@@ -11,10 +11,15 @@ of sensors, selected with `NODE=<name>` at build time.
 | `NODE=` | Node | Sensors | Power profile |
 | --- | --- | --- | --- |
 | `draussen` (default) | Draußen | load cell (HX711) + DS18B20 + SHT31-D | battery, deep-sleep |
-| `schlafzimmer` | Schlafzimmer | SCD41 | mains, always-on |
-| `wohnzimmer` | Wohnzimmer (+ kitchen zone) | SCD41 | mains |
-| `kueche` | Küche | SDS011 | mains (fan) |
+| `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains, always-on |
+| `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 | mains (fan) |
+| `kueche` | Küche | SHT31-D | mains |
 | `bad` | Bad | SHT31-D | mains |
+
+A node's sensors need not share a cadence: `sample_secs` is the base round, and
+a slot may ask for a slower one of its own (`Slot::every`). `wohnzimmer` is the
+case that forced it — a 60 s round for the SCD41, and one round in fifteen for
+the SDS011, whose fan is a ~8000 h consumable.
 
 Per-node wiring — which sensor sits on which pad, with the pull-ups and supply
 notes — is in [wiring.md](wiring.md).
@@ -30,7 +35,14 @@ notes — is in [wiring.md](wiring.md).
 | SDS011 | UART 9600 | PM2.5, PM10 | done (`sensors/sds011.rs`, #15) |
 
 I²C addresses do not clash, so SHT31-D + SCD41 share one bus. SDS011 is the only
-UART sensor. HX711 stays a blocking bit-bang critical section.
+UART sensor, and on `wohnzimmer` it runs alongside that bus. HX711 stays a
+blocking bit-bang critical section.
+
+The SDS011's readings are corrected for humidity where a node also carries an
+SHT31 (`Slot::compensated`): a nephelometer over-reads in damp air, so the
+κ-Köhler growth factor is divided back out and both the corrected and the raw
+values are published. κ is a Home Assistant slider, because it is a property of
+the room's aerosol rather than of the sensor.
 
 > **Bench status:** every driver is implemented and the whole fleet builds, but
 > the I²C/UART drivers have not yet been run against real hardware — the bus

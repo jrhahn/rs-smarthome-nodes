@@ -38,8 +38,8 @@ also be **provisioned** to another identity afterwards, without a rebuild — se
 | --- | --- | --- | --- |
 | `draussen` (default) | Draußen | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
 | `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains |
-| `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D | mains |
-| `kueche` | Küche | SDS011 | mains (fan) |
+| `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 | mains (fan) |
+| `kueche` | Küche | SHT31-D | mains |
 | `bad` | Bad | SHT31-D | mains |
 
 ### Provisioning a board
@@ -76,7 +76,10 @@ provisioning a board never disturbs its tare or scale factor.
 **Power profiles** decide the loop: *battery* nodes cold-boot out of deep sleep,
 measure, publish only when there is something to say, and sleep again. *Mains*
 nodes stay associated and sample on a fixed per-node cadence — CO₂ continuity
-and the SDS011's duty-cycled fan both rule out deep sleep. On a battery node the
+and the SDS011's duty-cycled fan both rule out deep sleep. A sensor whose own
+cadence is slower than the node's round says so per slot (`Slot::every`), which
+is how `wohnzimmer` reads CO₂ every minute while its fan runs four times an
+hour. On a battery node the
 `config/deep_sleep` switch can still hold it awake for bench testing.
 
 ## Hardware
@@ -105,9 +108,10 @@ and the SDS011's duty-cycled fan both rule out deep sleep. On a battery node the
 | D5  | 7  | I²C SCL |
 | D10 | 10 | SDS011 UART TX → sensor RX |
 
-The two I²C sensors share one bus (their addresses do not clash). The SDS011
-deliberately avoids D6/D7 (GPIO21/20), which are the console UART pads the log
-output uses.
+The two I²C sensors share one bus (their addresses do not clash), and on
+`wohnzimmer` that bus runs alongside the SDS011's UART — the only node using
+both. The SDS011 deliberately avoids D6/D7 (GPIO21/20), which are the console
+UART pads the log output uses.
 
 D2 has two possible jobs and can only do one of them: the DS18B20's 1-Wire line,
 or the battery divider's tap. ADC2 is unusable while Wi-Fi is up, and of the
@@ -349,9 +353,9 @@ and its entities without any YAML. Values are ready to use — grams, °C, %, pp
 | Node | State topics |
 | --- | --- |
 | `draussen` | `birds/scale/weight`, `birds/scale/air_temperature`, `birds/scale/air_humidity` (SHT31-D), `birds/scale/battery_voltage` |
-| `schlafzimmer` / `wohnzimmer` | `smarthome/<node>/co2`, `/temperature`, `/humidity` |
-| `kueche` | `smarthome/kueche/pm25`, `/pm10` |
-| `bad` | `smarthome/bad/temperature`, `/humidity` |
+| `schlafzimmer` | `smarthome/schlafzimmer/co2`, `/temperature`, `/humidity` (SHT31-D), `/scd41_temperature`, `/scd41_humidity` |
+| `wohnzimmer` | the same five, plus `/pm25`, `/pm10` (humidity-corrected) and `/pm25_raw`, `/pm10_raw` |
+| `kueche` / `bad` | `smarthome/<node>/temperature`, `/humidity` |
 
 The weight is also mirrored to the pre-discovery `birds/scale/state` topic so an
 existing hand-declared entity keeps working during the migration.
@@ -389,6 +393,8 @@ on / has just left the scale) and persists them. Changes therefore apply with a
 | `active_interval`   | deep-sleep seconds while a bird is present | battery |
 | `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) | battery |
 | `deep_sleep` (switch)  | `0` = stay awake with Wi-Fi up (bench testing on USB), `1` = normal battery deep sleep | battery |
+| `scd41_temp_offset` | °C the SCD41 subtracts for its own self-heating (default 4.0) | with SCD41 |
+| `sds011_kappa`      | κ for the PM humidity correction, `0` disables it (default 0.25) | with a compensated SDS011 |
 
 Only the knobs that do something on a given node are announced: a mains node
 samples on its build-time cadence and never sleeps, so it gets none of them.
