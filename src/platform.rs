@@ -112,6 +112,12 @@ pub struct Sensors {
     /// has already run for this streak (see [`SCD41_SELF_TEST_AFTER`]).
     scd41_empty_rounds: u8,
     scd41_self_tested: bool,
+    /// Base rounds elapsed since boot, so a slot with its own slower cadence
+    /// knows which of them are its own (see [`Slot::rounds_between`]).
+    round: u32,
+    /// κ in hundredths, from the live config, handed to the SDS011 with the
+    /// humidity just before it measures.
+    kappa_centi: u32,
 }
 
 /// Empty SCD41 rounds before the driver asks the sensor to test itself.
@@ -155,7 +161,9 @@ impl Sensors {
                 p.uart_rx,
                 p.uart_tx,
             ) {
-                Ok(uart) => Some(Sds011::new(uart.into_async())),
+                Ok(uart) => {
+                    Some(Sds011::new(uart.into_async()).compensated(node.sds011.compensated))
+                }
                 Err(e) => {
                     warn!("SDS011 UART init failed: {:?}; sensor disabled", e);
                     None
@@ -173,6 +181,8 @@ impl Sensors {
             probed: false,
             scd41_empty_rounds: 0,
             scd41_self_tested: false,
+            round: 0,
+            kappa_centi: crate::sensors::sds011::KAPPA_CENTI_DEFAULT,
         }
     }
 
@@ -183,6 +193,13 @@ impl Sensors {
         if let Some(scd41) = self.scd41.as_mut() {
             scd41.set_temperature_offset(centi);
         }
+    }
+
+    /// Hand the SDS011 its humidity-correction constant from the live config.
+    /// A no-op on a node without one; the humidity itself is picked up inside
+    /// [`Sensors::measure_all`], where the SHT31 has just been read.
+    pub fn set_sds011_kappa(&mut self, centi: u32) {
+        self.kappa_centi = centi;
     }
 
     /// Ask each expected I²C address whether anything is there, and say so in
@@ -291,11 +308,27 @@ impl Sensors {
             self.probe_i2c().await;
         }
 
+        let round = self.round;
+        self.round = self.round.wrapping_add(1);
+
+        // The SHT31 goes first on purpose: a compensated SDS011 further down
+        // needs this round's humidity, and reading it here means the correction
+        // uses air from the same minute rather than the previous round's.
+        let mut humidity = None;
         if let Some(s) = self.sht31.as_mut() {
-            collect(s, node.sht31, out).await;
+            if due(round, node.sht31, &node) {
+                collect(s, node.sht31, out).await;
+                // Only from a round it actually ran: a skipped round would hand
+                // over the previous one's figure, and a correction is only
+                // worth anything against air measured at the same time.
+                humidity = s.last_humidity_tenths();
+            }
         }
         if let Some(s) = self.scd41.as_mut() {
-            if collect(s, node.scd41, out).await {
+            if !due(round, node.scd41, &node) {
+                // Nothing to do this round; leave the empty-round streak alone,
+                // since a skipped round is not a silent sensor.
+            } else if collect(s, node.scd41, out).await {
                 self.scd41_empty_rounds = 0;
                 self.scd41_self_tested = false;
             } else {
@@ -320,9 +353,24 @@ impl Sensors {
             }
         }
         if let Some(s) = self.sds011.as_mut() {
-            collect(s, node.sds011, out).await;
+            if due(round, node.sds011, &node) {
+                if node.sds011.compensated && humidity.is_none() {
+                    warn!(
+                        "no humidity this round; publishing raw PM only —                          the corrected values will expire until the SHT31 answers again"
+                    );
+                }
+                s.set_ambient(humidity, self.kappa_centi);
+                collect(s, node.sds011, out).await;
+            }
         }
     }
+}
+
+/// Whether a slot measures on this base round (see [`Slot::rounds_between`]).
+/// Round 0 is every slot's, so the first publish after a boot is complete
+/// rather than missing whichever sensors happen to be on a slow cadence.
+fn due(round: u32, slot: Slot, node: &node::NodeConfig) -> bool {
+    round % slot.rounds_between(node.sample_secs) == 0
 }
 
 /// Does a device acknowledge `addr`? `probe_cmd` must be a command with no side

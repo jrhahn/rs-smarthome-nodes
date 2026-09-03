@@ -614,6 +614,7 @@ async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) 
     // arriving mid-run: the driver compares against what it last wrote and only
     // touches the bus on a real change.
     board.sensors.set_scd41_offset(cfg.scd41_offset_centi);
+    board.sensors.set_sds011_kappa(cfg.sds011_kappa_centi);
 
     board.sensors.measure_all(&mut samples).await;
     samples

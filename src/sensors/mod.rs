@@ -31,9 +31,10 @@ pub mod scd41;
 pub mod sds011;
 pub mod sht31;
 
-/// Largest number of readings any one sensor emits per measurement (SCD41 emits
-/// CO₂ + temperature + humidity = 3). Sized generously.
-pub const MAX_READINGS: usize = 4;
+/// Largest number of readings any one sensor emits per measurement. The widest
+/// is a humidity-compensated SDS011: PM2.5 and PM10, each both corrected and
+/// raw = 4 (see [`sds011::DESCRIPTORS_COMPENSATED`]). Sized generously.
+pub const MAX_READINGS: usize = 6;
 
 /// One published quantity, already formatted as a float-free ASCII value ready
 /// for MQTT (matching the existing on-device formatting style).
@@ -261,6 +262,7 @@ mod tests {
             sht31::DESCRIPTORS,
             scd41::DESCRIPTORS,
             sds011::DESCRIPTORS,
+            sds011::DESCRIPTORS_COMPENSATED,
             crate::ds18b20::DESCRIPTORS,
             crate::battery::DESCRIPTORS,
         ] {
@@ -271,7 +273,12 @@ mod tests {
 
     #[test]
     fn descriptor_keys_are_unique_within_a_sensor() {
-        for descriptors in [sht31::DESCRIPTORS, scd41::DESCRIPTORS, sds011::DESCRIPTORS] {
+        for descriptors in [
+            sht31::DESCRIPTORS,
+            scd41::DESCRIPTORS,
+            sds011::DESCRIPTORS,
+            sds011::DESCRIPTORS_COMPENSATED,
+        ] {
             for (i, a) in descriptors.iter().enumerate() {
                 for b in &descriptors[i + 1..] {
                     assert_ne!(a.key, b.key);
@@ -289,6 +296,7 @@ mod tests {
             sht31::DESCRIPTORS,
             scd41::DESCRIPTORS,
             sds011::DESCRIPTORS,
+            sds011::DESCRIPTORS_COMPENSATED,
             crate::ds18b20::DESCRIPTORS,
             crate::battery::DESCRIPTORS,
         ] {
@@ -296,11 +304,15 @@ mod tests {
                 assert!(!d.key.is_empty() && !d.name.is_empty());
                 assert!(!d.unit.is_empty() && !d.device_class.is_empty());
                 assert_eq!(d.state_class, "measurement");
-                // Keys end up in MQTT topics.
+                // Keys end up in MQTT topics. Underscore is allowed *within* a
+                // key — a slot prefix already puts one there (`scd41_`), so the
+                // topics contain them either way — but never at an end, which
+                // would produce a doubled or trailing separator.
                 assert!(d
                     .key
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'));
+                assert!(!d.key.starts_with('_') && !d.key.ends_with('_'));
             }
         }
     }

@@ -26,7 +26,7 @@ use embedded_storage::{ReadStorage, Storage};
 use esp_storage::FlashStorage;
 use heapless::String;
 
-use crate::sensors::scd41;
+use crate::sensors::{scd41, sds011};
 
 /// Flash byte-offset of the config blob. Matches the `nvs` partition in
 /// espflash's default table; we only touch the first sector of it.
@@ -47,9 +47,9 @@ const WIFI_OFFSET: u32 = 0xB000;
 /// `"BIRD"` little-endian — marks an initialised blob.
 const MAGIC: u32 = 0x4449_5242;
 /// Bump when the on-flash layout changes; an old version reverts to defaults.
-const VERSION: u8 = 4;
-/// Serialised length: magic(4) + version(1) + pad(3) + nine 4-byte fields + crc(4).
-const BLOB_LEN: usize = 4 + 4 + 4 * 9 + 4;
+const VERSION: u8 = 5;
+/// Serialised length: magic(4) + version(1) + pad(3) + ten 4-byte fields + crc(4).
+const BLOB_LEN: usize = 4 + 4 + 4 * 10 + 4;
 
 /// All runtime-tunable settings. `f32` calibration fields are compared bitwise
 /// for change detection, which is exactly what we want (a re-sent identical
@@ -87,6 +87,12 @@ pub struct Config {
     /// already four times finer than the register resolves. Only consulted on a
     /// node carrying an SCD41 (see [`crate::sensors::scd41`]).
     pub scd41_offset_centi: i32,
+    /// Hygroscopic-growth constant κ in hundredths, for the SDS011's humidity
+    /// correction (see [`crate::sensors::sds011::compensate`]). Tunable at all
+    /// because the right value is a property of the aerosol in *your* rooms
+    /// rather than of the sensor; `0` switches the correction off. Only
+    /// consulted on a node whose SDS011 slot is compensated.
+    pub sds011_kappa_centi: u32,
 }
 
 impl Config {
@@ -109,6 +115,10 @@ impl Config {
         // The sensor's own power-on value, so an un-calibrated node behaves
         // exactly as it did before this knob existed.
         scd41_offset_centi: scd41::DEFAULT_OFFSET_CENTI,
+        // Conservative end of the published range for indoor aerosol; see the
+        // constant's own note on why this is a starting point, not a
+        // calibration.
+        sds011_kappa_centi: sds011::KAPPA_CENTI_DEFAULT,
     };
 
     /// The presence threshold expressed in raw HX711 ticks, i.e. what `main`
@@ -220,6 +230,17 @@ impl Config {
                     }
                 }
             }
+            // Home Assistant sends κ as a plain number ("0.25"); the blob and
+            // the correction want hundredths. Clamped rather than dropped, for
+            // the same reason as the SCD41 offset above: the slider has moved.
+            "sds011_kappa" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    if v.is_finite() && v >= 0.0 {
+                        let centi = (v * 100.0) as u32;
+                        self.sds011_kappa_centi = centi.min(sds011::MAX_KAPPA_CENTI);
+                    }
+                }
+            }
             "tare" => {
                 if !value.is_empty() {
                     // Two ways to ask for a re-zero, both landing here:
@@ -264,8 +285,9 @@ impl Config {
         b[32..36].copy_from_slice(&(self.deep_sleep as u32).to_le_bytes());
         b[36..40].copy_from_slice(&self.heartbeat_secs.to_le_bytes());
         b[40..44].copy_from_slice(&self.scd41_offset_centi.to_le_bytes());
-        let crc = crc32(&b[0..44]);
-        b[44..48].copy_from_slice(&crc.to_le_bytes());
+        b[44..48].copy_from_slice(&self.sds011_kappa_centi.to_le_bytes());
+        let crc = crc32(&b[0..48]);
+        b[48..52].copy_from_slice(&crc.to_le_bytes());
         b
     }
 
@@ -273,7 +295,7 @@ impl Config {
         if u32::from_le_bytes(b[0..4].try_into().ok()?) != MAGIC || b[4] != VERSION {
             return None;
         }
-        if u32::from_le_bytes(b[44..48].try_into().ok()?) != crc32(&b[0..44]) {
+        if u32::from_le_bytes(b[48..52].try_into().ok()?) != crc32(&b[0..48]) {
             return None;
         }
         Some(Config {
@@ -286,6 +308,8 @@ impl Config {
             deep_sleep: u32::from_le_bytes(b[32..36].try_into().ok()?) != 0,
             heartbeat_secs: u32::from_le_bytes(b[36..40].try_into().ok()?),
             scd41_offset_centi: i32::from_le_bytes(b[40..44].try_into().ok()?),
+            sds011_kappa_centi: u32::from_le_bytes(b[44..48].try_into().ok()?)
+                .min(sds011::MAX_KAPPA_CENTI),
         })
     }
 }
@@ -537,6 +561,7 @@ mod tests {
             deep_sleep: false,
             heartbeat_secs: 1234,
             scd41_offset_centi: 245,
+            sds011_kappa_centi: 62,
         }
     }
 
@@ -613,6 +638,23 @@ mod tests {
         assert_eq!(cfg.heartbeat_secs, 900);
         assert!(cfg.apply("deep_sleep", "0", 0));
         assert!(!cfg.deep_sleep);
+        assert!(cfg.apply("sds011_kappa", "0.4", 0));
+        assert_eq!(cfg.sds011_kappa_centi, 40);
+    }
+
+    #[test]
+    fn kappa_is_clamped_to_its_slider_rather_than_dropped() {
+        let mut cfg = Config::DEFAULT;
+        assert!(cfg.apply("sds011_kappa", "9.9", 0));
+        assert_eq!(cfg.sds011_kappa_centi, sds011::MAX_KAPPA_CENTI);
+        // Zero is a legitimate setting: it switches the correction off.
+        assert!(cfg.apply("sds011_kappa", "0", 0));
+        assert_eq!(cfg.sds011_kappa_centi, 0);
+        // Nonsense leaves the last good value alone.
+        for bad in ["-1", "", "off", "NaN"] {
+            assert!(!cfg.apply("sds011_kappa", bad, 0), "{bad}");
+            assert_eq!(cfg.sds011_kappa_centi, 0, "{bad}");
+        }
     }
 
     #[test]

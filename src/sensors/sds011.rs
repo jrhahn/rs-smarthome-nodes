@@ -88,6 +88,127 @@ pub const DESCRIPTORS: &[EntityDescriptor] = &[
     },
 ];
 
+/// The same quantities on a node that corrects them for humidity: the corrected
+/// value keeps the plain key, and the sensor's own figure is published beside it
+/// under `*_raw`.
+///
+/// Both are published for the same reason the SCD41's own temperature is: the
+/// correction below is an empirical model with a tunable constant, and you
+/// cannot judge — or tune — it without seeing what went in. The corrected value
+/// takes the plain key because it is the one to build automations on.
+pub const DESCRIPTORS_COMPENSATED: &[EntityDescriptor] = &[
+    EntityDescriptor {
+        key: "pm25",
+        name: "PM2.5",
+        unit: "µg/m³",
+        device_class: "pm25",
+        state_class: "measurement",
+    },
+    EntityDescriptor {
+        key: "pm10",
+        name: "PM10",
+        unit: "µg/m³",
+        device_class: "pm10",
+        state_class: "measurement",
+    },
+    EntityDescriptor {
+        key: "pm25_raw",
+        name: "PM2.5 (roh)",
+        unit: "µg/m³",
+        device_class: "pm25",
+        state_class: "measurement",
+    },
+    EntityDescriptor {
+        key: "pm10_raw",
+        name: "PM10 (roh)",
+        unit: "µg/m³",
+        device_class: "pm10",
+        state_class: "measurement",
+    },
+];
+
+/// The descriptor set for a slot, depending on whether it is compensated.
+pub const fn descriptors(compensated: bool) -> &'static [EntityDescriptor] {
+    if compensated {
+        DESCRIPTORS_COMPENSATED
+    } else {
+        DESCRIPTORS
+    }
+}
+
+/// Hygroscopic-growth constant κ in **hundredths**, i.e. `25` = 0.25.
+///
+/// The SDS011 is a nephelometer: it infers mass from how much light the
+/// particles scatter. Above roughly 60 %RH hygroscopic particles take up water
+/// and scatter like something bigger than their dry selves, so the reported
+/// mass runs high — steeply so as the air approaches saturation. The standard
+/// correction back to a dry basis is the κ-Köhler growth factor
+///
+/// ```text
+/// C_dry = C_wet / (1 + κ · (RH/100) / (1 − RH/100))
+/// ```
+///
+/// κ is a property of the aerosol, not of the sensor: published values run from
+/// about 0.25 to 0.62 for ambient air, and indoor aerosol — much of it cooking
+/// and textile dust rather than sea salt or sulphate — sits at the low end.
+/// 0.25 is therefore the conservative default, it is **a starting point rather
+/// than a calibration**, and it is tunable from Home Assistant precisely
+/// because the right value is a property of your rooms. Setting it to `0`
+/// disables the correction while leaving both entities in place.
+pub const KAPPA_CENTI_DEFAULT: u32 = 25;
+/// Upper bound on the tunable κ, matching the slider in [`crate::discovery`].
+/// Well above any published aerosol value; the point is to bound the arithmetic,
+/// not to express an opinion.
+pub const MAX_KAPPA_CENTI: u32 = 100;
+/// Relative humidity is clamped here (95.0 %) before it reaches the correction.
+///
+/// The growth factor has a pole at 100 %RH: the denominator goes to zero and
+/// the "corrected" value to zero with it. Air that wet is fog, where the
+/// premise of the model — dry particles that grew — has stopped holding anyway,
+/// so the honest move is to cap the correction rather than to extrapolate into
+/// a singularity. At the cap and κ = 0.25 the factor is about 0.17.
+pub const MAX_RH_TENTHS: i32 = 950;
+
+/// Correct one PM reading to a dry basis. All integers: `tenths` and the result
+/// are tenths of µg/m³, `rh_tenths` is tenths of a percent RH (what
+/// [`super::sht31::rh_tenths`] produces), `kappa_centi` is hundredths.
+///
+/// Rearranged from the growth factor so that it is one rational expression with
+/// no intermediate rounding and no division until the end:
+///
+/// ```text
+/// C_dry = C_wet · 100·(1000 − rh) / (100·(1000 − rh) + κ_centi·rh)
+/// ```
+///
+/// `kappa_centi == 0` returns the input unchanged, which is how the correction
+/// is switched off from Home Assistant.
+pub const fn compensate(tenths: i32, rh_tenths: i32, kappa_centi: u32) -> i32 {
+    if kappa_centi == 0 || tenths <= 0 {
+        return tenths;
+    }
+    let kappa = if kappa_centi > MAX_KAPPA_CENTI {
+        MAX_KAPPA_CENTI
+    } else {
+        kappa_centi
+    } as i64;
+    let rh = if rh_tenths < 0 {
+        0
+    } else if rh_tenths > MAX_RH_TENTHS {
+        MAX_RH_TENTHS
+    } else {
+        rh_tenths
+    } as i64;
+
+    // i64 throughout: the numerator reaches ~1e9 at the sensor's full scale,
+    // which fits an i32 only just, and "only just" is not a property worth
+    // relying on when the alternative costs one soft multiply per round.
+    let dry = 100 * (1000 - rh);
+    let num = tenths as i64 * dry;
+    let den = dry + kappa * rh;
+    // Round to nearest rather than truncating; `den` is >= 5000 here, never 0.
+    ((num + den / 2) / den) as i32
+}
+
 /// Little-endian PM word -> µg/m³ in **tenths** (raw is already tenths of µg/m³).
 pub const fn pm_tenths(lo: u8, hi: u8) -> i32 {
     (hi as i32) * 256 + lo as i32
@@ -157,6 +278,17 @@ pub struct Sds011<U> {
     /// for the same reason as the warm-up — and so a test does not have to sit
     /// through the real thing.
     pub frame_timeout: Duration,
+    /// Whether to publish humidity-corrected values alongside the raw ones.
+    /// Set from the node's slot (see [`crate::node::Slot::compensated`]).
+    compensated: bool,
+    /// κ in hundredths, from the live config (see [`KAPPA_CENTI_DEFAULT`]).
+    kappa_centi: u32,
+    /// Ambient RH in tenths of a percent, handed over by the caller from the
+    /// node's SHT31 just before each round. `None` means the SHT31 did not
+    /// answer this round — in which case the correction is skipped rather than
+    /// applied against a stale figure, because on this node the two sensors
+    /// share a round and a stale humidity is exactly as wrong as no humidity.
+    humidity_tenths: Option<i32>,
 }
 
 #[cfg(feature = "drivers")]
@@ -167,7 +299,24 @@ impl<U: Read + Write> Sds011<U> {
             min_warmup: Duration::from_secs(MIN_WARMUP_SECS),
             max_warmup: Duration::from_secs(MAX_WARMUP_SECS),
             frame_timeout: FRAME_TIMEOUT,
+            compensated: false,
+            kappa_centi: KAPPA_CENTI_DEFAULT,
+            humidity_tenths: None,
         }
+    }
+
+    /// Publish humidity-corrected values as well as raw ones. Called once at
+    /// construction from the node's slot.
+    pub fn compensated(mut self, compensated: bool) -> Self {
+        self.compensated = compensated;
+        self
+    }
+
+    /// Hand over this round's ambient humidity and the live κ. Call before
+    /// [`Sensor::measure`]; `None` skips the correction for this round.
+    pub fn set_ambient(&mut self, humidity_tenths: Option<i32>, kappa_centi: u32) {
+        self.humidity_tenths = humidity_tenths;
+        self.kappa_centi = kappa_centi;
     }
 
     /// Turn the fan + laser on (`true`) or park the sensor (`false`).
@@ -274,7 +423,7 @@ impl<U: Read + Write> Sensor for Sds011<U> {
     }
 
     fn descriptors(&self) -> &'static [EntityDescriptor] {
-        DESCRIPTORS
+        descriptors(self.compensated)
     }
 
     async fn measure(&mut self) -> Vec<Reading, MAX_READINGS> {
@@ -290,10 +439,30 @@ impl<U: Read + Write> Sensor for Sds011<U> {
         // resource here, so it must never be left running by an error path.
         let _ = self.set_work(false).await;
 
-        if let Some(f) = frame {
-            Self::push(&mut out, "pm25", pm_tenths(f[2], f[3]));
-            Self::push(&mut out, "pm10", pm_tenths(f[4], f[5]));
+        let Some(f) = frame else {
+            return out;
+        };
+        let (pm25, pm10) = (pm_tenths(f[2], f[3]), pm_tenths(f[4], f[5]));
+
+        if !self.compensated {
+            Self::push(&mut out, "pm25", pm25);
+            Self::push(&mut out, "pm10", pm10);
+            return out;
         }
+
+        // Raw always goes out — it is what the sensor actually said, and the
+        // only thing that stays comparable if κ is retuned later.
+        Self::push(&mut out, "pm25_raw", pm25);
+        Self::push(&mut out, "pm10_raw", pm10);
+
+        // Without a humidity there is nothing to correct against, so the
+        // corrected entities are left to expire rather than filled with the raw
+        // value under a name that claims otherwise.
+        let Some(rh) = self.humidity_tenths else {
+            return out;
+        };
+        Self::push(&mut out, "pm25", compensate(pm25, rh, self.kappa_centi));
+        Self::push(&mut out, "pm10", compensate(pm10, rh, self.kappa_centi));
         out
     }
 }
@@ -728,5 +897,96 @@ mod tests {
         let values = readings(&mut sensor);
         assert!(Instant::now() - started >= Duration::from_millis(120));
         assert_eq!(values[0], ("pm25", "24.5".to_string()));
+    }
+
+    // --- Humidity compensation ---------------------------------------------
+
+    #[test]
+    fn dry_air_is_left_almost_alone_and_wet_air_is_pulled_down() {
+        // The correction is monotonic in RH: the wetter the air, the more of
+        // the reported mass is water rather than particle.
+        let mut previous = i32::MAX;
+        for rh in [0, 200, 400, 600, 700, 800, 900, 950] {
+            let corrected = compensate(1000, rh, KAPPA_CENTI_DEFAULT);
+            assert!(
+                corrected <= previous,
+                "rh={rh} gave {corrected}, up from {previous}"
+            );
+            assert!(corrected <= 1000, "the correction may only ever reduce");
+            previous = corrected;
+        }
+        // Perfectly dry air has nothing to correct: the growth factor is 1.
+        assert_eq!(compensate(1000, 0, KAPPA_CENTI_DEFAULT), 1000);
+    }
+
+    #[test]
+    fn the_growth_factor_matches_the_formula_by_hand() {
+        // κ = 0.25 at 80 %RH: 1 + 0.25·(0.8/0.2) = 2.0, so half.
+        assert_eq!(compensate(1000, 800, 25), 500);
+        // κ = 0.5 at 50 %RH: 1 + 0.5·1 = 1.5 -> 666.67, rounded to nearest.
+        assert_eq!(compensate(1000, 500, 50), 667);
+        // κ = 0.62 at 90 %RH: 1 + 0.62·9 = 6.58 -> 152.0.
+        assert_eq!(compensate(1000, 900, 62), 152);
+    }
+
+    #[test]
+    fn a_kappa_of_zero_is_how_the_correction_is_switched_off() {
+        for rh in [0, 500, 950, 1000] {
+            assert_eq!(compensate(1234, rh, 0), 1234);
+        }
+    }
+
+    #[test]
+    fn saturated_air_is_capped_rather_than_divided_by_zero() {
+        // The growth factor has a pole at 100 %RH. Anything at or past the cap
+        // must give the cap's answer, and never zero or a negative.
+        let at_cap = compensate(1000, MAX_RH_TENTHS, KAPPA_CENTI_DEFAULT);
+        for rh in [MAX_RH_TENTHS, 980, 1000, 5000] {
+            assert_eq!(compensate(1000, rh, KAPPA_CENTI_DEFAULT), at_cap);
+        }
+        assert!(
+            at_cap > 0,
+            "a correction that reaches zero is not a reading"
+        );
+        // A nonsensical negative humidity is clamped the other way, not
+        // allowed to invert the correction into an amplification.
+        assert_eq!(compensate(1000, -50, KAPPA_CENTI_DEFAULT), 1000);
+    }
+
+    #[test]
+    fn an_out_of_range_kappa_is_clamped_not_obeyed() {
+        assert_eq!(
+            compensate(1000, 800, 10_000),
+            compensate(1000, 800, MAX_KAPPA_CENTI)
+        );
+    }
+
+    #[test]
+    fn full_scale_does_not_overflow() {
+        // The SDS011 tops out at 999.9 µg/m³; the intermediate product is ~1e8,
+        // which is exactly the reason the arithmetic is i64.
+        for rh in [0, 500, MAX_RH_TENTHS] {
+            let out = compensate(9999, rh, MAX_KAPPA_CENTI);
+            assert!((0..=9999).contains(&out), "rh={rh} gave {out}");
+        }
+        assert_eq!(compensate(0, 800, KAPPA_CENTI_DEFAULT), 0);
+    }
+
+    #[test]
+    fn the_compensated_set_keeps_the_plain_keys_for_the_corrected_values() {
+        // Automations bind to `pm25`; that key must stay the corrected one, or
+        // turning compensation on would silently change what they read.
+        let keys: Vec<&str> = DESCRIPTORS_COMPENSATED.iter().map(|d| d.key).collect();
+        assert_eq!(keys, ["pm25", "pm10", "pm25_raw", "pm10_raw"]);
+        let names =
+            |set: &'static [EntityDescriptor]| -> Vec<&str> { set.iter().map(|d| d.key).collect() };
+        assert_eq!(names(descriptors(false)), names(DESCRIPTORS));
+        assert_eq!(names(descriptors(true)), names(DESCRIPTORS_COMPENSATED));
+        // Every raw key mirrors a plain one, so the pair is always comparable.
+        for d in DESCRIPTORS {
+            assert!(DESCRIPTORS_COMPENSATED
+                .iter()
+                .any(|c| c.key == format!("{}_raw", d.key)));
+        }
     }
 }

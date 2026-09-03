@@ -72,18 +72,42 @@ pub const fn rh_tenths(raw: u16) -> i32 {
 pub struct Sht31<I2C> {
     i2c: I2C,
     addr: u8,
+    /// Humidity from the most recent [`Sensor::measure`], in tenths of a
+    /// percent, or `None` if that measurement failed.
+    ///
+    /// Kept because a second sensor on the same node may need it: the SDS011's
+    /// humidity correction reads the room off this one (see
+    /// [`crate::sensors::sds011::compensate`]). It is deliberately the *raw*
+    /// figure rather than the formatted [`Reading`], so the correction does not
+    /// have to parse back a string it just printed.
+    last_rh_tenths: Option<i32>,
 }
 
 #[cfg(feature = "drivers")]
 impl<I2C: I2cBus> Sht31<I2C> {
     /// Driver at the default address (0x44, ADDR low).
     pub fn new(i2c: I2C) -> Self {
-        Self { i2c, addr: ADDR }
+        Self {
+            i2c,
+            addr: ADDR,
+            last_rh_tenths: None,
+        }
     }
 
     /// Driver at an explicit address, for a board that strapped ADDR high.
     pub fn with_address(i2c: I2C, addr: u8) -> Self {
-        Self { i2c, addr }
+        Self {
+            i2c,
+            addr,
+            last_rh_tenths: None,
+        }
+    }
+
+    /// Humidity from the last round, for a sensor that needs it (see
+    /// [`Sht31::last_rh_tenths`]). `None` after a failed measurement, so a
+    /// caller can tell "the room is dry" from "the sensor did not answer".
+    pub fn last_humidity_tenths(&self) -> Option<i32> {
+        self.last_rh_tenths
     }
 
     /// One single-shot conversion -> `(temperature_raw, humidity_raw)`, or
@@ -121,9 +145,11 @@ impl<I2C: I2cBus> Sensor for Sht31<I2C> {
         let mut out = Vec::new();
         // A missing or mis-wired sensor simply contributes nothing; the caller
         // logs it and publishes whatever else answered.
+        self.last_rh_tenths = None;
         if let Some((t_raw, rh_raw)) = self.sample().await {
             Self::push(&mut out, "temperature", temp_tenths(t_raw));
             Self::push(&mut out, "humidity", rh_tenths(rh_raw));
+            self.last_rh_tenths = Some(rh_tenths(rh_raw));
         }
         out
     }

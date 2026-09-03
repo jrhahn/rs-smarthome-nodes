@@ -69,6 +69,27 @@ pub struct Slot {
     /// exactly that case: the SHT31 takes over `temperature` and `humidity`,
     /// while the CO₂ curve carries on under the id it has always had.
     pub unprefixed: &'static [&'static str],
+    /// Seconds between this sensor's own measurements, or `0` to run it on
+    /// every round like everything else.
+    ///
+    /// One node can carry sensors whose natural cadences are an order of
+    /// magnitude apart: an SCD41 wants a reading a minute, while the SDS011's
+    /// fan is a ~8000 h consumable that must not spin more than about four
+    /// times an hour. Before this existed the node had a single `sample_secs`,
+    /// so the two had to be traded off against each other — the fan dragged
+    /// the whole node down to its own cadence. Now [`NodeConfig::sample_secs`]
+    /// is the *base* round, and a slot may sit out rounds it does not need.
+    ///
+    /// Rounded up to a whole number of base rounds (see
+    /// [`Slot::rounds_between`]): the loop only wakes on the base cadence, so
+    /// a period between two multiples would otherwise drift.
+    pub period_secs: u32,
+    /// Whether this sensor's readings are corrected for ambient humidity, and
+    /// its uncorrected values published alongside them (see
+    /// [`crate::sensors::sds011::compensate`]). Only the SDS011 honours it, and
+    /// only a node that also carries an SHT31 may set it — a const assert below
+    /// enforces that, since the correction has nothing to work from otherwise.
+    pub compensated: bool,
 }
 
 impl Slot {
@@ -79,6 +100,8 @@ impl Slot {
             prefix: "",
             label: "",
             unprefixed: &[],
+            period_secs: 0,
+            compensated: false,
         }
     }
 
@@ -91,12 +114,31 @@ impl Slot {
             prefix,
             label,
             unprefixed: &[],
+            period_secs: 0,
+            compensated: false,
         }
     }
 
     /// Exempt these keys from the slot's prefix (see [`Slot::unprefixed`]).
     pub const fn keeping(self, unprefixed: &'static [&'static str]) -> Slot {
         Slot { unprefixed, ..self }
+    }
+
+    /// Run this sensor on its own, slower cadence (see [`Slot::period_secs`]).
+    pub const fn every(self, period_secs: u32) -> Slot {
+        Slot {
+            period_secs,
+            ..self
+        }
+    }
+
+    /// Correct this sensor against the node's SHT31 and publish the raw values
+    /// too (see [`Slot::compensated`]).
+    pub const fn compensated(self) -> Slot {
+        Slot {
+            compensated: true,
+            ..self
+        }
     }
 
     /// Not populated on this node.
@@ -106,6 +148,8 @@ impl Slot {
             prefix: "",
             label: "",
             unprefixed: &[],
+            period_secs: 0,
+            compensated: false,
         }
     }
 
@@ -130,6 +174,34 @@ impl Slot {
 
     fn is_exempt(&self, key: &str) -> bool {
         self.unprefixed.contains(&key)
+    }
+
+    /// How many base rounds this slot sits out between measurements, given the
+    /// node's base cadence. Always at least 1, so a slot with no period of its
+    /// own — or one shorter than a single round — simply runs every time.
+    ///
+    /// Rounds **up**: with a 60 s base and a 900 s period that is every 15th
+    /// round; with a 100 s period it is every second round (200 s), because
+    /// running early would spin the fan more often than asked, and the fan is
+    /// the whole reason the knob exists.
+    pub const fn rounds_between(&self, base_secs: u64) -> u32 {
+        if self.period_secs == 0 {
+            return 1;
+        }
+        let base = if base_secs == 0 { 1 } else { base_secs };
+        let rounds = (self.period_secs as u64).div_ceil(base);
+        if rounds == 0 {
+            1
+        } else {
+            rounds as u32
+        }
+    }
+
+    /// The seconds this slot actually publishes on, i.e. its period rounded to
+    /// whole base rounds. What Home Assistant must expire it against.
+    pub const fn effective_secs(&self, base_secs: u64) -> u64 {
+        let base = if base_secs == 0 { 1 } else { base_secs };
+        base * self.rounds_between(base_secs) as u64
     }
 }
 
@@ -347,6 +419,32 @@ const _: () = {
         assert!(
             !(FLEET[i].1.ds18b20.enabled && FLEET[i].1.battery.enabled),
             "a node cannot carry both a DS18B20 and a battery divider: they share D2"
+        );
+        i += 1;
+    }
+};
+
+// Humidity compensation reads the node's own SHT31 (see `Slot::compensated`).
+// A node asking for it without one would build, then publish a "corrected"
+// value that is simply the raw one — the most misleading outcome available, and
+// exactly the class of silent-but-wrong the fleet has been bitten by before.
+// The flag is also meaningless on any slot but the SDS011, so say that here
+// rather than let it sit in a table looking effective.
+const _: () = {
+    let mut i = 0;
+    while i < FLEET.len() {
+        let n = FLEET[i].1;
+        assert!(
+            !(n.sds011.compensated && !n.sht31.enabled),
+            "humidity compensation needs an SHT31 on the same node to read from"
+        );
+        assert!(
+            !(n.scale.compensated
+                || n.ds18b20.compensated
+                || n.sht31.compensated
+                || n.scd41.compensated
+                || n.battery.compensated),
+            "only the SDS011 slot honours humidity compensation"
         );
         i += 1;
     }
@@ -833,5 +931,62 @@ mod tests {
         let scale = by_name("draussen").unwrap();
         assert_eq!(scale.id, "scale");
         assert_eq!(provision_request("draussen", &scale, false), None);
+    }
+
+    #[test]
+    fn a_slot_with_no_period_of_its_own_runs_every_round() {
+        for base in [1, 60, 120, 900] {
+            assert_eq!(Slot::on().rounds_between(base), 1);
+            assert_eq!(Slot::on().effective_secs(base), base);
+        }
+    }
+
+    #[test]
+    fn a_slow_slot_rounds_up_to_whole_base_rounds() {
+        // The loop only wakes on the base cadence, so a period that is not a
+        // multiple of it has to land somewhere. Up, never down: the fan is the
+        // reason the knob exists, and running it early defeats the purpose.
+        let base = 60;
+        assert_eq!(Slot::on().every(900).rounds_between(base), 15);
+        assert_eq!(Slot::on().every(900).effective_secs(base), 900);
+        assert_eq!(Slot::on().every(100).rounds_between(base), 2);
+        assert_eq!(Slot::on().every(100).effective_secs(base), 120);
+        // A period shorter than one round cannot be honoured; every round is
+        // the closest the loop can get, and it is never *slower* than asked.
+        assert_eq!(Slot::on().every(5).rounds_between(base), 1);
+        assert_eq!(Slot::on().every(60).rounds_between(base), 1);
+        assert_eq!(Slot::on().every(61).rounds_between(base), 2);
+    }
+
+    #[test]
+    fn a_zero_base_never_divides_by_zero() {
+        // `sample_secs` is clamped to at least 1 by the loop, but the table is
+        // hand-written and a 0 there must not take the arithmetic with it.
+        assert_eq!(Slot::on().every(900).rounds_between(0), 900);
+        assert_eq!(Slot::on().effective_secs(0), 1);
+    }
+
+    #[test]
+    fn every_fleet_period_is_a_whole_number_of_base_rounds() {
+        // Otherwise the node publishes on a cadence nobody wrote down: the
+        // table says 900 s and the sensor actually runs every 960.
+        for (name, node) in FLEET {
+            for (what, slot) in [
+                ("sht31", node.sht31),
+                ("scd41", node.scd41),
+                ("sds011", node.sds011),
+            ] {
+                if slot.period_secs == 0 {
+                    continue;
+                }
+                assert_eq!(
+                    slot.effective_secs(node.sample_secs),
+                    slot.period_secs as u64,
+                    "{name}/{what}: {} s does not divide into {} s rounds",
+                    slot.period_secs,
+                    node.sample_secs
+                );
+            }
+        }
     }
 }

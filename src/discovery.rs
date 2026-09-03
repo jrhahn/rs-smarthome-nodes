@@ -74,7 +74,10 @@ const MISSED_ROUNDS: u32 = 3;
 ///   which is *every* dead battery node.
 pub struct Availability {
     pub lwt: bool,
-    pub expire_after: u32,
+    /// Seconds between the node's *base* publish rounds. Not itself an expiry:
+    /// a slot running on its own slower cadence is expired against that
+    /// instead (see [`Availability::expire_for`]).
+    pub period_secs: u32,
 }
 
 /// The availability policy for this node, given the live config (a battery node
@@ -88,7 +91,25 @@ pub fn availability(node: &NodeConfig, cfg: &Config) -> Availability {
     };
     Availability {
         lwt: node.uses_lwt(),
-        expire_after: period.saturating_mul(MISSED_ROUNDS).max(MIN_EXPIRY_SECS),
+        period_secs: period,
+    }
+}
+
+impl Availability {
+    /// How long Home Assistant should wait before invalidating one slot's
+    /// entities.
+    ///
+    /// Per slot rather than per node, because a slot may publish on its own
+    /// slower cadence: the SDS011's fan runs a few times an hour while the
+    /// SCD41 beside it reports every minute. Expiring the PM entities against
+    /// the *node's* round would blank them within three minutes of every
+    /// reading — they would spend almost all their life "unavailable", which
+    /// looks exactly like a broken sensor.
+    pub fn expire_for(&self, slot: Slot) -> u32 {
+        let period = slot
+            .effective_secs(self.period_secs as u64)
+            .min(u32::MAX as u64) as u32;
+        period.saturating_mul(MISSED_ROUNDS).max(MIN_EXPIRY_SECS)
     }
 }
 
@@ -107,7 +128,7 @@ pub fn entities(node: &NodeConfig) -> Vec<Entity, MAX_ENTITIES> {
         (node.ds18b20, ds18b20::DESCRIPTORS),
         (node.sht31, sht31::DESCRIPTORS),
         (node.scd41, scd41::DESCRIPTORS),
-        (node.sds011, sds011::DESCRIPTORS),
+        (node.sds011, sds011::descriptors(node.sds011.compensated)),
         (node.battery, battery::DESCRIPTORS),
     ] {
         if !slot.enabled {
@@ -150,7 +171,7 @@ pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) 
          \"dev_cla\":\"{dev_cla}\",\
          \"stat_cla\":\"{stat_cla}\",\
          \"exp_aft\":{expire},{avty}",
-        expire = avail.expire_after,
+        expire = avail.expire_for(slot),
         // The availability topic is relative to `~`, and only exists on a node
         // whose last-will keeps it honest.
         avty = if avail.lwt {
@@ -279,6 +300,21 @@ const SCD41_CONTROLS: &[Control] = &[Control {
     spec: "\"min\":0,\"max\":20,\"step\":0.05,\"unit_of_meas\":\"°C\",\"mode\":\"box\",",
 }];
 
+/// Knobs that only exist on a node whose SDS011 corrects for humidity.
+///
+/// κ is a property of the aerosol in the room, not of the sensor, so the only
+/// way to arrive at the right value is to compare corrected against raw over a
+/// few humid days and move the slider. That is the same argument as the SCD41's
+/// offset, and it lands in the same place on the device card. `0` disables the
+/// correction without touching the firmware.
+const SDS011_CONTROLS: &[Control] = &[Control {
+    component: "number",
+    key: "sds011_kappa",
+    name: "Feuchte-Korrektur κ",
+    reads_back: true,
+    spec: "\"min\":0,\"max\":1,\"step\":0.01,\"mode\":\"box\",",
+}];
+
 /// Knobs that only do anything on a battery node. A mains node samples on its
 /// build-time cadence and never sleeps, so exposing these would put four dead
 /// controls on its device card.
@@ -320,6 +356,7 @@ pub fn controls(node: &NodeConfig) -> Vec<&'static Control, MAX_CONTROLS> {
         .iter()
         .filter(|_| node.scale.enabled)
         .chain(SCD41_CONTROLS.iter().filter(|_| node.scd41.enabled))
+        .chain(SDS011_CONTROLS.iter().filter(|_| node.sds011.compensated))
         .chain(BATTERY_CONTROLS.iter().filter(|_| node.power.is_battery()))
     {
         let _ = out.push(control);
@@ -386,7 +423,13 @@ const _: () = {
     // The worst case is one node carrying all three groups at once; `controls`
     // returns a fixed-capacity Vec, so overflowing this would silently drop the
     // last entities rather than fail to build.
-    assert!(SCALE_CONTROLS.len() + SCD41_CONTROLS.len() + BATTERY_CONTROLS.len() <= MAX_CONTROLS);
+    assert!(
+        SCALE_CONTROLS.len()
+            + SCD41_CONTROLS.len()
+            + SDS011_CONTROLS.len()
+            + BATTERY_CONTROLS.len()
+            <= MAX_CONTROLS
+    );
 };
 
 #[cfg(test)]
@@ -395,8 +438,8 @@ mod tests {
     // heapless ones, and the tests want the std types.
     use super::{
         availability, config_payload, config_topic, control_payload, control_topic, controls,
-        entities, Availability, Config, NodeConfig, BATTERY_CONTROLS, MIN_EXPIRY_SECS,
-        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS, SCD41_CONTROLS,
+        entities, Availability, Config, NodeConfig, Slot, BATTERY_CONTROLS, MIN_EXPIRY_SECS,
+        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS, SCD41_CONTROLS, SDS011_CONTROLS,
     };
     use crate::node::FLEET;
     use serde_json::Value;
@@ -666,13 +709,67 @@ mod tests {
             } else {
                 node.sample_secs as u32
             };
-            assert_eq!(
-                avail.expire_after,
-                (period * MISSED_ROUNDS).max(MIN_EXPIRY_SECS),
-                "{name}"
-            );
-            assert!(avail.expire_after >= MIN_EXPIRY_SECS);
+            for entity in entities(node) {
+                assert_eq!(
+                    avail.expire_for(entity.slot),
+                    (period * entity.slot.rounds_between(node.sample_secs) * MISSED_ROUNDS)
+                        .max(MIN_EXPIRY_SECS),
+                    "{name}/{}",
+                    entity.desc.key
+                );
+                assert!(avail.expire_for(entity.slot) >= MIN_EXPIRY_SECS);
+            }
         }
+    }
+
+    #[test]
+    fn a_compensated_sds011_announces_both_the_corrected_and_the_raw_values() {
+        let plain = NodeConfig {
+            sds011: Slot::on(),
+            ..crate::node::by_name("kueche").unwrap()
+        };
+        let corrected = NodeConfig {
+            sds011: Slot::on().compensated(),
+            sht31: Slot::on(),
+            ..crate::node::by_name("kueche").unwrap()
+        };
+        let keys =
+            |n: &NodeConfig| -> Vec<&str> { entities(n).iter().map(|e| e.desc.key).collect() };
+        assert_eq!(keys(&plain), ["pm25", "pm10"]);
+        assert_eq!(
+            keys(&corrected),
+            [
+                "temperature",
+                "humidity",
+                "pm25",
+                "pm10",
+                "pm25_raw",
+                "pm10_raw"
+            ]
+        );
+        // And the κ slider appears with the correction, not with the sensor.
+        let control_keys =
+            |n: &NodeConfig| -> Vec<&str> { controls(n).iter().map(|c| c.key).collect() };
+        assert!(!control_keys(&plain).contains(&"sds011_kappa"));
+        assert!(control_keys(&corrected).contains(&"sds011_kappa"));
+    }
+
+    #[test]
+    fn a_slow_slot_is_expired_against_its_own_cadence() {
+        // The whole point of the per-slot period: a sensor that publishes every
+        // 15 minutes must not be expired against the node's 1-minute round, or
+        // it spends 14 of every 15 minutes marked unavailable.
+        let node = NodeConfig {
+            sample_secs: 60,
+            sds011: Slot::on().every(900),
+            ..crate::node::by_name("kueche").unwrap()
+        };
+        let avail = availability(&node, &Config::DEFAULT);
+        assert_eq!(avail.expire_for(node.sds011), 900 * MISSED_ROUNDS);
+        assert_eq!(
+            avail.expire_for(node.sht31),
+            MIN_EXPIRY_SECS.max(60 * MISSED_ROUNDS)
+        );
     }
 
     #[test]
@@ -681,7 +778,10 @@ mod tests {
         let mut cfg = Config::DEFAULT;
         cfg.heartbeat_secs = 1;
         let scale = crate::node::by_name("draussen").unwrap();
-        assert_eq!(availability(&scale, &cfg).expire_after, MIN_EXPIRY_SECS);
+        assert_eq!(
+            availability(&scale, &cfg).expire_for(scale.scale),
+            MIN_EXPIRY_SECS
+        );
     }
 
     // --- Controls -----------------------------------------------------------
@@ -702,6 +802,17 @@ mod tests {
                 assert_eq!(
                     keys.contains(&control.key),
                     node.scd41.enabled,
+                    "{name}: {}",
+                    control.key
+                );
+            }
+            for control in SDS011_CONTROLS {
+                // Gated on `compensated`, not on the SDS011 merely being
+                // present: κ tunes a correction, so on an uncorrected node the
+                // slider would be a knob wired to nothing.
+                assert_eq!(
+                    keys.contains(&control.key),
+                    node.sds011.compensated,
                     "{name}: {}",
                     control.key
                 );
