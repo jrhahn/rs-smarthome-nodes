@@ -899,7 +899,7 @@ mod tests {
         // ...and in the right order: stop, set the offset, then start, so the
         // measurement that follows is the one running on the new offset.
         let order: Vec<&[u8]> = sensor.i2c.writes();
-        let pos = |pred: &dyn Fn(&&[u8]) -> bool| order.iter().position(|w| pred(w));
+        let pos = |pred: &dyn Fn(&&[u8]) -> bool| order.iter().position(pred);
         let stop = pos(&|w| **w == CMD_STOP_PERIODIC.to_be_bytes());
         let set = pos(&|w| w.len() == 5 && w[0..2] == CMD_SET_TEMPERATURE_OFFSET.to_be_bytes());
         let start = pos(&|w| **w == CMD_START_PERIODIC.to_be_bytes());
