@@ -4,10 +4,18 @@
 //! `MSB LSB CRC` guarded by [`crc8_sensirion`](super::crc8_sensirion).
 //!
 //! Two run modes:
-//!   * **periodic** (mains): `start_periodic_measurement` (0x21B1), then read
-//!     `read_measurement` (0xEC05) every ≥5 s. The first sample after the start
-//!     command is only ready after ~5 s, so the first `measure()` on a cold node
-//!     returns nothing and the next one has data.
+//!   * **periodic** (mains): `start_low_power_periodic_measurement` (0x21AC),
+//!     then read `read_measurement` (0xEC05). A fresh sample lands every 30 s.
+//!     The first one is only ready ~30 s after the start command, so the first
+//!     `measure()` on a cold node returns nothing and the next one has data.
+//!
+//!     The *low-power* cadence rather than the 5 s one (0x21B1) on purpose. No
+//!     mains node publishes faster than every 60 s, so the fast cadence threw
+//!     away eleven of every twelve measurements — and paid for them in heat.
+//!     The SCD41 is the warmest part on the board after the ESP, and on
+//!     `schlafzimmer` it was measurably heating the SHT31 sitting next to it:
+//!     pulling it dropped that sensor by 0.5 °C (2026-09-03). Automatic
+//!     self-calibration works the same in either cadence.
 //!   * **single-shot** (battery): `measure_single_shot` (0x219D), wait ~5 s,
 //!     then `read_measurement`. Note: automatic self-calibration (ASC) assumes
 //!     the sensor periodically sees fresh (~400 ppm) air.
@@ -205,13 +213,16 @@ impl Fault {
                 "did not answer read_measurement, or answered with a bad CRC"
             }
             Fault::NoValidSample => "reported 0 ppm, i.e. no valid measurement yet",
-            Fault::Warming => "measurement just started; first conversion takes ~5 s",
+            Fault::Warming => "measurement just started; first conversion takes ~30 s",
         }
     }
 }
 
 /// Whether this node drives the SCD41 in single-shot mode (battery) or
 /// continuous periodic mode (mains). Ties into the power-profile work (#17).
+///
+/// `Periodic` means the **low-power** periodic cadence (one sample per 30 s),
+/// not the 5 s one — see the module docs for why.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Periodic,
@@ -432,13 +443,14 @@ impl<I2C: I2cBus> Scd41<I2C> {
                     // reset, 2026-08-25. Stopping first costs 500 ms once —
                     // `ensure_idle` skips it when `sync_offset` just stopped.
                     self.ensure_idle().await;
-                    if self.command(CMD_START_PERIODIC).await.is_none() {
+                    if self.command(CMD_START_LOW_POWER_PERIODIC).await.is_none() {
                         return self.fail(Fault::StartRejected);
                     }
                     self.started = true;
                     self.known_idle = false;
-                    // The first conversion needs ~5 s; report nothing this round
-                    // rather than blocking the publish path.
+                    // The first conversion needs ~30 s on the low-power
+                    // cadence; report nothing this round rather than blocking
+                    // the publish path.
                     return self.fail(Fault::Warming);
                 }
                 match self.ready().await {
@@ -654,12 +666,28 @@ mod tests {
     fn periodic_mode_starts_the_measurement_and_reports_nothing_yet() {
         use super::super::mock::FakeI2c;
 
-        // The first conversion needs ~5 s. Waiting for it would block the
+        // The first conversion needs ~30 s. Waiting for it would block the
         // publish path, so the round reports nothing and the next one has data.
         let mut sensor = Scd41::new(FakeI2c::new(ADDR, []), Mode::Periodic);
         assert!(readings(&mut sensor).is_empty());
-        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 1);
+        assert_eq!(sent(&sensor, CMD_START_LOW_POWER_PERIODIC), 1);
         assert_eq!(sent(&sensor, CMD_READ_MEASUREMENT), 0);
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn periodic_mode_uses_the_low_power_cadence_not_the_five_second_one() {
+        use super::super::mock::FakeI2c;
+
+        // The regression this guards is thermal, not functional: both commands
+        // produce readings, so nothing here would fail loudly if the fast
+        // cadence came back. It measures every 5 s for a node that publishes
+        // every 60, and the waste heat lands in the SHT31 sitting next to it.
+        let mut sensor = Scd41::new(FakeI2c::new(ADDR, []), Mode::Periodic);
+        let _ = readings(&mut sensor);
+
+        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 0);
+        assert_eq!(sent(&sensor, CMD_START_LOW_POWER_PERIODIC), 1);
     }
 
     #[cfg(feature = "drivers")]
@@ -682,7 +710,7 @@ mod tests {
             .position(|w| *w == CMD_STOP_PERIODIC.to_be_bytes());
         let start = order
             .iter()
-            .position(|w| *w == CMD_START_PERIODIC.to_be_bytes());
+            .position(|w| *w == CMD_START_LOW_POWER_PERIODIC.to_be_bytes());
         assert!(
             stop < start,
             "stop_periodic must precede start_periodic, got {order:?}"
@@ -706,7 +734,7 @@ mod tests {
         for _ in 0..3 {
             let _ = readings(&mut sensor);
         }
-        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 1);
+        assert_eq!(sent(&sensor, CMD_START_LOW_POWER_PERIODIC), 1);
     }
 
     #[cfg(feature = "drivers")]
@@ -823,7 +851,7 @@ mod tests {
             ]
         );
         assert_eq!(sent(&sensor, CMD_MEASURE_SINGLE_SHOT), 1);
-        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 0);
+        assert_eq!(sent(&sensor, CMD_START_LOW_POWER_PERIODIC), 0);
         assert_eq!(sent(&sensor, CMD_GET_DATA_READY), 0);
         assert_eq!(sent(&sensor, CMD_READ_MEASUREMENT), 1);
     }
@@ -894,7 +922,7 @@ mod tests {
         let _ = readings(&mut sensor);
 
         assert_eq!(sent(&sensor, CMD_STOP_PERIODIC), 1);
-        assert_eq!(sent(&sensor, CMD_START_PERIODIC), 1);
+        assert_eq!(sent(&sensor, CMD_START_LOW_POWER_PERIODIC), 1);
 
         // ...and in the right order: stop, set the offset, then start, so the
         // measurement that follows is the one running on the new offset.
@@ -902,7 +930,7 @@ mod tests {
         let pos = |pred: &dyn Fn(&&[u8]) -> bool| order.iter().position(pred);
         let stop = pos(&|w| **w == CMD_STOP_PERIODIC.to_be_bytes());
         let set = pos(&|w| w.len() == 5 && w[0..2] == CMD_SET_TEMPERATURE_OFFSET.to_be_bytes());
-        let start = pos(&|w| **w == CMD_START_PERIODIC.to_be_bytes());
+        let start = pos(&|w| **w == CMD_START_LOW_POWER_PERIODIC.to_be_bytes());
         assert!(stop < set && set < start, "{stop:?} {set:?} {start:?}");
     }
 

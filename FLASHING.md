@@ -240,7 +240,7 @@ omitted, never fatal. What the log says, and what it usually means:
 | `no SHT31-D at 0x44 or 0x45 — check SDA/SCL and the pull-ups` | nothing ACKed on the bus: SDA=D4, SCL=D5, pull-ups present, sensor powered |
 | `SHT31-D found at 0x45 (ADDR strapped high); using it` | nothing — the breakout straps ADDR high and the firmware adopted it |
 | `no SCD41 at 0x62 …` | same bus checks; the SCD41 also needs a solid 3V3 supply, it draws ~200 mA in bursts |
-| `SCD41 found …` but no readings on the first round | expected: the first periodic measurement needs ~5 s, it arrives next round |
+| `SCD41 found …` but no readings on the first round | expected: the first measurement on the low-power periodic cadence needs ~30 s, it arrives next round |
 | `SDS011 not responding; skipping its readings` | UART RX on D3 ← sensor TX, TX on D10 → sensor RX (not swapped), and the sensor on **5 V** |
 
 The `found at 0x…` lines come from a one-shot I²C probe on the first measurement
