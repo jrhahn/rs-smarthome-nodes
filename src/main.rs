@@ -177,19 +177,6 @@ const TARE_KEY: &str = "tare";
 /// (with `DT` pulled up) never becomes ready, so this bounds the boot.
 const HX711_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// How long the HX711's internal filter needs after power-up before a reading
-/// means anything: the datasheet's 400 ms at 10 SPS, which is what the
-/// breakout's `RATE` pin is strapped to.
-///
-/// This is spent in **light sleep**, not awake, and that is the whole point of
-/// powering the amplifier down between polls. The amplifier has to be on for
-/// the settling; the CPU does not. Waiting it out awake would cost ~400 ms at
-/// ~25 mA per poll and give back more than powering the amplifier down saves.
-const HX711_SETTLE_MS: u64 = 400;
-// A `CoreDuration`, not an `embassy_time::Duration`: this one is only ever
-// handed to `light_sleep`, which speaks the RTC wake-source's units.
-const HX711_SETTLE: CoreDuration = CoreDuration::from_millis(HX711_SETTLE_MS);
-
 /// Upper bound on the whole Wi-Fi join + MQTT publish. Without it a failed join
 /// would spin in the high-power state and drain the battery. Sensor sampling
 /// happens before this window, so a slow sensor never eats into it.
@@ -215,19 +202,7 @@ const VISIT_DEPART_SAMPLES: u8 = 3;
 /// Samples taken right after the load first crosses the threshold are dropped:
 /// the bird is still landing and the cell is still ringing, so they would drag
 /// the median toward a weight nothing ever had.
-///
-/// It does double duty now that the amplifier is powered down between polls —
-/// a visit starts by powering it back up, so this window has to cover the
-/// filter's settling as well. The assertion below keeps that true.
-const VISIT_SETTLE_MS: u64 = 400;
-const VISIT_SETTLE: Duration = Duration::from_millis(VISIT_SETTLE_MS);
-
-const _: () = assert!(
-    VISIT_SETTLE_MS >= HX711_SETTLE_MS,
-    "a visit drops its first samples for VISIT_SETTLE, and that window is also \
-     what covers the amplifier's power-up settling; shortening it below \
-     HX711_SETTLE_MS would put unsettled conversions into the weight median"
-);
+const VISIT_SETTLE: Duration = Duration::from_millis(400);
 
 /// Convenience: allocate a `T` with `'static` lifetime from a `StaticCell`.
 macro_rules! mk_static {
@@ -421,34 +396,21 @@ async fn main(spawner: Spawner) {
 
 /// Battery profile: one measurement per cold boot, then straight back to deep
 /// sleep. Never returns.
-/// Why the battery poll loop stopped.
 ///
-/// Every variant ends in exactly one publish, which is not a style choice:
-/// [`publish`] consumes the [`Radio`] peripherals, so a boot gets one and only
-/// one chance to bring the radio up. That is what shapes the loop below — it
-/// polls until it has something worth a connect, and the deep sleep afterwards
-/// exists mainly to hand the next cycle a fresh `Radio`.
-enum PollExit {
-    Arrived {
-        raw: i32,
-        baseline: i32,
-    },
-    Staying {
-        raw: i32,
-        baseline: i32,
-    },
-    Departed {
-        raw: i32,
-        baseline: i32,
-    },
-    /// Nothing happened for a whole heartbeat period. `raw` is `None` when the
-    /// amplifier never answered, so the node still reports in rather than
-    /// staying invisible.
-    Heartbeat {
-        raw: Option<i32>,
-    },
-}
-
+/// The cold boot per poll is the expensive part — ~270 ms of ROM boot and app
+/// init to clock out one 100 ms conversion, which at `idle_secs: 2` is about a
+/// quarter of the node's life. Replacing it with light sleep was tried and
+/// reverted: `Rtc::sleep_light` **resets this chip instead of resuming**,
+/// producing a boot loop of roughly one cycle per sleep, with no output past
+/// the last line before the first sleep (observed on hardware 2026-09-04).
+/// Setting `lslp_mem_inf_fpu` on a hand-built `RtcSleepConfig` — the bit that
+/// holds SRAM up, and the one esp-hal's own `finish_sleep` gates its restore
+/// path on — did not change it. Whatever else the C3 light-sleep path needs in
+/// esp-hal 0.22, that is not all of it.
+///
+/// Anything attempting this again has to be tested with the load cell slot
+/// *enabled*: a node with `scale` off takes the early-out below and never
+/// reaches the poll loop at all, which is exactly how the boot loop shipped.
 async fn run_battery(
     spawner: Spawner,
     radio: Radio,
@@ -457,9 +419,6 @@ async fn run_battery(
     cfg: Config,
 ) -> ! {
     let node = node::active();
-    // One `Rtc` for both sleep depths, so the poll loop can light-sleep and
-    // still deep-sleep at the end.
-    let mut rtc = Rtc::new(lpwr);
 
     // A node with no load cell has no presence logic to run: sample everything
     // it does have, publish, and go back to sleep.
@@ -472,107 +431,57 @@ async fn run_battery(
         // a cell there is nothing to poll, so every wake-up is already a full
         // publish with a Wi-Fi connect in it, and sleeping two seconds between
         // those would spend the whole cell on the radio and nothing else.
-        //
-        // Deep rather than light sleep for the same reason: with nothing to
-        // poll there is no state worth keeping powered between publishes.
-        enter_deep_sleep(&mut rtc, cfg.heartbeat_interval());
+        enter_deep_sleep(lpwr, cfg.heartbeat_interval());
     }
 
-    // The poll loop. Deep sleep used to sit *inside* this, which meant a full
-    // ROM boot and app init — ~270 ms measured — for every 2 s poll, just to
-    // clock out one 100 ms conversion. That overhead, not the radio, was the
-    // node's largest single consumer. Light sleep keeps RAM and the peripherals
-    // powered, so the same poll costs a wake-up instead of a boot, and a cold
-    // boot now happens once per *publish* rather than once per poll.
-    let exit = loop {
-        let Some(raw) = poll_scale(board, &mut rtc).await else {
-            warn!("HX711 not responding; skipping poll");
-            // Still count it. A node whose amplifier has died used to fall
-            // silent entirely — it never reached a publish, so nothing in Home
-            // Assistant said so. Letting the heartbeat fire anyway means the
-            // fault is visible as a node reporting without a weight.
+    let raw = match read_scale(board).await {
+        Some(v) => v,
+        None => {
+            warn!("HX711 not responding; skipping cycle");
+            // Still count it toward the heartbeat. Abandoning the cycle here
+            // meant a node whose amplifier is absent or dead never reached a
+            // publish at all — so it fell silent completely, and nothing in
+            // Home Assistant said anything was wrong. It reports in without a
+            // weight instead, which is a fault someone can see, and it keeps
+            // the other sensors on the board publishing.
             let wakes = state::idle_wakes() + 1;
             if wakes >= cfg.heartbeat_wakes() {
                 state::set_idle_wakes(0);
-                break PollExit::Heartbeat { raw: None };
+                let samples = collect_samples(None, None, &cfg, board).await;
+                let cfg = publish(spawner, radio, &samples, state::baseline(), cfg).await;
+                enter_deep_sleep(lpwr, cfg.idle_interval());
             }
             state::set_idle_wakes(wakes);
-            light_sleep(&mut rtc, cfg.idle_interval());
-            continue;
-        };
-        info!("HX711 raw reading: {}", raw);
-
-        // First boot: establish the tare baseline and keep polling.
-        if !state::is_initialised() {
-            state::set_baseline(raw);
-            state::mark_initialised();
-            info!("tared baseline = {}", raw);
-            light_sleep(&mut rtc, cfg.idle_interval());
-            continue;
+            enter_deep_sleep(lpwr, cfg.idle_interval());
         }
-
-        // Presence decision. The classification itself lives in `presence`,
-        // where it is host-tested; this only decides what to do with each
-        // verdict.
-        let baseline = state::baseline();
-        let was_present = state::bird_present();
-
-        match presence::decide(raw, baseline, was_present, cfg.threshold_ticks()) {
-            presence::Decision::Arrived { delta } => {
-                info!(
-                    "bird arrived: raw={} baseline={} delta={}",
-                    raw, baseline, delta
-                );
-                break PollExit::Arrived { raw, baseline };
-            }
-
-            presence::Decision::Staying { delta } => {
-                info!("load still on the scale: raw={} delta={}", raw, delta);
-                break PollExit::Staying { raw, baseline };
-            }
-
-            presence::Decision::Departed { delta } => {
-                info!("load gone (delta={})", delta);
-                break PollExit::Departed { raw, baseline };
-            }
-
-            // Steady empty: absorb slow creep into the baseline.
-            presence::Decision::Quiet { baseline: drifted } => state::set_baseline(drifted),
-
-            // Something is on the cell that is neither creep nor a visit. The
-            // baseline is left alone on purpose (see `presence::drift_band`),
-            // and saying so is the point: this used to be absorbed in silence.
-            presence::Decision::Unexplained { delta } => warn!(
-                "{} ticks on the scale: too much for creep, too little for a visit. Baseline \
-                 left alone; lower `threshold` if a bird this light should count.",
-                delta
-            ),
-        }
-
-        // Periodic heartbeat: once enough empty polls have elapsed, bring Wi-Fi
-        // up and publish anyway, so Home Assistant keeps a fresh reading even
-        // with no visitor.
-        let wakes = state::idle_wakes() + 1;
-        if wakes >= cfg.heartbeat_wakes() {
-            info!("heartbeat: publishing periodic readings");
-            state::set_idle_wakes(0);
-            break PollExit::Heartbeat { raw: Some(raw) };
-        }
-        state::set_idle_wakes(wakes);
-
-        light_sleep(&mut rtc, cfg.idle_interval());
     };
+    info!("HX711 raw reading: {}", raw);
 
-    // One publish, then a short deep sleep. The sleep is not about saving power
-    // any more — the poll loop above does that — it is how the next cycle gets
-    // a fresh `Radio`, since this one is about to be consumed.
-    match exit {
-        PollExit::Arrived { raw, baseline } => {
+    // First boot: establish the tare baseline and go back to sleep.
+    if !state::is_initialised() {
+        state::set_baseline(raw);
+        state::mark_initialised();
+        info!("tared baseline = {}", raw);
+        enter_deep_sleep(lpwr, cfg.idle_interval());
+    }
+
+    // Presence decision. The classification itself lives in `presence`, where
+    // it is host-tested; this only decides what to do with each verdict.
+    let baseline = state::baseline();
+    let was_present = state::bird_present();
+
+    match presence::decide(raw, baseline, was_present, cfg.threshold_ticks()) {
+        presence::Decision::Arrived { delta } => {
+            info!(
+                "bird arrived: raw={} baseline={} delta={}",
+                raw, baseline, delta
+            );
             state::set_bird_present(true);
 
-            // Watch the whole visit with the CPU awake. This is what turns one
-            // arbitrary conversion per active interval into a settled median,
-            // and one Wi-Fi connect per active interval into one per visit.
+            // Watch the whole visit with the CPU awake instead of deep-sleeping
+            // between samples. This is what turns one arbitrary conversion per
+            // active interval into a settled median, and one Wi-Fi connect per
+            // active interval into one per visit.
             let visit = watch_visit(board, raw, baseline, &cfg).await;
             state::set_bird_present(visit.still_loaded);
 
@@ -584,7 +493,7 @@ async fn run_battery(
             // A load that outlasted the window drops back to the old cheap
             // cadence, so snow on the cell cannot re-arm the awake path forever.
             enter_deep_sleep(
-                &mut rtc,
+                lpwr,
                 if visit.still_loaded {
                     cfg.active_interval()
                 } else {
@@ -593,32 +502,61 @@ async fn run_battery(
             );
         }
 
-        PollExit::Staying { raw, baseline } => {
+        presence::Decision::Staying { delta } => {
             // The load outlasted its awake window, so this is no longer a bird
             // being weighed — just a load being tracked cheaply.
+            info!("load still on the scale: raw={} delta={}", raw, delta);
             let samples = collect_samples(Some(raw), None, &cfg, board).await;
             let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
             state::set_idle_wakes(0);
-            enter_deep_sleep(&mut rtc, cfg.active_interval());
+            enter_deep_sleep(lpwr, cfg.active_interval());
         }
 
-        PollExit::Departed { raw, baseline } => {
-            // Publish one last reading so Home Assistant returns to baseline.
+        presence::Decision::Departed { delta } => {
+            // Reached only when a visit ended while the node was asleep, i.e.
+            // after a `Staying` cycle. Publish one last reading so Home
+            // Assistant returns to baseline, then resume idle polling.
+            info!(
+                "load gone; publishing final reading {} (delta={})",
+                raw, delta
+            );
             state::set_bird_present(false);
             let samples = collect_samples(Some(raw), None, &cfg, board).await;
             let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
             state::set_idle_wakes(0);
-            enter_deep_sleep(&mut rtc, cfg.idle_interval());
+            enter_deep_sleep(lpwr, cfg.idle_interval());
         }
 
-        PollExit::Heartbeat { raw } => {
-            let baseline = state::baseline();
-            let samples = collect_samples(raw, None, &cfg, board).await;
-            let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
-            enter_deep_sleep(&mut rtc, cfg.idle_interval());
-        }
+        // Steady empty: absorb slow creep into the baseline.
+        presence::Decision::Quiet { baseline: drifted } => state::set_baseline(drifted),
+
+        // Something is on the cell that is neither creep nor a visit. The
+        // baseline is left alone on purpose (see `presence::drift_band`), and
+        // saying so is the point: this used to be absorbed in silence.
+        presence::Decision::Unexplained { delta } => warn!(
+            "{} ticks on the scale: too much for creep, too little for a visit. Baseline left \
+             alone; lower `threshold` if a bird this light should count.",
+            delta
+        ),
     }
+
+    // Empty house from here on. Periodic heartbeat: once enough empty polls have
+    // elapsed, bring Wi-Fi up and publish anyway, so Home Assistant keeps a
+    // fresh reading even with no visitor. The counter lives in RTC RAM so it
+    // survives the deep-sleep cold boots between polls.
+    let wakes = state::idle_wakes() + 1;
+    if wakes >= cfg.heartbeat_wakes() {
+        info!("heartbeat: publishing periodic readings");
+        state::set_idle_wakes(0);
+        let samples = collect_samples(Some(raw), None, &cfg, board).await;
+        let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
+        enter_deep_sleep(lpwr, cfg.idle_interval());
+    }
+    state::set_idle_wakes(wakes);
+
+    enter_deep_sleep(lpwr, cfg.idle_interval());
 }
+
 /// What watching one visit through produced.
 struct Visit {
     /// Settled raw reading: the median over the tail of the visit.
@@ -660,9 +598,6 @@ async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Con
         }
     };
 
-    // The poll that detected this left the amplifier powered down.
-    scale.power_up();
-
     let mut window = presence::Window::new();
     let mut below = 0u8;
     let mut last_loaded = started;
@@ -678,19 +613,13 @@ async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Con
             break;
         };
 
-        let settled = Instant::now() >= settled_at;
         if raw.saturating_sub(baseline) >= threshold {
             below = 0;
             last_loaded = Instant::now();
-            if settled {
+            if last_loaded >= settled_at {
                 window.push(raw);
             }
-        } else if settled {
-            // A below-threshold sample only counts toward a departure once the
-            // filter has settled. The amplifier was powered up at the top of
-            // this function and its first conversions can sit anywhere, so
-            // three of them in a row would otherwise end the visit as a false
-            // departure the moment it started.
+        } else {
             below += 1;
             if below >= VISIT_DEPART_SAMPLES {
                 still_loaded = false;
@@ -698,9 +627,6 @@ async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Con
             }
         }
     }
-
-    // Back down for the publish and the polls that follow it.
-    scale.power_down();
 
     let millis = last_loaded.duration_since(started).as_millis();
     // An empty window means the visit was shorter than `VISIT_SETTLE`, so the
@@ -736,13 +662,11 @@ async fn run_awake(
 ) -> ! {
     let node = node::active();
 
-    let mut rtc = Rtc::new(lpwr);
-
     let stack = match bring_up_wifi(spawner, radio).await {
         Ok(s) => s,
         Err(e) => {
             warn!("Wi-Fi bring-up failed ({}); falling back to deep sleep", e);
-            enter_deep_sleep(&mut rtc, cfg.idle_interval());
+            enter_deep_sleep(lpwr, cfg.idle_interval());
         }
     };
 
@@ -814,7 +738,7 @@ async fn run_awake(
         // a mains node has nothing to gain and CO₂/PM continuity to lose).
         if node.power.is_battery() && cfg.deep_sleep {
             info!("deep sleep re-enabled — sleeping");
-            enter_deep_sleep(&mut rtc, cfg.idle_interval());
+            enter_deep_sleep(lpwr, cfg.idle_interval());
         }
 
         Timer::after(Duration::from_secs(sample_period_secs(&cfg))).await;
@@ -836,36 +760,10 @@ fn sample_period_secs(cfg: &Config) -> u64 {
 /// One clean HX711 reading, or `None` if this node has no load cell or the amp
 /// stayed silent. The first sample after power-up settles the internal filter,
 /// so it is discarded.
-///
-/// Used by the mains/bench path, where the amplifier is simply left powered.
-/// The battery path uses [`poll_scale`] instead.
 async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
     let scale = board.scale.as_mut()?;
     let _ = scale.read(HX711_TIMEOUT).await;
     scale.read(HX711_TIMEOUT).await
-}
-
-/// One reading with the amplifier powered only for as long as it takes.
-///
-/// The HX711 and the bridge it excites are the node's largest standing load —
-/// roughly 1.5 mA for the chip plus the excitation current the load cell draws
-/// continuously — and nothing was ever switching them off. `power_down()` and
-/// `power_up()` had been written and documented for exactly this and then never
-/// called, because there was no sleep that retained the pad level. Light sleep
-/// is that sleep.
-///
-/// The settling wait is a sleep rather than a delay, which is what makes the
-/// trade favourable at all: see [`HX711_SETTLE`]. And because 400 ms of
-/// settling is four conversion periods, the reading taken afterwards is more
-/// settled than the discard-one-and-take-the-next that [`read_scale`] does — so
-/// this is not only cheaper but slightly better anchored to the datasheet.
-async fn poll_scale(board: &mut Board<'_>, rtc: &mut Rtc<'_>) -> Option<i32> {
-    let scale = board.scale.as_mut()?;
-    scale.power_up();
-    light_sleep(rtc, HX711_SETTLE);
-    let raw = scale.read(HX711_TIMEOUT).await;
-    scale.power_down();
-    raw
 }
 
 /// Measure everything this node has and format the readings for MQTT.
@@ -1059,29 +957,11 @@ async fn connect_and_publish(
 
 /// Enter RTC-timer deep sleep for `interval`. Never returns — the chip resets
 /// on wake and re-runs `main`.
-fn enter_deep_sleep(rtc: &mut Rtc<'_>, interval: CoreDuration) -> ! {
+fn enter_deep_sleep(lpwr: LPWR, interval: CoreDuration) -> ! {
     info!("Entering deep sleep for {:?}", interval);
+    let mut rtc = Rtc::new(lpwr);
     let wake = TimerWakeupSource::new(interval);
     rtc.sleep_deep(&[&wake]);
-}
-
-/// Enter RTC-timer light sleep for `interval`, and carry on where we left off.
-///
-/// Two properties of light sleep are what the battery poll loop is built on,
-/// and both come from `RtcSleepConfig`'s light-sleep default setting neither
-/// `cpu_pd_en` nor `dig_peri_pd_en` on this chip:
-///
-/// * **TIMG0 keeps counting.** It backs the Embassy time driver
-///   (`esp_hal_embassy::init(timg0.timer0)`), so the executor's clock does not
-///   jump backwards across the sleep and `Timer`/`Instant` stay meaningful.
-///   Deep sleep would take the whole digital domain down with it.
-/// * **GPIO output levels are retained.** That is what lets the amplifier be
-///   parked in power-down across a sleep with an ordinary `Output`, instead of
-///   needing RTC pad hold — the hold was only ever necessary because deep sleep
-///   was the steady state.
-fn light_sleep(rtc: &mut Rtc<'_>, interval: CoreDuration) {
-    let wake = TimerWakeupSource::new(interval);
-    rtc.sleep_light(&[&wake]);
 }
 
 /// Block (async) until the interface reports link-up and DHCP has yielded an

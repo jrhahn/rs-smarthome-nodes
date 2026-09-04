@@ -399,8 +399,8 @@ const BAD: NodeConfig = NodeConfig {
 /// Slots are switched on here as their hardware is actually wired, not before.
 /// A slot enabled early publishes nothing while warning every round, and puts
 /// entities in Home Assistant for parts that do not exist — which reads as a
-/// fault rather than as work in progress. The load cell and the SHT31-D are
-/// fitted; the cell-voltage divider is still to come. Note that D2 carries
+/// fault rather than as work in progress. The SHT31-D is fitted; the load cell
+/// and the cell-voltage divider are still to come. Note that D2 carries
 /// either that divider or a DS18B20, never both, and the divider is the one
 /// that belongs here.
 ///
@@ -421,7 +421,7 @@ const TERRASSE: NodeConfig = NodeConfig {
     power: PowerProfile::Battery,
     // Only consulted by mains nodes; a battery cadence comes from `Config`.
     sample_secs: 60,
-    scale: Slot::on(),
+    scale: Slot::off(),
     ds18b20: Slot::off(),
     sht31: Slot::on(),
     scd41: Slot::off(),
@@ -921,8 +921,8 @@ mod tests {
         // beyond one more entity: the divider shares D2 with a DS18B20, and a
         // probe on a node that also wants cell voltage fails the build.
         let outdoor = by_name("terrasse").unwrap();
-        assert!(outdoor.scale.enabled);
         assert!(outdoor.sht31.enabled);
+        assert!(!outdoor.scale.enabled);
         assert!(!outdoor.battery.enabled);
         assert!(!outdoor.ds18b20.enabled);
 
