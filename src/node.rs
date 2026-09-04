@@ -394,32 +394,26 @@ const BAD: NodeConfig = NodeConfig {
     legacy_weight_topic: None,
 };
 
-/// The terrace: the outdoor node, and the one the bird-feeder scale goes on.
-/// Still being wired up — the board is mounted and on the network, but no
-/// sensors are attached to it yet.
+/// The terrace: the outdoor node, carrying the bird-feeder scale.
 ///
-/// Every slot is off deliberately. A slot enabled before its hardware exists
-/// publishes nothing and only produces "not responding" warnings on every
-/// round, so the sensors are switched on here as they actually arrive — which
-/// is also the moment their discovery entities should appear in Home Assistant
-/// rather than earlier. When the load cell goes on, this is where `scale`,
-/// `sht31` and `battery` get turned on; note that D2 carries either the
-/// battery divider or a DS18B20, never both, and the divider is the one that
-/// belongs here.
+/// Slots are switched on here as their hardware is actually wired, not before.
+/// A slot enabled early publishes nothing while warning every round, and puts
+/// entities in Home Assistant for parts that do not exist — which reads as a
+/// fault rather than as work in progress. The load cell and the SHT31-D are
+/// fitted; the cell-voltage divider is still to come. Note that D2 carries
+/// either that divider or a DS18B20, never both, and the divider is the one
+/// that belongs here.
 ///
-/// It replaced a node called `draussen`, which published to `birds/scale/...`
-/// and carried an `air_` prefix on its SHT31 to leave the plain `temperature`
-/// key to a probe it no longer had. Both were kept alive purely so an existing
-/// Home Assistant history would not be orphaned. That history was deliberately
-/// let go when the node was renamed, so neither carries over: this node is in
-/// the fleet's own namespace like every other, and when its SHT31 is switched
-/// on it should simply own `temperature` and `humidity`.
+/// The SHT31-D owns the plain `temperature` and `humidity` keys, with no
+/// prefix. This node replaced one called `draussen`, which published to
+/// `birds/scale/...` and put its SHT31 behind an `air_` prefix to leave those
+/// keys to a DS18B20 that had not been fitted for a long time. Both the
+/// namespace and the prefix outlived their reasons purely because changing
+/// them would have orphaned history in Home Assistant. That history was let go
+/// with the rename, so neither carries over — and with no probe on this node,
+/// there is nothing for the plain keys to collide with.
 ///
-/// Battery, like the feeder it replaces, so it needs no cable run outside.
-/// Having no load cell *yet* is what makes this the first battery node with no
-/// presence logic to run: with nothing to poll for, every wake-up is a full
-/// publish, so `main` sleeps [`crate::config::Config::heartbeat_interval`]
-/// between them rather than the load-cell idle interval.
+/// Battery, so it needs no cable run outside.
 const TERRASSE: NodeConfig = NodeConfig {
     id: "terrasse",
     name: "Terrasse",
@@ -427,9 +421,9 @@ const TERRASSE: NodeConfig = NodeConfig {
     power: PowerProfile::Battery,
     // Only consulted by mains nodes; a battery cadence comes from `Config`.
     sample_secs: 60,
-    scale: Slot::off(),
+    scale: Slot::on(),
     ds18b20: Slot::off(),
-    sht31: Slot::off(),
+    sht31: Slot::on(),
     scd41: Slot::off(),
     sds011: Slot::off(),
     battery: Slot::off(),
@@ -921,23 +915,27 @@ mod tests {
     }
 
     #[test]
-    fn the_outdoor_node_announces_nothing_before_its_hardware_exists() {
-        // The board is mounted and on the network with no sensors on it. A
-        // slot switched on early would publish nothing while warning every
-        // round, and would put entities in Home Assistant for hardware that
-        // is not there — which is worse than an empty device, because it
-        // looks like a fault rather than like work in progress.
+    fn the_outdoor_node_only_claims_hardware_it_has() {
+        // Slots go on as parts are wired. What is guarded here is the pair
+        // that is *not* fitted yet, because enabling either has consequences
+        // beyond one more entity: the divider shares D2 with a DS18B20, and a
+        // probe on a node that also wants cell voltage fails the build.
         let outdoor = by_name("terrasse").unwrap();
-        for slot in [
-            outdoor.scale,
-            outdoor.ds18b20,
-            outdoor.sht31,
-            outdoor.scd41,
-            outdoor.sds011,
-            outdoor.battery,
-        ] {
-            assert!(!slot.enabled);
-        }
+        assert!(outdoor.scale.enabled);
+        assert!(outdoor.sht31.enabled);
+        assert!(!outdoor.battery.enabled);
+        assert!(!outdoor.ds18b20.enabled);
+
+        // No prefix. The `air_` its predecessor used existed only to leave
+        // these keys to a probe, and there is no probe here — re-adding it
+        // would put the entities somewhere nobody is looking.
+        assert_eq!(outdoor.sht31.prefix, "");
+        assert_eq!(
+            outdoor
+                .state_topic(outdoor.sht31.prefix_for("temperature"), "temperature")
+                .as_str(),
+            "smarthome/terrasse/temperature"
+        );
     }
 
     // --- Provisioning -------------------------------------------------------
