@@ -399,10 +399,15 @@ const BAD: NodeConfig = NodeConfig {
 /// Slots are switched on here as their hardware is actually wired, not before.
 /// A slot enabled early publishes nothing while warning every round, and puts
 /// entities in Home Assistant for parts that do not exist — which reads as a
-/// fault rather than as work in progress. The SHT31-D is fitted; the load cell
-/// and the cell-voltage divider are still to come. Note that D2 carries
-/// either that divider or a DS18B20, never both, and the divider is the one
-/// that belongs here.
+/// fault rather than as work in progress. The load cell, the SHT31-D and the
+/// cell-voltage divider are all fitted. D2 carries either that divider or a
+/// DS18B20, never both — the DS18B20 is gone from this node for good, and the
+/// divider has the pin.
+///
+/// The divider keeps a `battery_` prefix where the SHT31-D lost its `air_`
+/// one, and the difference is deliberate: `air_` existed to dodge a key
+/// collision that no longer exists, while `battery_` is a label. A bare
+/// `voltage` entity in Home Assistant does not say whose.
 ///
 /// The SHT31-D owns the plain `temperature` and `humidity` keys, with no
 /// prefix. This node replaced one called `draussen`, which published to
@@ -421,12 +426,12 @@ const TERRASSE: NodeConfig = NodeConfig {
     power: PowerProfile::Battery,
     // Only consulted by mains nodes; a battery cadence comes from `Config`.
     sample_secs: 60,
-    scale: Slot::off(),
+    scale: Slot::on(),
     ds18b20: Slot::off(),
     sht31: Slot::on(),
     scd41: Slot::off(),
     sds011: Slot::off(),
-    battery: Slot::off(),
+    battery: Slot::on_as("battery_", "Batterie"),
     legacy_weight_topic: None,
 };
 
@@ -922,8 +927,8 @@ mod tests {
         // probe on a node that also wants cell voltage fails the build.
         let outdoor = by_name("terrasse").unwrap();
         assert!(outdoor.sht31.enabled);
-        assert!(!outdoor.scale.enabled);
-        assert!(!outdoor.battery.enabled);
+        assert!(outdoor.scale.enabled);
+        assert!(outdoor.battery.enabled);
         assert!(!outdoor.ds18b20.enabled);
 
         // No prefix. The `air_` its predecessor used existed only to leave
