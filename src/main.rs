@@ -177,6 +177,19 @@ const TARE_KEY: &str = "tare";
 /// (with `DT` pulled up) never becomes ready, so this bounds the boot.
 const HX711_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// How long the HX711's internal filter needs after power-up before a reading
+/// means anything: the datasheet's 400 ms at 10 SPS, which is what the
+/// breakout's `RATE` pin is strapped to.
+///
+/// This is spent in **light sleep**, not awake, and that is the whole point of
+/// powering the amplifier down between polls. The amplifier has to be on for
+/// the settling; the CPU does not. Waiting it out awake would cost ~400 ms at
+/// ~25 mA per poll and give back more than powering the amplifier down saves.
+const HX711_SETTLE_MS: u64 = 400;
+// A `CoreDuration`, not an `embassy_time::Duration`: this one is only ever
+// handed to `light_sleep`, which speaks the RTC wake-source's units.
+const HX711_SETTLE: CoreDuration = CoreDuration::from_millis(HX711_SETTLE_MS);
+
 /// Upper bound on the whole Wi-Fi join + MQTT publish. Without it a failed join
 /// would spin in the high-power state and drain the battery. Sensor sampling
 /// happens before this window, so a slow sensor never eats into it.
@@ -202,7 +215,19 @@ const VISIT_DEPART_SAMPLES: u8 = 3;
 /// Samples taken right after the load first crosses the threshold are dropped:
 /// the bird is still landing and the cell is still ringing, so they would drag
 /// the median toward a weight nothing ever had.
-const VISIT_SETTLE: Duration = Duration::from_millis(400);
+///
+/// It does double duty now that the amplifier is powered down between polls —
+/// a visit starts by powering it back up, so this window has to cover the
+/// filter's settling as well. The assertion below keeps that true.
+const VISIT_SETTLE_MS: u64 = 400;
+const VISIT_SETTLE: Duration = Duration::from_millis(VISIT_SETTLE_MS);
+
+const _: () = assert!(
+    VISIT_SETTLE_MS >= HX711_SETTLE_MS,
+    "a visit drops its first samples for VISIT_SETTLE, and that window is also \
+     what covers the amplifier's power-up settling; shortening it below \
+     HX711_SETTLE_MS would put unsettled conversions into the weight median"
+);
 
 /// Convenience: allocate a `T` with `'static` lifetime from a `StaticCell`.
 macro_rules! mk_static {
@@ -460,7 +485,7 @@ async fn run_battery(
     // powered, so the same poll costs a wake-up instead of a boot, and a cold
     // boot now happens once per *publish* rather than once per poll.
     let exit = loop {
-        let Some(raw) = read_scale(board).await else {
+        let Some(raw) = poll_scale(board, &mut rtc).await else {
             warn!("HX711 not responding; skipping poll");
             // Still count it. A node whose amplifier has died used to fall
             // silent entirely — it never reached a publish, so nothing in Home
@@ -635,6 +660,9 @@ async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Con
         }
     };
 
+    // The poll that detected this left the amplifier powered down.
+    scale.power_up();
+
     let mut window = presence::Window::new();
     let mut below = 0u8;
     let mut last_loaded = started;
@@ -650,13 +678,19 @@ async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Con
             break;
         };
 
+        let settled = Instant::now() >= settled_at;
         if raw.saturating_sub(baseline) >= threshold {
             below = 0;
             last_loaded = Instant::now();
-            if last_loaded >= settled_at {
+            if settled {
                 window.push(raw);
             }
-        } else {
+        } else if settled {
+            // A below-threshold sample only counts toward a departure once the
+            // filter has settled. The amplifier was powered up at the top of
+            // this function and its first conversions can sit anywhere, so
+            // three of them in a row would otherwise end the visit as a false
+            // departure the moment it started.
             below += 1;
             if below >= VISIT_DEPART_SAMPLES {
                 still_loaded = false;
@@ -664,6 +698,9 @@ async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Con
             }
         }
     }
+
+    // Back down for the publish and the polls that follow it.
+    scale.power_down();
 
     let millis = last_loaded.duration_since(started).as_millis();
     // An empty window means the visit was shorter than `VISIT_SETTLE`, so the
@@ -799,10 +836,36 @@ fn sample_period_secs(cfg: &Config) -> u64 {
 /// One clean HX711 reading, or `None` if this node has no load cell or the amp
 /// stayed silent. The first sample after power-up settles the internal filter,
 /// so it is discarded.
+///
+/// Used by the mains/bench path, where the amplifier is simply left powered.
+/// The battery path uses [`poll_scale`] instead.
 async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
     let scale = board.scale.as_mut()?;
     let _ = scale.read(HX711_TIMEOUT).await;
     scale.read(HX711_TIMEOUT).await
+}
+
+/// One reading with the amplifier powered only for as long as it takes.
+///
+/// The HX711 and the bridge it excites are the node's largest standing load —
+/// roughly 1.5 mA for the chip plus the excitation current the load cell draws
+/// continuously — and nothing was ever switching them off. `power_down()` and
+/// `power_up()` had been written and documented for exactly this and then never
+/// called, because there was no sleep that retained the pad level. Light sleep
+/// is that sleep.
+///
+/// The settling wait is a sleep rather than a delay, which is what makes the
+/// trade favourable at all: see [`HX711_SETTLE`]. And because 400 ms of
+/// settling is four conversion periods, the reading taken afterwards is more
+/// settled than the discard-one-and-take-the-next that [`read_scale`] does — so
+/// this is not only cheaper but slightly better anchored to the datasheet.
+async fn poll_scale(board: &mut Board<'_>, rtc: &mut Rtc<'_>) -> Option<i32> {
+    let scale = board.scale.as_mut()?;
+    scale.power_up();
+    light_sleep(rtc, HX711_SETTLE);
+    let raw = scale.read(HX711_TIMEOUT).await;
+    scale.power_down();
+    raw
 }
 
 /// Measure everything this node has and format the readings for MQTT.

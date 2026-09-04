@@ -68,20 +68,26 @@ impl<DT: InputPin, SCK: OutputPin, D: DelayNs> Hx711<DT, SCK, D> {
 
     /// Put the HX711 into its ~0.3 µA power-down state by parking `PD_SCK` high.
     ///
-    /// NOTE: on the ESP32-C3 the pad level is *not* retained across deep sleep
-    /// unless RTC GPIO hold is enabled, so this only saves power while the MCU
-    /// stays awake. Enabling hold on `SCK` to keep the chip powered down through
-    /// deep sleep is the follow-up battery optimisation (see issue #5).
-    #[allow(dead_code)]
+    /// The parked level survives **light** sleep, because that keeps the GPIO
+    /// matrix powered — which is what makes this worth calling between polls
+    /// (see `run_battery`). It does *not* survive deep sleep: the pad goes
+    /// high-impedance and `PD_SCK` is left to leakage, so the amplifier's state
+    /// there is undefined rather than powered down. Holding it through deep
+    /// sleep needs RTC pad hold on `SCK` (issue #5) and is not done, because
+    /// deep sleep is no longer the steady state — it now lasts one poll
+    /// interval per publish, so what the amplifier does during it barely
+    /// registers.
     pub fn power_down(&mut self) {
         let _ = self.sck.set_low();
         let _ = self.sck.set_high();
         self.delay.delay_us(POWER_DOWN_US);
     }
 
-    /// Wake the HX711 from power-down. The next conversion needs the internal
-    /// filter to settle, so the first `read` afterwards should be discarded.
-    #[allow(dead_code)]
+    /// Wake the HX711 from power-down.
+    ///
+    /// The internal filter needs to settle afterwards — the datasheet gives
+    /// 400 ms at the 10 SPS the breakout is strapped to. Callers must wait that
+    /// out before trusting a reading; `HX711_SETTLE` in `main` is that wait.
     pub fn power_up(&mut self) {
         let _ = self.sck.set_low();
     }

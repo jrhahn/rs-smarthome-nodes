@@ -10,8 +10,10 @@ auto-discovery** — no hand-declared entities.
 It started as a battery bird-feeder scale, which is still the default node
 (`NODE=draussen`): on each wake-up it reads a load cell via an HX711 amplifier
 and compares it against a tare baseline kept in RTC RAM. While the feeder is
-empty it drops back into deep sleep for a couple of seconds — no radio — which
-bounds how short a visit it can see at all. Once weight crosses the threshold it
+empty it polls every couple of seconds from **light** sleep — no radio, and no
+cold boot per poll — which bounds how short a visit it can see at all. The
+amplifier is powered down between those polls, and its settling time after
+power-up is waited out asleep rather than awake. Once weight crosses the threshold it
 stops sleeping and **watches the visit through awake**, so the published weight
 is a settled median rather than whichever conversion happened to land first, and
 the visit gets a real duration instead of one rounded to the sleep interval;
@@ -220,7 +222,7 @@ until ~2.4 V, far past where a LiPo starts losing capacity for good.
 | Config / calibration | [`src/config.rs`](src/config.rs) — calibration + tuning in a CRC-guarded flash blob (`esp-storage`), loaded at boot, updated from retained MQTT while online |
 | Wi-Fi + TCP/IP     | `esp-wifi` (STA + DHCP) + `embassy-net`, background `net_task`     |
 | MQTT               | `rust-mqtt` (embedded-async, MQTT v5) over an `embassy-net` socket |
-| Power management   | `esp_hal::rtc_cntl` RTC-timer deep sleep; short idle poll while empty, awake for the length of a visit, `active_interval` only for a load that outstays it |
+| Power management   | `esp_hal::rtc_cntl` RTC-timer sleep — light sleep between idle polls (one cold boot per publish, not per poll), HX711 powered down in between, awake for the length of a visit, `active_interval` only for a load that outstays it |
 
 The HX711 read cycle is deliberately a short **blocking** critical section:
 the datasheet forbids a single clock-high pulse longer than 60 µs (it would put

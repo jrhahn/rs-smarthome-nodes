@@ -153,6 +153,46 @@ short-visit coverage, and nothing in the firmware can make that trade for you.
 The published visit duration is a **lower bound** for the same reason: the
 arrival is only known to within one idle interval.
 
+### Where the battery actually goes
+
+The node was built around "deep sleep is free, the radio is expensive", and
+that turned out to have the ranking backwards. Two things dominated instead,
+and neither was the radio.
+
+**The boot overhead.** Deep sleep sat inside the poll loop, so a 2 s idle poll
+cost a full ROM boot plus app init — 269 ms measured — to clock out one 100 ms
+conversion. At `idle_secs: 2` that is roughly a quarter of the node's life
+spent booting, against the ~18 s an hour the radio was actually up. The polls
+now run inside one boot with light sleep between them, so a cold boot happens
+once per *publish*: about six an hour rather than eighteen hundred.
+
+**The amplifier.** The HX711 and the bridge it excites draw continuously —
+about 1.5 mA for the chip plus whatever the load cell's bridge takes, which for
+a 1 kΩ cell at ~3.2 V excitation is another ~3 mA. `power_down()` and
+`power_up()` had been written, documented and then never called, because there
+was no sleep that retained the pad level: in deep sleep the pad goes
+high-impedance and `PD_SCK` is left to leakage, which is also why the
+amplifier's deep-sleep current was never a known quantity. The amplifier is now
+powered down between polls, and the datasheet's 400 ms settling wait after
+power-up is spent *in light sleep* rather than awake — the amplifier needs to be
+on for it, the CPU does not, and waiting it out awake would have cost more than
+the power-down saves.
+
+The two changes compose: light sleep is what makes the power-down possible,
+because it retains GPIO output levels. RTC pad hold on `SCK` (issue #5) was only
+ever necessary because deep sleep was the steady state. It no longer is — deep
+sleep now lasts one poll interval per publish, purely so the next cycle gets a
+fresh `Radio`, since `publish` consumes it.
+
+**These are estimates, not measurements.** The only measured figure in the
+paragraphs above is the 269 ms boot time, read off a real serial log. The
+current figures come from datasheets, and the two that would move the answer
+most are the load cell's bridge resistance — a 350 Ω cell triples that term —
+and the light-sleep current with this chip's `RtcSleepConfig` default, which
+keeps the digital domain powered and so does not match the datasheet's headline
+light-sleep number. A multimeter in series with the cell, once asleep and once
+awake, settles both.
+
 ## MQTT auto-discovery (#16)
 
 On the first connect after a power-up, each node publishes one retained
