@@ -193,6 +193,89 @@ keeps the digital domain powered and so does not match the datasheet's headline
 light-sleep number. A multimeter in series with the cell, once asleep and once
 awake, settles both.
 
+### Radio options, parked behind a measurement
+
+Two further battery ideas are on the table. **Neither should be started before
+the measurement above exists**, and that is the whole reason they are written
+down here rather than built: both of them optimise the radio, and on this node
+the radio is the term everybody suspects first and the smallest one that
+matters.
+
+Against the estimated budget the radio is roughly **17 %** — about 0.55 mA of
+~3.3 mA, from six connects an hour at ~3 s and ~110 mA. Driving it to *zero*
+therefore caps out near **1.2×** runtime. Any proposal promising more than that
+is either counting a different budget or assuming a different failure rate.
+
+Which is the one case that changes the ranking: `WIFI_BUDGET` is **20 s**, the
+bound on a join that never completes. If joins here are routinely slow or
+failing, six of those an hour is ~3.7 mA and the radio genuinely does dominate.
+So the measurement has to answer two questions, not one:
+
+1. **What is the standing current**, asleep and awake — which settles whether
+   the amplifier and the light-sleep floor are where the estimate puts them.
+2. **How long does a real connect take**, from wake to `Entering deep sleep`.
+   The serial log timestamps this for free. If it is seconds, the table above
+   holds and neither option below is worth much. If it regularly approaches
+   `WIFI_BUDGET`, go straight to option A.
+
+#### Option A — static address plus a cached BSSID and channel
+
+`ClientConfiguration` is built with `..Default::default()`, so `bssid` and
+`channel` are both `None` and every join pays a full scan across all channels;
+the stack then pays DHCP on top (`NetConfig::dhcpv4`). Caching the AP's BSSID
+and channel in RTC RAM next to the tare baseline, and configuring a static
+address, removes both. Estimated to recover a good half of what the radio costs,
+for two more `#[ram(rtc_fast, persistent)]` words and a fallback path.
+
+It needs no gateway, no second protocol and no change to the data model, and
+its failure mode is benign: a stale cached channel falls back to the full scan
+and the node connects anyway.
+
+#### Option B — ESP-NOW to a mains-powered gateway
+
+Connectionless frames on the Wi-Fi PHY: no association, no handshake, no IP,
+250 bytes per packet. `esp-wifi` 0.11 gates it behind `esp-now = ["wifi"]` and
+we already enable `wifi`, so it is a feature flag on a crate already in the
+tree — no new dependency. A mains node would receive and republish to MQTT.
+
+It would shorten the expensive window from seconds to milliseconds, and it
+removes the 20 s worst case entirely. The costs are architectural rather than
+incidental, and three of them are specific to this fleet:
+
+- **The gateway conflicts with the self-heating fix.** A gateway has to listen
+  continuously on-channel, so it cannot run modem sleep — and the obvious
+  candidates, `kueche` and `bad`, both carry an SHT31. Keeping the radio awake
+  on a mains node costs about 1 °C at the board, measured. The comment
+  justifying `PowerSaveMode::Maximum` says the trade works because everything
+  inbound is a Home Assistant knob nobody times; inbound sensor frames from a
+  sleeping node are neither untimed nor buffered by an AP, so that reasoning
+  does not survive the change.
+- **Discovery would have to be published by proxy.** Nodes announce their own
+  entities from `discovery::entities`. A gateway doing it for them means the
+  fleet table moves there or goes over the air.
+- **The config path is bidirectional.** A node subscribes to
+  `node.config_wildcard()` and drains retained values into `Config::apply`,
+  which is the broker's retention doing real work. A sleeping node cannot be
+  pushed to, so it would have to *request* its config inside its awake window
+  and the gateway would have to answer inside it.
+
+Its failure mode is also worse than option A's rather than equivalent. Both
+depend on a cached channel, but a Wi-Fi node with a stale one scans and
+connects; an ESP-NOW node with a stale one is mute, and the gateway cannot tell
+it, because it cannot reach it. Announcing the channel retained over MQTT only
+helps nodes that already got through — precisely not the ones with the problem.
+The remaining fix is pinning the AP's channel, which makes the sensor network
+depend on a router setting that any firmware update can undo.
+
+#### If they are looked at again
+
+Take option A first regardless: it is strictly smaller, it shortens the same
+window option B would delete, and the two are not exclusive. Option B earns its
+keep only if the AP turns out to be unreliable, if the fleet grows several more
+battery nodes (today there is one, `draussen`, with `terrasse` to come), or if
+something needs sub-second latency — a button or a PIR rather than a scale that
+reports every ten minutes.
+
 ## MQTT auto-discovery (#16)
 
 On the first connect after a power-up, each node publishes one retained
@@ -472,3 +555,12 @@ lines go to a log that may be scrolling in someone else's terminal.
 - Console provisioning is the only way to *set* credentials; there is no way to
   rotate them across the fleet remotely. Changing the router's passphrase means
   visiting each board with a cable.
+- The battery figures in *Where the battery actually goes* are estimates from
+  datasheets, with one measured number in them. Until a multimeter has been in
+  series with the cell, both radio options in *Radio options, parked behind a
+  measurement* stay parked — including the cheap one.
+- RTC pad hold on the HX711's `SCK` (issue #5) is still undone, so the
+  amplifier's state during deep sleep is undefined rather than powered down.
+  Deliberate: deep sleep now lasts one poll interval per publish, so it is not
+  worth the register work. It would matter again if deep sleep ever became the
+  steady state.
