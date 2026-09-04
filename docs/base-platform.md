@@ -107,6 +107,28 @@ hard-coded HX711/DS18B20 calls. The HX711 and DS18B20 keep their own read paths
 second because its 750 ms conversion is only worth spending on publish cycles —
 and contribute their readings and discovery descriptors to the same pipeline.
 
+### A visit the drift tracker used to eat
+
+The presence decision moved out of `main` into
+[`presence`](../src/presence.rs) once it became clear that the one piece of
+arithmetic deciding whether a visit is recorded *at all* was also the only part
+of the firmware no host test could reach.
+
+The baseline nudged itself by `delta/16` on *any* sub-threshold reading, which
+is right for slow thermal and mechanical creep and wrong for a bird. A visitor
+whose load sat below `threshold` — a small species, or one perched half on the
+rim — was pulled into the baseline within roughly 16 cycles, so the scale read
+"empty" again while it was still standing there. On departure the delta went
+*negative*, also sub-threshold, so no falling edge fired either and the baseline
+crept back. The visit left no trace in the logs or on the broker, and the
+failure was systematic rather than random: it discriminated against light birds
+specifically.
+
+Drift is now confined to a band of `threshold/4`. Anything between that band and
+the threshold is `Decision::Unexplained`, which leaves the baseline where it is
+and says so in the log — the case used to be absorbed in silence, which is why
+it went unnoticed for so long.
+
 ## MQTT auto-discovery (#16)
 
 On the first connect after a power-up, each node publishes one retained

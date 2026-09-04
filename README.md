@@ -212,7 +212,7 @@ until ~2.4 V, far past where a LiPo starts losing capacity for good.
 | SHT31-D / SCD41    | [`sht31.rs`](src/sensors/sht31.rs) / [`scd41.rs`](src/sensors/scd41.rs) — single-shot and periodic I²C reads, every word CRC-checked (Sensirion CRC-8), fixed-point conversions |
 | SDS011             | [`sds011.rs`](src/sensors/sds011.rs) — 10-byte UART frames with checksum + resync, fan woken only for the measurement and parked again on every exit path, warm-up ended by the readings settling rather than by a fixed wait |
 | HA discovery       | [`src/discovery.rs`](src/discovery.rs) — retained `homeassistant/sensor/<node>/<key>/config` per reading, all entities grouped under one device |
-| Presence / tare    | [`src/state.rs`](src/state.rs) — baseline + presence edge in RTC-persistent RAM, threshold + drift tracking in `main` |
+| Presence / tare    | [`src/presence.rs`](src/presence.rs) — the arrival/departure/creep decision, host-tested; baseline + presence edge persisted in [`src/state.rs`](src/state.rs) (RTC RAM) |
 | Config / calibration | [`src/config.rs`](src/config.rs) — calibration + tuning in a CRC-guarded flash blob (`esp-storage`), loaded at boot, updated from retained MQTT while online |
 | Wi-Fi + TCP/IP     | `esp-wifi` (STA + DHCP) + `embassy-net`, background `net_task`     |
 | MQTT               | `rust-mqtt` (embedded-async, MQTT v5) over an `embassy-net` socket |

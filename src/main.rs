@@ -65,7 +65,9 @@ use rust_mqtt::{
 };
 
 use node::Provision;
-use rs_smarthome_nodes::{battery, config, discovery, ds18b20, hx711, node, platform, state, wifi};
+use rs_smarthome_nodes::{
+    battery, config, discovery, ds18b20, hx711, node, platform, presence, state, wifi,
+};
 
 use battery::Battery;
 use config::Config;
@@ -185,11 +187,6 @@ const WIFI_BUDGET: Duration = Duration::from_secs(20);
 /// out by then, so this only buys a tidy shutdown, and it is spent inside
 /// [`WIFI_BUDGET`].
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
-
-/// Exponential-decay shift for empty-house baseline drift tracking. Each idle
-/// cycle nudges the baseline by `delta >> BASELINE_DRIFT_SHIFT` to absorb slow
-/// thermal / mechanical creep without chasing a real load.
-const BASELINE_DRIFT_SHIFT: u32 = 4;
 
 /// Convenience: allocate a `T` with `'static` lifetime from a `StaticCell`.
 macro_rules! mk_static {
@@ -417,52 +414,65 @@ async fn run_battery(
         enter_deep_sleep(lpwr, cfg.idle_interval());
     }
 
-    // Presence decision.
+    // Presence decision. The classification itself lives in `presence`, where
+    // it is host-tested; this only decides what to do with each verdict.
     let baseline = state::baseline();
-    let delta = raw - baseline;
     let was_present = state::bird_present();
 
-    if delta >= cfg.threshold_ticks() {
+    match presence::decide(raw, baseline, was_present, cfg.threshold_ticks()) {
         // A bird is on the scale: publish and keep sampling at the active rate.
-        info!(
-            "presence: raw={} baseline={} delta={}",
-            raw, baseline, delta
-        );
-        state::set_bird_present(true);
-        let samples = collect_samples(Some(raw), &cfg, board).await;
-        let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
-        state::set_idle_wakes(0);
-        enter_deep_sleep(lpwr, cfg.active_interval());
-    }
-
-    // Empty house from here on.
-    if was_present {
-        // Falling edge: the bird just left. Publish one last reading so Home
-        // Assistant returns to baseline, then resume idle polling.
-        info!("bird left; publishing final reading {}", raw);
-        state::set_bird_present(false);
-        let samples = collect_samples(Some(raw), &cfg, board).await;
-        let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
-        state::set_idle_wakes(0);
-        enter_deep_sleep(lpwr, cfg.idle_interval());
-    } else {
-        // Steady empty: absorb slow drift into the baseline.
-        state::set_baseline(baseline + (delta >> BASELINE_DRIFT_SHIFT));
-
-        // Periodic heartbeat: once enough empty polls have elapsed, bring Wi-Fi
-        // up and publish anyway, so Home Assistant keeps a fresh reading even
-        // with no visitor. The counter lives in RTC RAM so it survives the
-        // deep-sleep cold boots between polls.
-        let wakes = state::idle_wakes() + 1;
-        if wakes >= cfg.heartbeat_wakes() {
-            info!("heartbeat: publishing periodic readings");
-            state::set_idle_wakes(0);
+        presence::Decision::Arrived { delta } | presence::Decision::Staying { delta } => {
+            info!(
+                "presence: raw={} baseline={} delta={}",
+                raw, baseline, delta
+            );
+            state::set_bird_present(true);
             let samples = collect_samples(Some(raw), &cfg, board).await;
             let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
+            state::set_idle_wakes(0);
+            enter_deep_sleep(lpwr, cfg.active_interval());
+        }
+
+        presence::Decision::Departed { delta } => {
+            // Falling edge: the bird just left. Publish one last reading so Home
+            // Assistant returns to baseline, then resume idle polling.
+            info!(
+                "bird left; publishing final reading {} (delta={})",
+                raw, delta
+            );
+            state::set_bird_present(false);
+            let samples = collect_samples(Some(raw), &cfg, board).await;
+            let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
+            state::set_idle_wakes(0);
             enter_deep_sleep(lpwr, cfg.idle_interval());
         }
-        state::set_idle_wakes(wakes);
+
+        // Steady empty: absorb slow creep into the baseline.
+        presence::Decision::Quiet { baseline: drifted } => state::set_baseline(drifted),
+
+        // Something is on the cell that is neither creep nor a visit. The
+        // baseline is left alone on purpose (see `presence::drift_band`), and
+        // saying so is the point: this used to be absorbed in silence.
+        presence::Decision::Unexplained { delta } => warn!(
+            "{} ticks on the scale: too much for creep, too little for a visit. Baseline left \
+             alone; lower `threshold` if a bird this light should count.",
+            delta
+        ),
     }
+
+    // Empty house from here on. Periodic heartbeat: once enough empty polls have
+    // elapsed, bring Wi-Fi up and publish anyway, so Home Assistant keeps a
+    // fresh reading even with no visitor. The counter lives in RTC RAM so it
+    // survives the deep-sleep cold boots between polls.
+    let wakes = state::idle_wakes() + 1;
+    if wakes >= cfg.heartbeat_wakes() {
+        info!("heartbeat: publishing periodic readings");
+        state::set_idle_wakes(0);
+        let samples = collect_samples(Some(raw), &cfg, board).await;
+        let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
+        enter_deep_sleep(lpwr, cfg.idle_interval());
+    }
+    state::set_idle_wakes(wakes);
 
     enter_deep_sleep(lpwr, cfg.idle_interval());
 }
@@ -500,16 +510,32 @@ async fn run_awake(
                 state::mark_initialised();
                 info!("tared baseline = {}", raw);
             }
+            // The same classification the battery path uses, so a mains-powered
+            // scale behaves identically minus the sleeping.
             let baseline = state::baseline();
-            let delta = raw - baseline;
-            let present = delta >= cfg.threshold_ticks();
+            let was_present = state::bird_present();
+            let decision = presence::decide(raw, baseline, was_present, cfg.threshold_ticks());
             info!(
-                "HX711 raw={} baseline={} delta={} present={}",
-                raw, baseline, delta, present
+                "HX711 raw={} baseline={} decision={:?}",
+                raw, baseline, decision
             );
-            state::set_bird_present(present);
-            if !present {
-                state::set_baseline(baseline + (delta >> BASELINE_DRIFT_SHIFT));
+            match decision {
+                presence::Decision::Arrived { .. } | presence::Decision::Staying { .. } => {
+                    state::set_bird_present(true)
+                }
+                presence::Decision::Departed { .. } => state::set_bird_present(false),
+                presence::Decision::Quiet { baseline: drifted } => {
+                    state::set_bird_present(false);
+                    state::set_baseline(drifted);
+                }
+                presence::Decision::Unexplained { delta } => {
+                    state::set_bird_present(false);
+                    warn!(
+                        "{} ticks on the scale: too much for creep, too little for a visit. \
+                         Baseline left alone; lower `threshold` if a bird this light should count.",
+                        delta
+                    );
+                }
             }
         } else if node.scale.enabled {
             warn!("HX711 not responding");

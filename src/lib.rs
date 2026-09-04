@@ -37,6 +37,7 @@ pub mod config;
 pub mod discovery;
 pub mod ds18b20;
 pub mod node;
+pub mod presence;
 pub mod sensors;
 pub mod wifi;
 
