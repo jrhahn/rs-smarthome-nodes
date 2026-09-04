@@ -410,7 +410,13 @@ async fn run_battery(
     if !node.scale.enabled {
         let samples = collect_samples(None, None, &cfg, board).await;
         let cfg = publish(spawner, radio, &samples, state::baseline(), cfg).await;
-        enter_deep_sleep(lpwr, cfg.idle_interval());
+        // The *heartbeat* interval, not the idle one. `idle_interval` is the
+        // rate the load cell gets polled at — two seconds by default, which is
+        // cheap precisely because those wake-ups never touch the radio. Without
+        // a cell there is nothing to poll, so every wake-up is already a full
+        // publish with a Wi-Fi connect in it, and sleeping two seconds between
+        // those would spend the whole cell on the radio and nothing else.
+        enter_deep_sleep(lpwr, cfg.heartbeat_interval());
     }
 
     let raw = match read_scale(board).await {

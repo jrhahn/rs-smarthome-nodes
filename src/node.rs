@@ -418,6 +418,36 @@ const BAD: NodeConfig = NodeConfig {
     legacy_weight_topic: None,
 };
 
+/// Terrace, still being wired up: the board is mounted and on the network, but
+/// no sensors are attached to it yet.
+///
+/// Every slot is off deliberately. A slot enabled before its hardware exists
+/// publishes nothing and only produces "not responding" warnings on every
+/// round, so the sensors are switched on here as they actually arrive — which
+/// is also the moment their discovery entities should appear in Home Assistant
+/// rather than earlier.
+///
+/// Battery, like the feeder, so it needs no cable run outside. Having no load
+/// cell is what makes this the first battery node with no presence logic to
+/// run: with nothing to poll for, every wake-up is a full publish, so `main`
+/// sleeps [`crate::config::Config::heartbeat_interval`] between them rather
+/// than the load-cell idle interval.
+const TERRASSE: NodeConfig = NodeConfig {
+    id: "terrasse",
+    name: "Terrasse",
+    namespace: "smarthome",
+    power: PowerProfile::Battery,
+    // Only consulted by mains nodes; a battery cadence comes from `Config`.
+    sample_secs: 60,
+    scale: Slot::off(),
+    ds18b20: Slot::off(),
+    sht31: Slot::off(),
+    scd41: Slot::off(),
+    sds011: Slot::off(),
+    battery: Slot::off(),
+    legacy_weight_topic: None,
+};
+
 /// The fleet, keyed by the name `NODE=` and provisioning accept. The single
 /// source of truth: [`by_name`] walks it, so a node added here is immediately
 /// selectable both ways.
@@ -427,6 +457,7 @@ pub const FLEET: &[(&str, NodeConfig)] = &[
     ("wohnzimmer", WOHNZIMMER),
     ("kueche", KUECHE),
     ("bad", BAD),
+    ("terrasse", TERRASSE),
 ];
 
 // D2 / GPIO4 carries either the DS18B20's 1-Wire line or the battery divider's
@@ -474,7 +505,7 @@ const _: () = {
 /// The same names as one string, for error messages. Spelled out rather than
 /// built from [`FLEET`] because it is used in a const-eval `panic!`, which takes
 /// a literal; a test keeps the two in step.
-pub const KNOWN_NODES: &str = "draussen, schlafzimmer, wohnzimmer, kueche, bad";
+pub const KNOWN_NODES: &str = "draussen, schlafzimmer, wohnzimmer, kueche, bad, terrasse";
 
 /// The node this image was **built** for — the fallback when flash carries no
 /// provisioned identity. Use [`active`] for the identity actually in force.
@@ -503,7 +534,10 @@ const fn select(id: &str) -> NodeConfig {
     match by_name(id) {
         Some(cfg) => cfg,
         None => {
-            panic!("unknown NODE; expected one of: draussen, schlafzimmer, wohnzimmer, kueche, bad")
+            panic!(
+                "unknown NODE; expected one of: draussen, schlafzimmer, wohnzimmer, kueche, bad, \
+                 terrasse"
+            )
         }
     }
 }

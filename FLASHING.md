@@ -47,13 +47,14 @@ Everything below is baked in at compile time (see [`.env.example`](.env.example)
 | `schlafzimmer` | SCD41 + SHT31-D | mains |
 | `wohnzimmer` | SCD41 + SHT31-D + SDS011 | mains |
 | `kueche`, `bad` | SHT31-D | mains |
+| `terrasse` | none yet — every slot off while it is wired up | battery, deep sleep |
 
 A typo fails the build rather than flashing the wrong personality onto a board:
 
 ```
 error[E0080]: evaluation of constant value failed
   = the evaluated program panicked at 'unknown NODE; expected one of:
-    draussen, schlafzimmer, wohnzimmer, kueche, bad'
+    draussen, schlafzimmer, wohnzimmer, kueche, bad, terrasse'
 ```
 
 ## 3. Compile

@@ -141,6 +141,14 @@ impl Config {
         CoreDuration::from_secs(self.active_secs.max(1) as u64)
     }
 
+    /// The heartbeat period as a sleep duration. A battery node **without** a
+    /// load cell has no presence logic and therefore nothing to poll for, so
+    /// every wake-up is already a full publish; this is what it sleeps between
+    /// them, rather than the load-cell [`Config::idle_interval`].
+    pub fn heartbeat_interval(&self) -> CoreDuration {
+        CoreDuration::from_secs(self.heartbeat_secs.max(1) as u64)
+    }
+
     /// Number of idle wake-ups that make up one heartbeat period: after this
     /// many empty-poll cycles, bring Wi-Fi up and publish temperature + weight
     /// even without a visitor. At least 1, so a misconfigured (tiny) interval
@@ -747,6 +755,23 @@ mod tests {
         assert_eq!(cfg.threshold_ticks(), 1);
         cfg.scale_factor = 100.0;
         assert_eq!(cfg.threshold_ticks(), 1000);
+    }
+
+    #[test]
+    fn a_scaleless_battery_node_sleeps_the_heartbeat_not_the_idle_poll() {
+        // The regression this guards is a battery one: with no load cell every
+        // wake-up is a publish with a Wi-Fi connect, so sleeping `idle_secs`
+        // (2 s) between them would flatten the cell in hours.
+        let cfg = Config::DEFAULT;
+        assert_eq!(cfg.heartbeat_interval().as_secs(), 600);
+        assert!(cfg.heartbeat_interval() > cfg.idle_interval());
+    }
+
+    #[test]
+    fn the_heartbeat_interval_never_collapses_to_zero() {
+        let mut cfg = Config::DEFAULT;
+        cfg.heartbeat_secs = 0;
+        assert_eq!(cfg.heartbeat_interval().as_secs(), 1);
     }
 
     #[test]

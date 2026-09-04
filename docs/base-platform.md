@@ -15,6 +15,7 @@ of sensors, selected with `NODE=<name>` at build time.
 | `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 | mains (fan) |
 | `kueche` | Küche | SHT31-D | mains |
 | `bad` | Bad | SHT31-D | mains |
+| `terrasse` | Terrasse | none yet — every slot off while it is wired up | battery, deep-sleep |
 
 A node's sensors need not share a cadence: `sample_secs` is the base round, and
 a slot may ask for a slower one of its own (`Slot::every`). `wohnzimmer` is the
