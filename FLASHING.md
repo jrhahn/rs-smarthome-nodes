@@ -107,6 +107,44 @@ espflash board-info          # confirm the chip is detected
 > ROM bootloader: **hold the `B` (BOOT / GPIO9) button, tap `R` (RESET), release
 > `B`.** Then re-run the flash command.
 
+### Do not use `espflash monitor` to check *whether* an app is running
+
+It resets the chip in order to attach — `--before default-reset` is the
+default — so on this chip it destroys the thing you are trying to observe:
+
+1. the pre-connect reset drops the chip into the ROM bootloader, which prints
+   `boot:0x0 (USB_BOOT)` and `wait usb download`;
+2. `--after hard-reset` then resets again so the app runs;
+3. that second reset makes the USB serial/JTAG **re-enumerate**, which
+   invalidates the monitor's open handle — it dies with `Broken pipe`, usually
+   before the app has logged anything.
+
+The result reads exactly like a board stuck in download mode, and it is not.
+Both lines come from `espflash` on the way in, not from the board's final
+state. Cost of learning this the hard way: a board declared dead, a BOOT/RESET
+dance, and a power cycle, all for a node that had been booting correctly the
+whole time.
+
+To watch a battery node, read the port **passively** instead — no `espflash`,
+no reset:
+
+```bash
+# wait for the port to appear, then just read it
+while [ ! -e /dev/ttyACM0 ]; do sleep 0.2; done; cat /dev/ttyACM0
+```
+
+Two independent signals are worth more than the monitor here:
+
+- **Port presence.** A board in download mode holds USB open continuously. One
+  whose `/dev/ttyACM*` *disappears* is in deep sleep, and only the app sleeps.
+  Absence of the port is evidence the app is running.
+- **`Saved PC:` in the boot banner.** It is only printed when the chip came out
+  of deep sleep, so it says the app ran on the previous cycle.
+
+`espflash flash` is unaffected — it reports `Flashing has completed!` on its
+own, and that line is trustworthy. It is only *observation after the fact* that
+needs the passive read.
+
 ---
 
 ## 5. (Optional) Flash with a Raspberry Pi Pico ("picoprobe")
