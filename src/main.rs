@@ -35,7 +35,7 @@ use core::time::Duration as CoreDuration;
 
 use embassy_executor::Spawner;
 use embassy_net::{tcp::TcpSocket, Config as NetConfig, Ipv4Address, Stack, StackResources};
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
@@ -187,6 +187,22 @@ const WIFI_BUDGET: Duration = Duration::from_secs(20);
 /// out by then, so this only buys a tidy shutdown, and it is spent inside
 /// [`WIFI_BUDGET`].
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
+
+/// Hard cap on how long one visit keeps the node awake.
+///
+/// A bird is expected to leave well inside this. The cap exists for a load that
+/// does not — snow, a twig, a squirrel that settles in — so a stuck cell can
+/// never hold the CPU awake and flatten the cell.
+const VISIT_MAX: Duration = Duration::from_secs(60);
+
+/// Consecutive below-threshold samples that end a visit. More than one so a
+/// bird shifting its weight for an instant does not read as a departure.
+const VISIT_DEPART_SAMPLES: u8 = 3;
+
+/// Samples taken right after the load first crosses the threshold are dropped:
+/// the bird is still landing and the cell is still ringing, so they would drag
+/// the median toward a weight nothing ever had.
+const VISIT_SETTLE: Duration = Duration::from_millis(400);
 
 /// Convenience: allocate a `T` with `'static` lifetime from a `StaticCell`.
 macro_rules! mk_static {
@@ -392,7 +408,7 @@ async fn run_battery(
     // A node with no load cell has no presence logic to run: sample everything
     // it does have, publish, and go back to sleep.
     if !node.scale.enabled {
-        let samples = collect_samples(None, &cfg, board).await;
+        let samples = collect_samples(None, None, &cfg, board).await;
         let cfg = publish(spawner, radio, &samples, state::baseline(), cfg).await;
         enter_deep_sleep(lpwr, cfg.idle_interval());
     }
@@ -420,28 +436,57 @@ async fn run_battery(
     let was_present = state::bird_present();
 
     match presence::decide(raw, baseline, was_present, cfg.threshold_ticks()) {
-        // A bird is on the scale: publish and keep sampling at the active rate.
-        presence::Decision::Arrived { delta } | presence::Decision::Staying { delta } => {
+        presence::Decision::Arrived { delta } => {
             info!(
-                "presence: raw={} baseline={} delta={}",
+                "bird arrived: raw={} baseline={} delta={}",
                 raw, baseline, delta
             );
             state::set_bird_present(true);
-            let samples = collect_samples(Some(raw), &cfg, board).await;
+
+            // Watch the whole visit with the CPU awake instead of deep-sleeping
+            // between samples. This is what turns one arbitrary conversion per
+            // active interval into a settled median, and one Wi-Fi connect per
+            // active interval into one per visit.
+            let visit = watch_visit(board, raw, baseline, &cfg).await;
+            state::set_bird_present(visit.still_loaded);
+
+            let samples =
+                collect_samples(Some(visit.weight), Some(visit.millis), &cfg, board).await;
+            let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
+            state::set_idle_wakes(0);
+
+            // A load that outlasted the window drops back to the old cheap
+            // cadence, so snow on the cell cannot re-arm the awake path forever.
+            enter_deep_sleep(
+                lpwr,
+                if visit.still_loaded {
+                    cfg.active_interval()
+                } else {
+                    cfg.idle_interval()
+                },
+            );
+        }
+
+        presence::Decision::Staying { delta } => {
+            // The load outlasted its awake window, so this is no longer a bird
+            // being weighed — just a load being tracked cheaply.
+            info!("load still on the scale: raw={} delta={}", raw, delta);
+            let samples = collect_samples(Some(raw), None, &cfg, board).await;
             let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
             state::set_idle_wakes(0);
             enter_deep_sleep(lpwr, cfg.active_interval());
         }
 
         presence::Decision::Departed { delta } => {
-            // Falling edge: the bird just left. Publish one last reading so Home
+            // Reached only when a visit ended while the node was asleep, i.e.
+            // after a `Staying` cycle. Publish one last reading so Home
             // Assistant returns to baseline, then resume idle polling.
             info!(
-                "bird left; publishing final reading {} (delta={})",
+                "load gone; publishing final reading {} (delta={})",
                 raw, delta
             );
             state::set_bird_present(false);
-            let samples = collect_samples(Some(raw), &cfg, board).await;
+            let samples = collect_samples(Some(raw), None, &cfg, board).await;
             let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
             state::set_idle_wakes(0);
             enter_deep_sleep(lpwr, cfg.idle_interval());
@@ -468,13 +513,103 @@ async fn run_battery(
     if wakes >= cfg.heartbeat_wakes() {
         info!("heartbeat: publishing periodic readings");
         state::set_idle_wakes(0);
-        let samples = collect_samples(Some(raw), &cfg, board).await;
+        let samples = collect_samples(Some(raw), None, &cfg, board).await;
         let cfg = publish(spawner, radio, &samples, baseline, cfg).await;
         enter_deep_sleep(lpwr, cfg.idle_interval());
     }
     state::set_idle_wakes(wakes);
 
     enter_deep_sleep(lpwr, cfg.idle_interval());
+}
+
+/// What watching one visit through produced.
+struct Visit {
+    /// Settled raw reading: the median over the tail of the visit.
+    weight: i32,
+    /// How long the load stayed, in milliseconds. A **lower bound** — the
+    /// arrival is only known to within one idle interval, because that is how
+    /// often the sleeping node looks at the cell.
+    millis: u64,
+    /// The load was still there when the awake window ran out.
+    still_loaded: bool,
+}
+
+/// Watch a visit through to its end with the CPU awake and the radio still off.
+///
+/// Called on the rising edge only. Sampling continuously for the few seconds a
+/// bird actually stays is both cheaper and far more informative than
+/// cold-booting once per `active_interval`: that path published one arbitrary
+/// conversion every 10 s, timed the departure to the same 10 s grid, and paid a
+/// Wi-Fi connect for every one of those cycles.
+///
+/// `first` — the reading that tripped the threshold — is deliberately not part
+/// of the median; see [`presence::Window`].
+async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Config) -> Visit {
+    let threshold = cfg.threshold_ticks();
+    let started = Instant::now();
+    let settled_at = started + VISIT_SETTLE;
+    let deadline = started + VISIT_MAX;
+
+    let scale = match board.scale.as_mut() {
+        Some(s) => s,
+        // Unreachable on this path — the caller only gets a rising edge from a
+        // cell that just answered — but a missing cell must not be a panic.
+        None => {
+            return Visit {
+                weight: first,
+                millis: 0,
+                still_loaded: false,
+            }
+        }
+    };
+
+    let mut window = presence::Window::new();
+    let mut below = 0u8;
+    let mut last_loaded = started;
+    let mut still_loaded = true;
+
+    while Instant::now() < deadline {
+        let Some(raw) = scale.read(HX711_TIMEOUT).await else {
+            // A cell that stops answering mid-visit is a fault, not a
+            // departure. End the visit and go back to idle polling rather than
+            // leaving the node flagged "occupied" indefinitely.
+            warn!("HX711 went quiet mid-visit; ending the visit here");
+            still_loaded = false;
+            break;
+        };
+
+        if raw.saturating_sub(baseline) >= threshold {
+            below = 0;
+            last_loaded = Instant::now();
+            if last_loaded >= settled_at {
+                window.push(raw);
+            }
+        } else {
+            below += 1;
+            if below >= VISIT_DEPART_SAMPLES {
+                still_loaded = false;
+                break;
+            }
+        }
+    }
+
+    let millis = last_loaded.duration_since(started).as_millis();
+    // An empty window means the visit was shorter than `VISIT_SETTLE`, so the
+    // only reading that ever described it is the one that tripped the threshold.
+    let weight = window.median().unwrap_or(first);
+    info!(
+        "visit ended after {} ms: weight={} from {} samples, still_loaded={}",
+        millis,
+        weight,
+        window.len(),
+        still_loaded
+    );
+
+    Visit {
+        weight,
+        millis,
+        still_loaded,
+    }
 }
 
 /// Stay-awake loop: bring Wi-Fi up once and keep it, then sample + publish +
@@ -511,7 +646,8 @@ async fn run_awake(
                 info!("tared baseline = {}", raw);
             }
             // The same classification the battery path uses, so a mains-powered
-            // scale behaves identically minus the sleeping.
+            // scale behaves identically minus the sleeping. No visit loop here:
+            // this profile is awake anyway and publishes every round.
             let baseline = state::baseline();
             let was_present = state::bird_present();
             let decision = presence::decide(raw, baseline, was_present, cfg.threshold_ticks());
@@ -542,7 +678,7 @@ async fn run_awake(
         }
 
         let baseline = state::baseline();
-        let samples = collect_samples(raw, &cfg, board).await;
+        let samples = collect_samples(raw, None, &cfg, board).await;
 
         // Publish every cycle for a live view; this also drains retained config.
         let updated = match with_timeout(
@@ -602,7 +738,12 @@ async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
 /// ADC is microseconds either way, but it belongs with the rest). `raw` is the
 /// load-cell reading already taken by the caller (it drives the presence logic),
 /// converted to grams here with the stored calibration.
-async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) -> Samples {
+async fn collect_samples(
+    raw: Option<i32>,
+    visit_millis: Option<u64>,
+    cfg: &Config,
+    board: &mut Board<'_>,
+) -> Samples {
     let node = node::active();
     let mut samples = Samples::new();
 
@@ -611,6 +752,13 @@ async fn collect_samples(raw: Option<i32>, cfg: &Config, board: &mut Board<'_>) 
         cfg.write_grams(&mut grams, raw);
         info!("weight = {} g", grams);
         platform::push_sample(&mut samples, node.scale, "weight", grams);
+    }
+
+    if let Some(millis) = visit_millis {
+        let mut secs = heapless::String::new();
+        presence::write_secs(&mut secs, millis);
+        info!("visit = {} s", secs);
+        platform::push_sample(&mut samples, node.scale, "visit", secs);
     }
 
     if let Some(probe) = board.probe.as_mut() {

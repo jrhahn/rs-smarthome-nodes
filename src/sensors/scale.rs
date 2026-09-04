@@ -8,10 +8,24 @@
 
 use super::EntityDescriptor;
 
-pub const DESCRIPTORS: &[EntityDescriptor] = &[EntityDescriptor {
-    key: "weight",
-    name: "Gewicht",
-    unit: "g",
-    device_class: "weight",
-    state_class: "measurement",
-}];
+pub const DESCRIPTORS: &[EntityDescriptor] = &[
+    EntityDescriptor {
+        key: "weight",
+        name: "Gewicht",
+        unit: "g",
+        device_class: "weight",
+        state_class: "measurement",
+    },
+    // How long the load stayed on the cell. Only a visit produces one, so this
+    // entity is stale between birds by design — it is the length of the *last*
+    // visit, not a live value. `main` watches a visit through while awake
+    // (see `crate::presence`), which is what makes the number better than the
+    // deep-sleep interval it used to be quantised to.
+    EntityDescriptor {
+        key: "visit",
+        name: "Besuchsdauer",
+        unit: "s",
+        device_class: "duration",
+        state_class: "measurement",
+    },
+];

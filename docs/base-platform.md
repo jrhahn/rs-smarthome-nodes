@@ -107,27 +107,50 @@ hard-coded HX711/DS18B20 calls. The HX711 and DS18B20 keep their own read paths
 second because its 750 ms conversion is only worth spending on publish cycles —
 and contribute their readings and discovery descriptors to the same pipeline.
 
-### A visit the drift tracker used to eat
+### Three ways a visit used to go missing
 
 The presence decision moved out of `main` into
 [`presence`](../src/presence.rs) once it became clear that the one piece of
 arithmetic deciding whether a visit is recorded *at all* was also the only part
-of the firmware no host test could reach.
+of the firmware no host test could reach. Two of the three holes it had are now
+closed; the third is a physical trade-off and stays open.
 
-The baseline nudged itself by `delta/16` on *any* sub-threshold reading, which
-is right for slow thermal and mechanical creep and wrong for a bird. A visitor
-whose load sat below `threshold` — a small species, or one perched half on the
-rim — was pulled into the baseline within roughly 16 cycles, so the scale read
-"empty" again while it was still standing there. On departure the delta went
-*negative*, also sub-threshold, so no falling edge fired either and the baseline
-crept back. The visit left no trace in the logs or on the broker, and the
-failure was systematic rather than random: it discriminated against light birds
-specifically.
+**Absorbed by the drift tracker.** The baseline nudged itself by `delta/16` on
+*any* sub-threshold reading, which is right for slow thermal and mechanical
+creep and wrong for a bird. A visitor whose load sat below `threshold` — a small
+species, or one perched half on the rim — was pulled into the baseline within
+roughly 16 cycles, so the scale read "empty" again while it was still standing
+there. On departure the delta went *negative*, also sub-threshold, so no falling
+edge fired either and the baseline crept back. The visit left no trace in the
+logs or on the broker, and the failure was systematic rather than random: it
+discriminated against light birds specifically. Drift is now confined to a band
+of `threshold/4`; anything between that band and the threshold is
+`Decision::Unexplained`, which leaves the baseline alone and says so in the log.
 
-Drift is now confined to a band of `threshold/4`. Anything between that band and
-the threshold is `Decision::Unexplained`, which leaves the baseline where it is
-and says so in the log — the case used to be absorbed in silence, which is why
-it went unnoticed for so long.
+**Detected, then badly weighed.** On a rising edge the firmware used to publish
+one arbitrary conversion and deep-sleep for `active_interval` (default 10 s) —
+*slower* than the 2 s idle poll, so the cadence dropped exactly when dense data
+was wanted. One unaveraged sample could land while the bird was still settling,
+the departure was quantised to the same 10 s grid, and every one of those cycles
+paid its own Wi-Fi connect: a two-minute visit cost about twelve of them. A
+visit is now watched through awake with the radio off — cheap, since visits are
+short — sampling the cell continuously into a 32-deep ring. The published weight
+is the median of that ring, which is deliberately the *most recent* samples: a
+bird that has just landed is still moving, so the tail of a visit describes it
+better than the head. `VISIT_MAX` caps one awake window at 60 s so a load that
+is not a bird (snow, a twig) cannot hold the CPU awake; such a load falls back
+to the old `active_interval` polling, which is all that knob is still for.
+
+**Shorter than the idle interval.** A visit that begins and ends between two
+polls is invisible, and with `idle_secs: 2` plus the ~0.3 s cold boot that
+window is real. This one is not a bug and is not fixed: the HX711 has no
+threshold output that could wake the ESP32-C3 from deep sleep, so the only
+control is the wake rate — which is itself the dominant battery cost on this
+node, well ahead of the radio. Lowering `idle_interval` trades runtime for
+short-visit coverage, and nothing in the firmware can make that trade for you.
+
+The published visit duration is a **lower bound** for the same reason: the
+arrival is only known to within one idle interval.
 
 ## MQTT auto-discovery (#16)
 

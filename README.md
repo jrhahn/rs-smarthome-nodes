@@ -10,10 +10,13 @@ auto-discovery** — no hand-declared entities.
 It started as a battery bird-feeder scale, which is still the default node
 (`NODE=draussen`): on each wake-up it reads a load cell via an HX711 amplifier
 and compares it against a tare baseline kept in RTC RAM. While the feeder is
-empty it drops back into deep sleep for a couple of seconds — no radio — so it
-catches short visits cheaply. Only when weight crosses a threshold does it bring
-up Wi-Fi and publish (grams converted on-device), sampling faster while the bird
-is present. A periodic **heartbeat** (default every 10 min) publishes anyway, so
+empty it drops back into deep sleep for a couple of seconds — no radio — which
+bounds how short a visit it can see at all. Once weight crosses the threshold it
+stops sleeping and **watches the visit through awake**, so the published weight
+is a settled median rather than whichever conversion happened to land first, and
+the visit gets a real duration instead of one rounded to the sleep interval;
+then it brings up Wi-Fi and publishes once (grams converted on-device). A
+periodic **heartbeat** (default every 10 min) publishes anyway, so
 Home Assistant always has a fresh reading. While online it also pulls any
 retained calibration/tuning back from Home Assistant and persists it to flash.
 
@@ -212,11 +215,11 @@ until ~2.4 V, far past where a LiPo starts losing capacity for good.
 | SHT31-D / SCD41    | [`sht31.rs`](src/sensors/sht31.rs) / [`scd41.rs`](src/sensors/scd41.rs) — single-shot and periodic I²C reads, every word CRC-checked (Sensirion CRC-8), fixed-point conversions |
 | SDS011             | [`sds011.rs`](src/sensors/sds011.rs) — 10-byte UART frames with checksum + resync, fan woken only for the measurement and parked again on every exit path, warm-up ended by the readings settling rather than by a fixed wait |
 | HA discovery       | [`src/discovery.rs`](src/discovery.rs) — retained `homeassistant/sensor/<node>/<key>/config` per reading, all entities grouped under one device |
-| Presence / tare    | [`src/presence.rs`](src/presence.rs) — the arrival/departure/creep decision, host-tested; baseline + presence edge persisted in [`src/state.rs`](src/state.rs) (RTC RAM) |
+| Presence / tare    | [`src/presence.rs`](src/presence.rs) — the arrival/departure/creep decision and the settled-weight median, host-tested; baseline + presence edge persisted in [`src/state.rs`](src/state.rs) (RTC RAM) |
 | Config / calibration | [`src/config.rs`](src/config.rs) — calibration + tuning in a CRC-guarded flash blob (`esp-storage`), loaded at boot, updated from retained MQTT while online |
 | Wi-Fi + TCP/IP     | `esp-wifi` (STA + DHCP) + `embassy-net`, background `net_task`     |
 | MQTT               | `rust-mqtt` (embedded-async, MQTT v5) over an `embassy-net` socket |
-| Power management   | `esp_hal::rtc_cntl` RTC-timer deep sleep; short idle poll, longer active poll while a bird is present |
+| Power management   | `esp_hal::rtc_cntl` RTC-timer deep sleep; short idle poll while empty, awake for the length of a visit, `active_interval` only for a load that outstays it |
 
 The HX711 read cycle is deliberately a short **blocking** critical section:
 the datasheet forbids a single clock-high pulse longer than 60 µs (it would put
@@ -390,7 +393,7 @@ on / has just left the scale) and persists them. Changes therefore apply with a
 | `threshold`         | grams that count as "a bird landed" | with load cell |
 | `tare` (button)     | re-zero: adopts the current empty baseline as `offset` | with load cell |
 | `idle_interval`     | deep-sleep seconds while empty | battery |
-| `active_interval`   | deep-sleep seconds while a bird is present | battery |
+| `active_interval`   | deep-sleep seconds for a load that outlasted its awake visit window (snow, a twig) — a normal visit is watched awake and never uses this | battery |
 | `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) | battery |
 | `deep_sleep` (switch)  | `0` = stay awake with Wi-Fi up (bench testing on USB), `1` = normal battery deep sleep | battery |
 | `scd41_temp_offset` | °C the SCD41 subtracts for its own self-heating (default 4.0) | with SCD41 |
