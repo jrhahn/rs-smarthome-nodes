@@ -468,6 +468,25 @@ mod tests {
         out
     }
 
+    /// A node with the load cell, an SHT31 behind a prefix and the battery
+    /// divider all switched on.
+    ///
+    /// For the tests that are about the *schema* rather than about a
+    /// particular board. Slots move as hardware is wired up — the outdoor node
+    /// currently has every one of them off — so a test that needs a scale, a
+    /// labelled slot and a divider at once builds one here instead of
+    /// borrowing whichever fleet member happens to carry them today. That used
+    /// to be `draussen`, and these tests broke when it was retired.
+    fn a_fully_populated_node() -> NodeConfig {
+        NodeConfig {
+            scale: Slot::on(),
+            ds18b20: Slot::off(),
+            sht31: Slot::on_as("air_", "Luft"),
+            battery: Slot::on_as("battery_", "Batterie"),
+            ..crate::node::by_name("terrasse").unwrap()
+        }
+    }
+
     fn availability_of(node: &NodeConfig) -> Availability {
         availability(node, &Config::DEFAULT)
     }
@@ -591,33 +610,38 @@ mod tests {
     }
 
     #[test]
-    fn the_outdoor_node_announces_its_cell_voltage_and_no_probe() {
-        // The concrete result of trading the DS18B20 for the divider: one new
-        // entity under the battery's own name, and nothing left announcing a
-        // probe that is no longer soldered to anything.
-        let scale = crate::node::by_name("draussen").unwrap();
+    fn trading_the_probe_for_the_divider_announces_a_voltage_and_no_probe() {
+        // D2 carries either a DS18B20 or the battery divider, never both. The
+        // concrete result of choosing the divider: one entity under the
+        // battery's own name, and nothing left announcing a probe that is not
+        // soldered to anything. Prefixing the SHT31 is what frees the plain
+        // `temperature` key, so it must not reappear.
+        let scale = a_fully_populated_node();
         let avail = availability_of(&scale);
         let topics: Vec<String> = announcements(&scale, &avail)
             .iter()
             .map(|(t, _)| t.clone())
             .collect();
 
-        assert!(topics.contains(&"homeassistant/sensor/scale/battery_voltage/config".to_string()));
-        // `air_temperature` stays; the plain key the probe used must be gone.
-        assert!(topics.contains(&"homeassistant/sensor/scale/air_temperature/config".to_string()));
-        assert!(!topics.contains(&"homeassistant/sensor/scale/temperature/config".to_string()));
+        assert!(
+            topics.contains(&"homeassistant/sensor/terrasse/battery_voltage/config".to_string())
+        );
+        assert!(
+            topics.contains(&"homeassistant/sensor/terrasse/air_temperature/config".to_string())
+        );
+        assert!(!topics.contains(&"homeassistant/sensor/terrasse/temperature/config".to_string()));
 
         let entity = entities(&scale)
             .into_iter()
             .find(|e| e.desc.key == "voltage")
-            .expect("the outdoor node exposes a cell voltage");
+            .expect("a node with the divider exposes a cell voltage");
         let payload = parse(&config_payload(&scale, &entity, &avail).unwrap());
         assert_eq!(payload["dev_cla"], "voltage");
         assert_eq!(payload["unit_of_meas"], "V");
         assert_eq!(payload["name"], "Batterie Spannung");
         assert_eq!(
             expand(payload["stat_t"].as_str().unwrap(), &scale),
-            "birds/scale/battery_voltage"
+            "smarthome/terrasse/battery_voltage"
         );
     }
 
@@ -778,7 +802,7 @@ mod tests {
         // One lost packet must never blank an entity, however tight the poll.
         let mut cfg = Config::DEFAULT;
         cfg.heartbeat_secs = 1;
-        let scale = crate::node::by_name("draussen").unwrap();
+        let scale = a_fully_populated_node();
         assert_eq!(
             availability(&scale, &cfg).expire_for(scale.scale),
             MIN_EXPIRY_SECS
@@ -853,7 +877,10 @@ mod tests {
 
     #[test]
     fn each_component_carries_what_its_schema_needs() {
-        let scale = crate::node::by_name("draussen").unwrap();
+        // A populated node so every component the fleet can emit is exercised
+        // — the `button` branch in particular, which only the scale's `tare`
+        // reaches.
+        let scale = a_fully_populated_node();
         let avail = availability_of(&scale);
         for control in controls(&scale) {
             let payload = parse(&control_payload(&scale, control, &avail).unwrap());
@@ -883,7 +910,7 @@ mod tests {
     fn controls_read_their_state_back_off_their_command_topic() {
         // Why the sliders show the last value set instead of "unknown", and why
         // that survives a Home Assistant restart.
-        let scale = crate::node::by_name("draussen").unwrap();
+        let scale = a_fully_populated_node();
         let avail = availability_of(&scale);
         for control in controls(&scale) {
             let payload = parse(&control_payload(&scale, control, &avail).unwrap());
@@ -896,9 +923,12 @@ mod tests {
 
     #[test]
     fn a_slot_label_never_leaves_a_stray_space() {
-        // The outdoor node labels its SHT31 "Luft"; every other slot is unnamed
-        // and must not produce " Temperatur".
-        for (_, node) in FLEET {
+        // A prefixed slot labels its entities ("Luft Temperatur"); an unnamed
+        // one must not produce " Temperatur". No fleet member carries a label
+        // right now, so the populated node is included explicitly — dropping
+        // it would leave the labelled branch untested.
+        let populated = a_fully_populated_node();
+        for node in FLEET.iter().map(|(_, n)| n).chain([&populated]) {
             let avail = availability_of(node);
             for entity in entities(node) {
                 let payload = parse(&config_payload(node, &entity, &avail).unwrap());

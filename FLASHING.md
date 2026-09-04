@@ -43,24 +43,23 @@ Everything below is baked in at compile time (see [`.env.example`](.env.example)
 
 | `NODE=` | Sensors | Power |
 | --- | --- | --- |
-| `draussen` (default) | HX711 + DS18B20 + SHT31-D | battery, deep sleep |
+| `terrasse` (default) | the outdoor node and the bird scale; every slot off while it is wired up | battery, deep sleep |
 | `schlafzimmer` | SCD41 + SHT31-D | mains |
 | `wohnzimmer` | SCD41 + SHT31-D + SDS011 | mains |
 | `kueche`, `bad` | SHT31-D | mains |
-| `terrasse` | none yet — every slot off while it is wired up | battery, deep sleep |
 
 A typo fails the build rather than flashing the wrong personality onto a board:
 
 ```
 error[E0080]: evaluation of constant value failed
   = the evaluated program panicked at 'unknown NODE; expected one of:
-    draussen, schlafzimmer, wohnzimmer, kueche, bad, terrasse'
+    schlafzimmer, wohnzimmer, kueche, bad, terrasse'
 ```
 
 ## 3. Compile
 
 ```bash
-# Just build the ELF (defaults to NODE=draussen)
+# Just build the ELF (defaults to NODE=terrasse)
 cargo build --release
 # -> target/riscv32imc-unknown-none-elf/release/rs-smarthome-nodes
 
@@ -102,7 +101,7 @@ Useful checks:
 espflash board-info          # confirm the chip is detected
 ```
 
-> **Getting into download mode:** a battery node (`NODE=draussen`) enters deep
+> **Getting into download mode:** a battery node (`NODE=terrasse`) enters deep
 > sleep a couple of seconds after boot, which can interrupt a flash — mains
 > nodes stay awake. If `espflash` can't sync, force the
 > ROM bootloader: **hold the `B` (BOOT / GPIO9) button, tap `R` (RESET), release
@@ -176,10 +175,10 @@ The first line names the node the image was built for — check it before anythi
 else, it is the one mistake that produces a board that looks perfectly healthy
 while publishing to the wrong room.
 
-**Outdoor scale (`NODE=draussen`, battery)** — a publish cycle:
+**Outdoor scale (`NODE=terrasse`, battery)** — a publish cycle:
 
 ```
-node 'scale' (Draußen) booted, battery profile
+node 'terrasse' (Terrasse) booted, battery profile
 config: offset=8388608 scale=420 threshold=10g idle=2s active=10s
 HX711 raw reading: 8402193
 presence: raw=8402193 baseline=8388608 delta=13585
@@ -191,8 +190,8 @@ SHT31-D: air_humidity = 47.2
 Wi-Fi link up, waiting for DHCP...
 Got IP: 192.168.1.42/24
 published Home Assistant discovery for node 'scale'
-Published 32.3 to birds/scale/weight
-Published 25.1 to birds/scale/temperature
+Published 32.3 to smarthome/terrasse/weight
+Published 25.1 to smarthome/terrasse/temperature
 Entering deep sleep for 10s
 ```
 
@@ -200,7 +199,7 @@ Idle cycles are much quieter — an empty feeder skips the radio, the DS18B20 an
 the I²C sensors entirely, which is the whole point of the battery profile:
 
 ```
-node 'scale' (Draußen) booted, battery profile
+node 'terrasse' (Terrasse) booted, battery profile
 HX711 raw reading: 8388601
 Entering deep sleep for 2s
 ```
@@ -252,7 +251,7 @@ Subscribe on the broker side to confirm the payload:
 
 ```bash
 # One node
-mosquitto_sub -h <broker-ip> -t 'birds/scale/#' -v
+mosquitto_sub -h <broker-ip> -t 'smarthome/terrasse/#' -v
 
 # Everything the fleet publishes, including the discovery configs
 mosquitto_sub -h <broker-ip> -t 'smarthome/#' -t 'birds/#' -t 'homeassistant/#' -v
@@ -288,7 +287,7 @@ Every boot prints the topic to address that board on. It is keyed by MAC,
 because that is the only name a board is sure of before it knows anything else:
 
 ```
-node 'scale' (Draußen) booted, battery profile
+node 'terrasse' (Terrasse) booted, battery profile
 provision topic: smarthome/provision/a1b2c3d4e5f6
 ```
 

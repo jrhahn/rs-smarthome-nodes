@@ -7,7 +7,7 @@
 //! Which entry is used is decided in two steps, at boot:
 //!
 //! 1. the identity the image was **built** for — `NODE=kueche cargo run
-//!    --release`, defaulting to `draussen`, the original bird-feeder scale. An
+//!    --release`, defaulting to `terrasse`, the outdoor node. An
 //!    unknown name fails the build (const-eval panic) rather than silently
 //!    flashing the wrong personality onto a board;
 //! 2. a **provisioned** name stored in flash, which overrides it. That is what
@@ -301,30 +301,6 @@ impl NodeConfig {
 
 // --- The fleet ---------------------------------------------------------------
 
-/// Outdoor bird feeder: load cell + SHT31-D + cell-voltage sense, on battery.
-/// Keeps the historical `birds/scale/...` topics so the existing Home Assistant
-/// entities and retained config values survive the platform migration.
-const DRAUSSEN: NodeConfig = NodeConfig {
-    id: "scale",
-    name: "Draußen",
-    namespace: "birds",
-    power: PowerProfile::Battery,
-    sample_secs: 60,
-    scale: Slot::on(),
-    // The DS18B20 is gone from this node, and it is the battery sense that
-    // displaced it: both want D2, the only ADC1 pad the HX711 has not taken.
-    ds18b20: Slot::off(),
-    // The `air_` prefix outlives its original reason — it was there to keep the
-    // probe's plain `temperature` key to itself — because renaming the entity
-    // now would orphan its Home Assistant history, and the SHT31-D really is
-    // measuring the air rather than the feeder.
-    sht31: Slot::on_as("air_", "Luft"),
-    scd41: Slot::off(),
-    sds011: Slot::off(),
-    battery: Slot::on_as("battery_", "Batterie"),
-    legacy_weight_topic: Some("birds/scale/state"),
-};
-
 /// Bedroom air. The SHT31-D is not redundant with the SCD41's built-in RH/T:
 /// the SCD4x datasheet specifies its humidity at ±6 %RH (±9 outside 15–35 °C /
 /// 20–65 %RH) against the SHT31-D's ±2 %, because it sits on a die that heats
@@ -418,20 +394,32 @@ const BAD: NodeConfig = NodeConfig {
     legacy_weight_topic: None,
 };
 
-/// Terrace, still being wired up: the board is mounted and on the network, but
-/// no sensors are attached to it yet.
+/// The terrace: the outdoor node, and the one the bird-feeder scale goes on.
+/// Still being wired up — the board is mounted and on the network, but no
+/// sensors are attached to it yet.
 ///
 /// Every slot is off deliberately. A slot enabled before its hardware exists
 /// publishes nothing and only produces "not responding" warnings on every
 /// round, so the sensors are switched on here as they actually arrive — which
 /// is also the moment their discovery entities should appear in Home Assistant
-/// rather than earlier.
+/// rather than earlier. When the load cell goes on, this is where `scale`,
+/// `sht31` and `battery` get turned on; note that D2 carries either the
+/// battery divider or a DS18B20, never both, and the divider is the one that
+/// belongs here.
 ///
-/// Battery, like the feeder, so it needs no cable run outside. Having no load
-/// cell is what makes this the first battery node with no presence logic to
-/// run: with nothing to poll for, every wake-up is a full publish, so `main`
-/// sleeps [`crate::config::Config::heartbeat_interval`] between them rather
-/// than the load-cell idle interval.
+/// It replaced a node called `draussen`, which published to `birds/scale/...`
+/// and carried an `air_` prefix on its SHT31 to leave the plain `temperature`
+/// key to a probe it no longer had. Both were kept alive purely so an existing
+/// Home Assistant history would not be orphaned. That history was deliberately
+/// let go when the node was renamed, so neither carries over: this node is in
+/// the fleet's own namespace like every other, and when its SHT31 is switched
+/// on it should simply own `temperature` and `humidity`.
+///
+/// Battery, like the feeder it replaces, so it needs no cable run outside.
+/// Having no load cell *yet* is what makes this the first battery node with no
+/// presence logic to run: with nothing to poll for, every wake-up is a full
+/// publish, so `main` sleeps [`crate::config::Config::heartbeat_interval`]
+/// between them rather than the load-cell idle interval.
 const TERRASSE: NodeConfig = NodeConfig {
     id: "terrasse",
     name: "Terrasse",
@@ -452,7 +440,6 @@ const TERRASSE: NodeConfig = NodeConfig {
 /// source of truth: [`by_name`] walks it, so a node added here is immediately
 /// selectable both ways.
 pub const FLEET: &[(&str, NodeConfig)] = &[
-    ("draussen", DRAUSSEN),
     ("schlafzimmer", SCHLAFZIMMER),
     ("wohnzimmer", WOHNZIMMER),
     ("kueche", KUECHE),
@@ -505,13 +492,13 @@ const _: () = {
 /// The same names as one string, for error messages. Spelled out rather than
 /// built from [`FLEET`] because it is used in a const-eval `panic!`, which takes
 /// a literal; a test keeps the two in step.
-pub const KNOWN_NODES: &str = "draussen, schlafzimmer, wohnzimmer, kueche, bad, terrasse";
+pub const KNOWN_NODES: &str = "schlafzimmer, wohnzimmer, kueche, bad, terrasse";
 
 /// The node this image was **built** for — the fallback when flash carries no
 /// provisioned identity. Use [`active`] for the identity actually in force.
 pub const BUILT_AS: NodeConfig = select(match option_env!("NODE") {
     Some(s) => s,
-    None => "draussen",
+    None => "terrasse",
 });
 
 /// Look a node up by name. Shared by the build-time selection and by runtime
@@ -534,10 +521,7 @@ const fn select(id: &str) -> NodeConfig {
     match by_name(id) {
         Some(cfg) => cfg,
         None => {
-            panic!(
-                "unknown NODE; expected one of: draussen, schlafzimmer, wohnzimmer, kueche, bad, \
-                 terrasse"
-            )
+            panic!("unknown NODE; expected one of: schlafzimmer, wohnzimmer, kueche, bad, terrasse")
         }
     }
 }
@@ -643,8 +627,11 @@ pub fn provision_request(
     }
 
     match by_name(value) {
-        // Compared by node id, not by name: the outdoor node answers to
-        // `draussen` but its id — and its topics — say `scale`.
+        // Compared by node id, not by name. Every node in the fleet happens
+        // to use the same string for both today — the one that did not,
+        // `draussen`, answered to that name while its topics said `scale` —
+        // but a board must not re-provision itself in a loop if that ever
+        // diverges again, so the id is what decides.
         Some(cfg) if cfg.id == current.id => None,
         Some(_) => Some(Provision::Become(String::try_from(value).ok()?)),
         None => {
@@ -687,7 +674,7 @@ const _: () = {
     // SDS011 fan and continuous CO₂ both need mains.
     assert!(!KUECHE.power.is_battery());
     assert!(!SCHLAFZIMMER.power.is_battery());
-    assert!(DRAUSSEN.power.is_battery());
+    assert!(TERRASSE.power.is_battery());
 };
 
 #[cfg(test)]
@@ -747,7 +734,18 @@ mod tests {
         for (name, cfg) in FLEET {
             assert_eq!(by_name(name).expect("in the table").id, cfg.id);
         }
-        for name in ["", "Draussen", "draussen ", "küche", "kuche", "scale"] {
+        // `draussen` and `scale` are the retired outdoor node's name and id.
+        // Neither may resolve: a board still carrying either in its
+        // provisioning sector has to fall back to what it was built as.
+        for name in [
+            "",
+            "Terrasse",
+            "terrasse ",
+            "küche",
+            "kuche",
+            "draussen",
+            "scale",
+        ] {
             assert!(by_name(name).is_none(), "{name:?} resolved");
         }
     }
@@ -783,19 +781,28 @@ mod tests {
 
     #[test]
     fn topics_are_built_from_the_identity() {
-        let scale = by_name("draussen").unwrap();
+        let outdoor = by_name("terrasse").unwrap();
         assert_eq!(
-            scale.state_topic("", "weight").as_str(),
-            "birds/scale/weight"
+            outdoor.state_topic("", "weight").as_str(),
+            "smarthome/terrasse/weight"
         );
         assert_eq!(
-            scale.state_topic("air_", "temperature").as_str(),
-            "birds/scale/air_temperature"
+            outdoor.state_topic("air_", "temperature").as_str(),
+            "smarthome/terrasse/air_temperature"
         );
-        assert_eq!(scale.config_prefix().as_str(), "birds/scale/config/");
-        assert_eq!(scale.config_wildcard().as_str(), "birds/scale/config/#");
-        assert_eq!(scale.client_id().as_str(), "rs-scale");
-        assert_eq!(scale.availability_topic().as_str(), "birds/scale/status");
+        assert_eq!(
+            outdoor.config_prefix().as_str(),
+            "smarthome/terrasse/config/"
+        );
+        assert_eq!(
+            outdoor.config_wildcard().as_str(),
+            "smarthome/terrasse/config/#"
+        );
+        assert_eq!(outdoor.client_id().as_str(), "rs-terrasse");
+        assert_eq!(
+            outdoor.availability_topic().as_str(),
+            "smarthome/terrasse/status"
+        );
     }
 
     #[test]
@@ -863,15 +870,16 @@ mod tests {
     }
 
     #[test]
-    fn only_the_scale_keeps_a_legacy_topic() {
+    fn a_legacy_topic_belongs_only_to_a_node_that_reads_a_weight() {
+        // The one node that had one, `draussen`, mirrored its weight to
+        // `birds/scale/state` for hand-declared Home Assistant entities that
+        // predated discovery. It is gone and the fleet carries none, so this
+        // now guards the invariant rather than the instance: mirroring a
+        // weight a node never reads would publish a stale value for ever.
         for (name, node) in FLEET {
-            match node.legacy_weight_topic {
-                Some(topic) => {
-                    assert_eq!(*name, "draussen");
-                    assert!(node.scale.enabled, "{name} mirrors a weight it never reads");
-                    assert_eq!(topic, "birds/scale/state");
-                }
-                None => assert!(*name != "draussen"),
+            if let Some(topic) = node.legacy_weight_topic {
+                assert!(node.scale.enabled, "{name} mirrors a weight it never reads");
+                assert!(!topic.is_empty());
             }
         }
     }
@@ -913,20 +921,23 @@ mod tests {
     }
 
     #[test]
-    fn the_outdoor_sht31_keeps_the_prefix_the_probe_gave_it() {
-        // `air_` was introduced to leave the plain `temperature` key to the
-        // DS18B20, and the DS18B20 is gone. The prefix stays regardless:
-        // renaming would orphan the history behind `birds/scale/air_temperature`
-        // in Home Assistant, and the sensor really does measure the air.
-        let scale = by_name("draussen").unwrap();
-        assert!(!scale.ds18b20.enabled);
-        assert_eq!(scale.sht31.prefix, "air_");
-        assert_eq!(
-            scale
-                .state_topic(scale.battery.prefix_for("voltage"), "voltage")
-                .as_str(),
-            "birds/scale/battery_voltage"
-        );
+    fn the_outdoor_node_announces_nothing_before_its_hardware_exists() {
+        // The board is mounted and on the network with no sensors on it. A
+        // slot switched on early would publish nothing while warning every
+        // round, and would put entities in Home Assistant for hardware that
+        // is not there — which is worse than an empty device, because it
+        // looks like a fault rather than like work in progress.
+        let outdoor = by_name("terrasse").unwrap();
+        for slot in [
+            outdoor.scale,
+            outdoor.ds18b20,
+            outdoor.sht31,
+            outdoor.scd41,
+            outdoor.sds011,
+            outdoor.battery,
+        ] {
+            assert!(!slot.enabled);
+        }
     }
 
     // --- Provisioning -------------------------------------------------------
@@ -935,36 +946,36 @@ mod tests {
     fn an_empty_payload_is_not_a_request() {
         // How a retained message is deleted. Acting on it would re-provision
         // every board whose provisioning was just cleared.
-        let scale = by_name("draussen").unwrap();
-        assert_eq!(provision_request("", &scale, true), None);
-        assert_eq!(provision_request("", &scale, false), None);
+        let outdoor = by_name("terrasse").unwrap();
+        assert_eq!(provision_request("", &outdoor, true), None);
+        assert_eq!(provision_request("", &outdoor, false), None);
     }
 
     #[test]
     fn reset_only_does_something_when_there_is_an_override() {
-        let scale = by_name("draussen").unwrap();
+        let outdoor = by_name("terrasse").unwrap();
         assert_eq!(
-            provision_request(PROVISION_RESET, &scale, true),
+            provision_request(PROVISION_RESET, &outdoor, true),
             Some(Provision::Reset)
         );
         // Nothing stored: the message is retained and arrives on every connect,
         // so obeying it would erase the same sector for ever.
-        assert_eq!(provision_request(PROVISION_RESET, &scale, false), None);
+        assert_eq!(provision_request(PROVISION_RESET, &outdoor, false), None);
     }
 
     #[test]
     fn being_told_what_it_already_is_changes_nothing() {
-        let scale = by_name("draussen").unwrap();
-        assert_eq!(provision_request("draussen", &scale, false), None);
-        assert_eq!(provision_request("draussen", &scale, true), None);
+        let outdoor = by_name("terrasse").unwrap();
+        assert_eq!(provision_request("terrasse", &outdoor, false), None);
+        assert_eq!(provision_request("terrasse", &outdoor, true), None);
     }
 
     #[test]
     fn a_different_node_is_adopted() {
-        let scale = by_name("draussen").unwrap();
-        for (name, _) in FLEET.iter().filter(|(n, _)| *n != "draussen") {
+        let outdoor = by_name("terrasse").unwrap();
+        for (name, _) in FLEET.iter().filter(|(n, _)| *n != "terrasse") {
             assert_eq!(
-                provision_request(name, &scale, false),
+                provision_request(name, &outdoor, false),
                 Some(Provision::Become(String::try_from(*name).unwrap())),
                 "{name}"
             );
@@ -973,19 +984,28 @@ mod tests {
 
     #[test]
     fn an_unknown_name_is_ignored() {
-        let scale = by_name("draussen").unwrap();
-        for value in ["kuche", "Draussen", "scale", "  ", "0"] {
-            assert_eq!(provision_request(value, &scale, false), None, "{value}");
+        let outdoor = by_name("terrasse").unwrap();
+        // `draussen` and `scale` are the retired outdoor node's name and id;
+        // a stale provisioning sector carrying either must be ignored.
+        for value in ["kuche", "Terrasse", "draussen", "scale", "  ", "0"] {
+            assert_eq!(provision_request(value, &outdoor, false), None, "{value}");
         }
     }
 
     #[test]
     fn the_node_is_matched_by_id_not_by_name() {
-        // `draussen` is the name; `scale` is the id its topics use. A board
-        // already running as it must not re-provision itself in a loop.
-        let scale = by_name("draussen").unwrap();
-        assert_eq!(scale.id, "scale");
-        assert_eq!(provision_request("draussen", &scale, false), None);
+        // Retired `draussen` was the case that made this visible: it answered
+        // to that name while its id — and its topics — said `scale`. Nothing
+        // in the fleet diverges today, so assert that too; if it ever does
+        // again, a board already running as a node must still not
+        // re-provision itself in a loop.
+        for (name, node) in FLEET {
+            assert_eq!(
+                *name, node.id,
+                "{name} and its id have diverged; the id is what provisioning compares"
+            );
+            assert_eq!(provision_request(name, node, false), None, "{name}");
+        }
     }
 
     #[test]

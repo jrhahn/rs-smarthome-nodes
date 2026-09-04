@@ -5,7 +5,7 @@
 //! compile-time constants and the gram calibration (`offset` / `scale_factor`)
 //! lived in the Home Assistant template. This module moves all of that onto the
 //! controller so it can be changed **without reflashing**: HA publishes each
-//! value to a retained `birds/scale/config/<key>` topic, the firmware reads them
+//! value to a retained `<namespace>/<node>/config/<key>` topic, the firmware reads them
 //! whenever it is already online for a publish, and stores the result here.
 //!
 //! Persistence is a single fixed-layout blob in one 4 KiB flash sector, guarded
@@ -183,7 +183,7 @@ impl Config {
         let _ = write!(buf, "{}.{}", mag / 10, mag % 10);
     }
 
-    /// Apply one `key=value` pair received from a `birds/scale/config/<key>`
+    /// Apply one `key=value` pair received from a `<namespace>/<node>/config/<key>`
     /// topic. Returns `true` if it parsed and actually changed a field.
     ///
     /// `tare` is special: it re-zeros the scale by adopting `tare_ref` (the

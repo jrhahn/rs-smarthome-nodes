@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [draussen, schlafzimmer, wohnzimmer, kueche, bad, terrasse]
+        node: [schlafzimmer, wohnzimmer, kueche, bad, terrasse]
     steps:
       - uses: actions/checkout@v5
 

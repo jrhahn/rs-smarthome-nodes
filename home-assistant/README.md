@@ -20,7 +20,7 @@ Controls are per node, so nothing dead shows up on a device card:
 
 | Control | Entity | On which node |
 | --- | --- | --- |
-| `threshold` | number, g | nodes with a load cell (`draussen`) |
+| `threshold` | number, g | nodes with a load cell (`terrasse`) |
 | `scale_factor` | number | nodes with a load cell |
 | `offset` | number | nodes with a load cell |
 | `tare` | button | nodes with a load cell |
@@ -68,21 +68,21 @@ cards:
   - type: entities
     title: Meisenknödel
     entities:
-      - entity: sensor.draussen_gewicht
-      - entity: sensor.draussen_temperatur
-      - entity: sensor.draussen_luft_temperatur
-      - entity: sensor.draussen_luft_luftfeuchtigkeit
+      - entity: sensor.terrasse_gewicht
+      - entity: sensor.terrasse_temperatur
+      - entity: sensor.terrasse_luft_temperatur
+      - entity: sensor.terrasse_luft_luftfeuchtigkeit
   - type: entities
     title: Kalibrierung
     entities:
-      - entity: button.draussen_tarieren
-      - entity: number.draussen_kalibrierfaktor
-      - entity: number.draussen_tara_offset
-      - entity: number.draussen_ausloseschwelle
+      - entity: button.terrasse_tarieren
+      - entity: number.terrasse_kalibrierfaktor
+      - entity: number.terrasse_tara_offset
+      - entity: number.terrasse_ausloseschwelle
   - type: history-graph
     hours_to_show: 24
     entities:
-      - entity: sensor.draussen_gewicht
+      - entity: sensor.terrasse_gewicht
 ```
 
 ## Migrating from the hand-declared YAML
@@ -91,18 +91,27 @@ This directory used to hold a `configuration.yaml` fragment with the `mqtt:`
 number/switch blocks and a `birdscale_tare` script. To move off it:
 
 1. Delete that block (and the script) from your `configuration.yaml`, plus the
-   old hand-declared `birds/scale/state` and `birds/scale/temperature` sensors,
+   old hand-declared `smarthome/terrasse/state` and `smarthome/terrasse/temperature` sensors,
    and restart Home Assistant. The old entities are gone; the discovered ones —
    with different entity ids — have already appeared.
 2. Fix up any dashboard cards and automations that named the old entities.
-3. Once nothing refers to `birds/scale/state` any more, the firmware's mirror of
-   the weight to that topic can be dropped (`legacy_weight_topic` in
-   `src/node.rs`).
+3. The firmware's mirror of the weight to `birds/scale/state` is **already
+   gone**: the node was renamed from `terrasse` to `terrasse` and moved to the
+   fleet's own `smarthome/terrasse/…` namespace, which retired the whole `birds`
+   prefix along with it. `legacy_weight_topic` in `src/node.rs` is now unused by
+   every node.
 
 The old tare script published a retained timestamp to
-`birds/scale/config/tare`. The firmware still understands those tokens, and
-clears the retained message once it has acted on it, so the leftover cleans
-itself up on the node's next connect.
+`birds/scale/config/tare`. That topic is no longer subscribed to — the node
+listens on `smarthome/terrasse/config/#` now — so a leftover retained message
+under the old prefix will sit on the broker until it is cleared by hand:
+
+```bash
+mosquitto_pub -h <broker> -t birds/scale/config/tare -r -n
+```
+
+The firmware still understands the tokens themselves on its current topic, and
+clears the retained message once it has acted on it.
 
 ## Forcing a re-announce
 

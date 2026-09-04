@@ -3,8 +3,8 @@
 //! One image serves every node: which sensors are populated, what the node is
 //! called and how it is powered come from [`node`], picked by `NODE=<name>` at
 //! build time or by a provisioned identity in flash. It started life as a
-//! battery bird-feeder scale, and that node (`draussen`, the default) still
-//! drives the flow described below.
+//! battery bird-feeder scale, and that node — now `terrasse`, the default —
+//! still drives the flow described below.
 //!
 //! **Battery profile** — to catch short bird visits without keeping the radio
 //! awake, the firmware polls by cold-booting out of deep sleep on a short

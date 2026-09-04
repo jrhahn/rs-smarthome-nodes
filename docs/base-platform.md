@@ -10,7 +10,7 @@ of sensors, selected with `NODE=<name>` at build time.
 
 | `NODE=` | Node | Sensors | Power profile |
 | --- | --- | --- | --- |
-| `draussen` (default) | Draußen | load cell (HX711) + DS18B20 + SHT31-D | battery, deep-sleep |
+| `terrasse` (default) | Terrasse | load cell (HX711) + DS18B20 + SHT31-D | battery, deep-sleep |
 | `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains, always-on |
 | `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 | mains (fan) |
 | `kueche` | Küche | SHT31-D | mains |
@@ -80,7 +80,7 @@ build in const-eval.
 The identity is resolved once at boot, before any peripheral is touched, since
 the sensor set decides which buses come up at all:
 
-1. `BUILT_AS` — the `NODE=` the image was compiled with (default `draussen`);
+1. `BUILT_AS` — the `NODE=` the image was compiled with (default `terrasse`);
 2. a name stored in flash, which overrides it.
 
 `node::active()` returns the result. It is a plain `Copy` struct read from a
@@ -272,7 +272,7 @@ depend on a router setting that any firmware update can undo.
 Take option A first regardless: it is strictly smaller, it shortens the same
 window option B would delete, and the two are not exclusive. Option B earns its
 keep only if the AP turns out to be unreliable, if the fleet grows several more
-battery nodes (today there is one, `draussen`, with `terrasse` to come), or if
+battery nodes (today there is exactly one, `terrasse`), or if
 something needs sub-second latency — a button or a PIR rather than a scale that
 reports every ten minutes.
 
@@ -292,9 +292,12 @@ Power cycle means power cycle. RTC fast RAM survives a reflash and the reset
 that follows it, so flashing a board does not re-announce its entities — pull
 the power for that.
 
-The bird scale keeps its historical `birds/scale/…` namespace, and its weight is
-still mirrored to the pre-discovery `birds/scale/state` topic, so the migration
-of the hand-declared Home Assistant entities can happen at leisure.
+Every node now publishes under the fleet's own `smarthome/<node>/…` namespace.
+The outdoor node used to be the exception — it kept a historical `birds/scale/…`
+namespace and mirrored its weight to a pre-discovery `birds/scale/state` topic,
+both carried purely so hand-declared Home Assistant entities would keep working.
+That history was deliberately let go when the node was renamed to `terrasse`,
+and `legacy_weight_topic` is unused across the fleet as a result.
 
 ### Command entities
 

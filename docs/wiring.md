@@ -22,11 +22,11 @@ are *not* the GPIO numbers the datasheet and the firmware use:
 
 | Pad | GPIO | Used for | On which node |
 | --- | --- | --- | --- |
-| D0  | 2  | HX711 SCK | `draussen` |
-| D1  | 3  | HX711 DT | `draussen` |
-| D2  | 4  | Battery divider tap (ADC1); a DS18B20 1-Wire line on a node that has one instead | `draussen` |
+| D0  | 2  | HX711 SCK | `terrasse` |
+| D1  | 3  | HX711 DT | `terrasse` |
+| D2  | 4  | Battery divider tap (ADC1); a DS18B20 1-Wire line on a node that has one instead | `terrasse` |
 | D3  | 5  | UART RX ← SDS011 TX | `wohnzimmer` |
-| D4  | 6  | I²C SDA | every node but none exclusively — `draussen`, `schlafzimmer`, `wohnzimmer`, `kueche`, `bad` |
+| D4  | 6  | I²C SDA | every node but none exclusively — `terrasse`, `schlafzimmer`, `wohnzimmer`, `kueche`, `bad` |
 | D5  | 7  | I²C SCL | as SDA |
 | D6  | 21 | — **console UART TX** | keep free |
 | D7  | 20 | — **console UART RX** | keep free |
@@ -437,7 +437,7 @@ correction only ever removes water, never adds particles.
 
 ---
 
-## `NODE=draussen` — the bird scale
+## `NODE=terrasse` — the bird scale
 
 The busiest board: two sensors, two buses, a battery and the only analogue
 measurement in the fleet. This is the one that already exists; the others are
@@ -594,7 +594,7 @@ nothing corrects the resistors. If a multimeter disagrees, the fix is
 `R_TOP_KOHM` / `R_BOTTOM_KOHM` in [`src/battery.rs`](../src/battery.rs) and a
 reflash; there is no runtime knob for it yet.
 
-The reading is published as `birds/scale/battery_voltage`, and the log warns
+The reading is published as `smarthome/terrasse/battery_voltage`, and the log warns
 below 3.0 V. A reading under 2.0 V is not published at all — that is not a flat
 cell, it is a divider that is not there, and it says so:
 
@@ -612,15 +612,19 @@ A vent with a membrane, or a shielded underside opening, not a sealed lid.
 **Expected at boot:**
 
 ```
-node 'scale' (Draußen) booted, battery profile
+node 'terrasse' (Terrasse) booted, battery profile
 provision topic: smarthome/provision/a1b2c3d4e5f6
 SHT31-D found at 0x44
 HX711 raw reading: 8402913
 battery = 4.03 V
 ```
 
-Note the node **id** is `scale`, not `draussen` — the name selects it at build
-time, the id is what appears in topics, kept from before the fleet existed.
+The node's build-time name and its id are the same string, `terrasse`, as they
+are for every node in the fleet. That was not always so: this node answered to
+`draussen` while its id — and so its topics — said `scale`, a leftover from
+before the fleet existed. Provisioning still compares by **id** rather than by
+name, so the two are free to diverge again without a board re-provisioning
+itself in a loop.
 
 ---
 
@@ -634,7 +638,7 @@ a pin:
 | `bad`, `kueche` | D0, D1, D2, D3, D8, D10 |
 | `schlafzimmer` | D0, D1, D2, D3, D8, D10 |
 | `wohnzimmer` | D0, D1, D2, D8 |
-| `draussen` | D3, D8, D10 |
+| `terrasse` | D3, D8, D10 |
 
 `D6`, `D7` and `D9` are excluded everywhere: console UART and the BOOT button.
 
@@ -644,7 +648,7 @@ a pin:
 2. No 5 V anywhere near a GPIO — only the SDS011's supply pin.
 3. SDA and SCL not swapped (the single commonest mistake on these boards).
 4. SDS011 TX→RX crossed.
-5. On `draussen`: the divider's foot on the XIAO's `GND` (the protection board's
+5. On `terrasse`: the divider's foot on the XIAO's `GND` (the protection board's
    `P−`), not on the cell's `B−` — and no 4.7 kΩ left over from a DS18B20 on D2.
 
 Then plug in USB and watch the log — every node reports what it found on its

@@ -8,7 +8,7 @@ on). Home Assistant picks the nodes up automatically over **MQTT
 auto-discovery** — no hand-declared entities.
 
 It started as a battery bird-feeder scale, which is still the default node
-(`NODE=draussen`): on each wake-up it reads a load cell via an HX711 amplifier
+(`NODE=terrasse`): on each wake-up it reads a load cell via an HX711 amplifier
 and compares it against a tare baseline kept in RTC RAM. While the feeder is
 empty it polls every couple of seconds from **light** sleep — no radio, and no
 cold boot per poll — which bounds how short a visit it can see at all. The
@@ -25,7 +25,7 @@ retained calibration/tuning back from Home Assistant and persists it to flash.
 ```
 ┌──────────┐  bit-bang   ┌────────┐    Wi-Fi/MQTT (grams, °C)   ┌────────────────┐
 │  Load    │────────────▶│ HX711  │──▶ ESP32-C3 ───────────────▶│ Home Assistant │
-│  Cell    │  DT / SCK   │ 24-bit │       birds/scale/weight    │                │
+│  Cell    │  DT / SCK   │ 24-bit │       smarthome/terrasse/weight    │                │
 └──────────┘             └────────┘   ◀── config/* (retained) ──│  (calibration) │
    DS18B20 ─ 1-Wire ─────────────────▶     grams + tuning       └────────────────┘
    SHT31-D / SCD41 ─ I²C ────────────▶  homeassistant/… (discovery, retained)
@@ -41,7 +41,7 @@ also be **provisioned** to another identity afterwards, without a rebuild — se
 
 | `NODE=` | Room | Sensors | Power |
 | --- | --- | --- | --- |
-| `draussen` (default) | Draußen | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
+| `terrasse` (default) | Terrasse | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
 | `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains |
 | `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 | mains (fan) |
 | `kueche` | Küche | SHT31-D | mains |
@@ -57,7 +57,7 @@ topic, which is keyed by MAC (the one name a board knows before it knows
 anything else) and printed on every boot:
 
 ```
-node 'scale' (Draußen) booted, battery profile
+node 'terrasse' (Terrasse) booted, battery profile
 provision topic: smarthome/provision/a1b2c3d4e5f6
 ```
 
@@ -122,7 +122,7 @@ UART pads the log output uses.
 D2 has two possible jobs and can only do one of them: the DS18B20's 1-Wire line,
 or the battery divider's tap. ADC2 is unusable while Wi-Fi is up, and of the
 ADC1 pins only D0/D1/D2 are broken out on this board — the first two are the
-HX711's — so cell voltage costs the probe its pin. `NODE=draussen` takes that
+HX711's — so cell voltage costs the probe its pin. `NODE=terrasse` takes that
 trade; the build fails if a node table entry ever asks for both.
 
 ### Wiring (load cell → HX711)
@@ -170,7 +170,7 @@ is required for a reliable read over the ~1 m cable).
 The temperature is read whenever a weight reading is being published — on a bird
 visit, and on the periodic **heartbeat** (see below) — so the ~750 ms conversion
 never runs on the low-power idle-poll cycles. It is published to
-`birds/scale/temperature` in °C.
+`smarthome/terrasse/temperature` in °C.
 
 **No node ships with this today.** The outdoor node traded its probe for the
 battery sense below; the DS18B20 slot and driver stay, because the pin is a
@@ -200,7 +200,7 @@ Conversions are calibrated against the chip's eFuse reference, so the driver
 works in millivolts; the divider ratio is undone in
 [`src/battery.rs`](src/battery.rs). That corrects the ADC, not the resistors —
 use 1 % parts, and trim `R_TOP_KOHM` / `R_BOTTOM_KOHM` and reflash if a
-multimeter disagrees. Published to `birds/scale/battery_voltage` in volts. Below
+multimeter disagrees. Published to `smarthome/terrasse/battery_voltage` in volts. Below
 3.0 V the log says so: the common DW01A-class protection board does not cut off
 until ~2.4 V, far past where a LiPo starts losing capacity for good.
 
@@ -259,7 +259,7 @@ over its serial console and will remember them — see
 [below](#wi-fi-credentials-without-a-rebuild).
 
 ```bash
-# Build only (defaults to NODE=draussen, the bird scale)
+# Build only (defaults to NODE=terrasse, the bird scale)
 cargo build --release
 
 # Flash + serial monitor over the XIAO's USB-C (device on /dev/ttyACM0)
@@ -358,13 +358,15 @@ and its entities without any YAML. Values are ready to use — grams, °C, %, pp
 
 | Node | State topics |
 | --- | --- |
-| `draussen` | `birds/scale/weight`, `birds/scale/air_temperature`, `birds/scale/air_humidity` (SHT31-D), `birds/scale/battery_voltage` |
+| `terrasse` | `smarthome/terrasse/weight`, `/temperature`, `/humidity` (SHT31-D), `/battery_voltage` — each appearing as its slot is switched on |
 | `schlafzimmer` | `smarthome/schlafzimmer/co2`, `/temperature`, `/humidity` (SHT31-D), `/scd41_temperature`, `/scd41_humidity` |
 | `wohnzimmer` | the same five, plus `/pm25`, `/pm10` (humidity-corrected) and `/pm25_raw`, `/pm10_raw` |
 | `kueche` / `bad` | `smarthome/<node>/temperature`, `/humidity` |
 
-The weight is also mirrored to the pre-discovery `birds/scale/state` topic so an
-existing hand-declared entity keeps working during the migration.
+No node mirrors a weight to a second topic any more. The outdoor node used to,
+under `birds/scale/state`, for hand-declared entities that predated discovery.
+That topic and the whole `birds` namespace went when it was renamed to
+`terrasse`.
 
 **Availability.** A mains node registers an MQTT last will, so the broker
 publishes retained `offline` to `<namespace>/<node>/status` the moment its
@@ -384,12 +386,12 @@ all. See [`home-assistant/README.md`](home-assistant/README.md).
 Calibration (`offset`, `scale_factor`) and tuning (`threshold`, poll intervals)
 are **stored on the controller in flash** and set from Home Assistant — no
 reflashing. HA publishes each value **retained** to
-`<namespace>/<node>/config/<key>` (`birds/scale/config/<key>` for the scale);
+`<namespace>/<node>/config/<key>` (`smarthome/terrasse/config/<key>` for the scale);
 the firmware reads them the next time it is online for a publish (while a bird is
 on / has just left the scale) and persists them. Changes therefore apply with a
 **short delay**, not instantly.
 
-| HA entity → topic (`birds/scale/config/…`) | Meaning | Node |
+| HA entity → topic (`smarthome/terrasse/config/…`) | Meaning | Node |
 | ------------------------------------------ | ------- | ---- |
 | `offset`            | raw HX711 value at 0 g (tare zero) | with load cell |
 | `scale_factor`      | raw ticks per gram | with load cell |
