@@ -121,6 +121,31 @@ in
       '';
     };
 
+    questdb.maxHeapPercent = lib.mkOption {
+      type = lib.types.numbers.between 1 75;
+      default = 12.5;
+      description = ''
+        Ceiling for QuestDB's Java heap, as a percentage of the machine's RAM.
+
+        Left alone, a JVM takes a quarter of physical memory as its maximum
+        heap, and QuestDB's launcher adds `-XX:+AlwaysPreTouch` and the parallel
+        collector -- which never returns a page it has committed. So the
+        database does not settle at what it needs; it drifts up to 25 % of the
+        machine and stays there. On a server that also runs everything else a
+        household uses, that quarter is taken from whatever else wanted it, and
+        the moment it is missed is a `nixos-rebuild`, which needs on the order
+        of a gigabyte to evaluate before it compiles anything at all.
+
+        A percentage rather than a fixed `-Xmx` so the same configuration is
+        sane on a 4 GB box and on a 32 GB one. Most of QuestDB's memory is not
+        heap at all -- columns are memory-mapped files, which the kernel can
+        reclaim -- so this is a smaller number than it looks.
+
+        Raise it if a query ever fails on heap; that is the symptom to watch
+        for, and it is a loud one.
+      '';
+    };
+
     questdb.extraConfig = lib.mkOption {
       type = lib.types.lines;
       defaultText = lib.literalExpression ''
@@ -211,6 +236,13 @@ in
         # job; the default `KillMode` signals the whole control group, so the
         # JVM gets the SIGTERM directly rather than through the script.
         ExecStart = "${cfg.questdb.package}/bin/questdb.sh start -n -f -d ${cfg.questdb.dataDir}";
+        # `JVM_PREPEND` is the launcher's own hook: it appears nowhere else in
+        # the script, only at the very end of the flags it builds, and the JVM
+        # lets a later flag win. So this is both the supported way in and the
+        # one place from which QuestDB's own defaults can be overridden.
+        Environment = [
+          "JVM_PREPEND=-XX:MaxRAMPercentage=${toString cfg.questdb.maxHeapPercent}"
+        ];
         Type = "simple";
         Restart = "always";
         RestartSec = 10;

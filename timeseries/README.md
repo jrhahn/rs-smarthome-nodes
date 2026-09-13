@@ -256,6 +256,30 @@ authenticated.
 > directory written by one version cannot be opened by an older one, so rolling
 > the package back after an upgrade does not roll the data back with it.
 
+### How much memory QuestDB takes
+
+More than it needs, unless told otherwise. A JVM with no `-Xmx` uses a quarter
+of physical memory as its maximum heap, and QuestDB's launcher adds
+`-XX:+AlwaysPreTouch` and the parallel collector, which never gives a committed
+page back. So the database does not settle at its working set; it drifts up to
+25 % of the machine and stays there.
+
+`questdb.maxHeapPercent` caps it, 12.5 % by default — half of what the JVM would
+have taken. It is passed through `JVM_PREPEND`, the launcher's own hook, which it
+appends after its own flags, and a later JVM flag wins over an earlier one.
+Measured on a 14.7 GB machine: 3688 MB of maximum heap without it, 1844 MB with.
+
+A percentage rather than a fixed size so one configuration is sane on a 4 GB box
+and a 32 GB one. It is a smaller number than it looks, because most of QuestDB's
+memory is not heap at all — columns are memory-mapped files, and the kernel
+reclaims those under pressure. The symptom of setting it too low is a query
+failing on heap, which is loud and obvious; raise it then.
+
+This matters most at a moment that has nothing to do with the database. A
+`nixos-rebuild` needs around a gigabyte just to *evaluate* a full home-server
+configuration, before it compiles anything — and it asks for it on a machine
+where the quarter QuestDB took is not available to give back.
+
 ## Operations
 
 **Change the retention.** Edit `questdb.retention`, restart. The service issues
