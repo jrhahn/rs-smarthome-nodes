@@ -766,6 +766,21 @@ print("wohnzimmer wz_tray %.1f cm3  wz_lid %.1f cm3" % (
 ## the board. Two compartments, a baffle between them, and the sensor end
 ## vented on three sides. A node whose only job is temperature and humidity
 ## has nothing to report if it reports the inside of its own box.
+##
+## The board bay is vented too, and that took a second pass to get right. The
+## first version left it sealed: three rows of slots at the sensor end, none at
+## the board end, and a baffle with a full-height notch in it for the wires.
+## Sealed is the wrong word for what that is -- the notch is 168 mm2 of opening,
+## and with no other way out, every watt the board made left through it and
+## crossed the sensor chamber on the way to the only vents in the box. The
+## baffle was not separating two volumes, it was aiming one at the other. In
+## service that read about 2.5 C warm, and the humidity with it: the sensor
+## measures the air it is in, so heating the air by 2.5 C without adding water
+## to it drops the reported RH by about seven points.
+##
+## So the board bay gets its own chimney -- inlet low, two outlets high, on both
+## long walls -- and the notch stops being the path of least resistance. The
+## notch itself is left alone deliberately; see the comment on it below.
 
 KL_X, KL_Y, KL_Z = 65.0, 39.0, 30.0
 KL_WALL, KL_FLOOR, KL_LID = 2.5, 3.0, 3.0
@@ -810,8 +825,20 @@ USB_W, USB_H = 15.0, 9.0
 kl_tray = _box(KL_X, KL_Y, KL_TOP).edges("|Z").fillet(CORNER_R)
 kl_tray = kl_tray.cut(_box(KL_IN_X, KL_IN_Y, KL_IN_H, (0, 0, KL_FLOOR)))
 
-# Baffle, with a notch at floor level for the jumper wires. Kept small: it is
-# there for four wires, not for air.
+# Baffle, with a full-height notch for the jumper wires.
+#
+# The comment here used to claim the notch was "at floor level" and "kept small
+# -- for four wires, not for air", and the code beneath it has always cut the
+# full 24 mm. Both halves of that were wrong, and the second one was the
+# expensive half: at 7 x 24 it is the largest single opening in the box.
+#
+# It stays full height anyway. The terrasse box lost its baffle entirely over
+# exactly this -- "first the slot was widened, then run full height, and it
+# still fouled" -- because a 4-way jumper housing has to drop in from above
+# rather than thread through a window, and a box that cannot be assembled is
+# worse than one that reads warm. The answer is not to close this, it is to
+# stop the board bay needing it: with the vents below, air leaves on the board's
+# own side of the baffle and this carries wires again instead of exhaust.
 kl_tray = kl_tray.union(_box(KL_BAF, KL_IN_Y, KL_IN_H,
                        (KL_SENS_X1 + KL_BAF / 2, 0, KL_FLOOR)))
 kl_tray = kl_tray.cut(
@@ -838,6 +865,25 @@ kl_tray = kl_tray.union(_box(KL_BAF, XIAO_Y + 2 * KL_BAF, XIAO_RIB,
 for sy in (-1, 1):
     kl_tray = kl_tray.union(_box(XIAO_X + 2 * KL_BAF, KL_BAF, XIAO_RIB,
                            (XIAO_X0 + XIAO_X / 2, sy * (XIAO_Y + KL_BAF) / 2, KL_FLOOR)))
+
+# Board bay: the chimney that keeps the board's heat on the board's side of the
+# baffle. Inlet just above the corral ribs, two outlets high where the warm air
+# actually is. Both long walls, so it is a cross-draught and not one hole.
+#
+# Walls only, no slots in the kl_lid -- unlike the schlafzimmer box, which has
+# them because its SCD41 needs room air and not box air. Nothing in here needs
+# room air; it only needs its heat gone, and a high wall slot does that without
+# leaving an opening above the board. These two live in a kitchen and a
+# bathroom, where what falls from above is grease and condensate.
+#
+# Kept inboard of the +X corner posts (x >= 22.5) and clear of the baffle, so
+# every slot opens onto air rather than onto a post.
+KL_BOARD_VENT_X = 11.0
+KL_BOARD_VENT_L = 16.0
+for z in (5.0, 13.0, 19.0):
+    for sy in (-1, 1):
+        kl_tray = kl_tray.cut(_box(KL_BOARD_VENT_L, 3 * KL_WALL, SLOT_W,
+                             (KL_BOARD_VENT_X, sy * KL_IN_Y / 2, KL_FLOOR + z)))
 
 # Cable out. Sized for a USB-C plug's overmould, not just the connector.
 kl_tray = kl_tray.cut(_box(3 * KL_WALL, USB_W, USB_H, (KL_IN_X / 2, 0, KL_FLOOR + 0.5)))
