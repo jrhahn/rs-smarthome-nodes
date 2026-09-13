@@ -82,3 +82,35 @@ Two consequences for the data. Their readings should read slightly **cooler**
 from here, and that step is the box cooling down, not the room. And they are
 unreachable between rounds, so their `sample_secs = 120` is now also the
 resolution of anything they publish.
+
+**This is when the code changed, not when the boards did.** A node keeps running
+what it was last flashed with. See the entry below for `kueche`; `bad` had not
+been reflashed either as of that evening.
+
+## 2026-09-13 20:26 — kueche — duty-cycled firmware actually flashed
+
+The profile changed in the source at 08:31; the board got it now. So the step
+the entry above predicts — slightly cooler readings, from the box no longer
+warming its own sensor — starts *here* for `kueche`, twelve hours later. Before
+this line it was still a board idling at 80–110 mA next to its own SHT31.
+
+Flashed from the laptop over USB, identified by MAC `ac:27:6e:82:43:94` rather
+than by which cable was in hand. Confirmed from the boot log rather than from
+the flash succeeding:
+
+    node 'kueche' (Küche) booted, mains, duty-cycled profile
+    wifi: 'wifi_42_ext' (built in)
+    SHT31-D found at 0x44
+
+and from the cycle itself — awake 20:28:11, published 20:28:17, asleep again by
+20:28:34. Roughly 23 seconds of every 120.
+
+Worth writing down about this board specifically: **nothing is stored in its
+flash.** Sectors `0x9000`/`0xA000`/`0xB000` — calibration, node identity, Wi-Fi
+— all read back blank, so it runs entirely on what it was compiled with. Read
+those back *before* reflashing a node, not after: a board whose credentials live
+only in the image goes off the network for good if it is rebuilt without
+`SSID=`/`PASSWORD=`, and it cannot be told about it afterwards.
+
+`bad` did not report at all through this evening — no readings, no status rows
+— so it is not merely unflashed, it is off the air. Unrelated to this change.
