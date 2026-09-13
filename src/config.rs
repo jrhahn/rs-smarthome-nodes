@@ -72,8 +72,9 @@ pub struct Config {
     pub tare_token: u32,
     /// When `false`, the firmware never deep-sleeps: it stays awake and keeps
     /// Wi-Fi up in a loop. Meant for bench testing on USB where deep sleep just
-    /// churns the serial monitor. Only consulted on battery nodes — a mains node
-    /// stays awake regardless (see [`crate::node::PowerProfile`]).
+    /// churns the serial monitor. Only consulted on a node whose profile sleeps
+    /// at all — a node on [`crate::node::PowerProfile::Mains`] stays awake
+    /// regardless.
     pub deep_sleep: bool,
     /// Seconds between periodic "heartbeat" publishes: even with no visitor, the
     /// firmware brings Wi-Fi up this often and publishes temperature + weight so
@@ -106,10 +107,10 @@ impl Config {
         idle_secs: 2,
         active_secs: 10,
         tare_token: 0,
-        // Battery behaviour by default. A mains node ignores the flag entirely
-        // (see `node::PowerProfile`), so this needs no per-node value — which
-        // also keeps `DEFAULT` a plain constant now that the node identity is
-        // resolved at runtime from flash.
+        // Sleeping by default, for every profile that sleeps at all. A node
+        // that stays awake ignores the flag entirely (see `node::PowerProfile`),
+        // so this needs no per-node value — which also keeps `DEFAULT` a plain
+        // constant now that the node identity is resolved at runtime from flash.
         deep_sleep: true,
         heartbeat_secs: 600, // 10 min
         // The sensor's own power-on value, so an un-calibrated node behaves

@@ -88,13 +88,15 @@ against something. Most breakouts pull ADDR low on board.
 **Pull-ups.** SDA and SCL need pull-ups to 3V3. Nearly every SHT31-D breakout
 has them fitted (usually 10 kΩ); if yours does not, add 4.7 kΩ on each line.
 
-**Power.** Mains — a USB-C phone charger. This node never sleeps and samples
-every 120 s.
+**Power.** Mains — a USB-C phone charger. It samples every 120 s, and since
+2026-09-13 it deep-sleeps in between rather than staying associated: the cable
+means energy is free, but the heat is not, and this node has nothing to report
+except the air it is sitting in. See `docs/base-platform.md`.
 
 **Expected at boot** (`kueche` says `Küche` in place of `Bad`):
 
 ```
-node 'bad' (Bad) booted, mains profile
+node 'bad' (Bad) booted, mains, duty-cycled profile
 SHT31-D found at 0x44
 SHT31-D: temperature = 21.4
 SHT31-D: humidity = 48.2

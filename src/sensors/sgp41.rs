@@ -11,7 +11,8 @@
 //! would yield a number that looks like a VOC index and is not one — so
 //! [`Sgp41::sample_once`] is a single 1 Hz step the caller drives in a loop,
 //! and [`Sgp41::latest`] only reports what those steps last computed. That is
-//! also why this sensor belongs on a mains node: a battery node is asleep.
+//! also why this sensor belongs on a node that stays awake: any node that
+//! deep-sleeps is not there to drive the loop, whatever it is powered from.
 //!
 //! **The output is an index, not a concentration.** 1..500, where 100 is the
 //! running average of roughly the last 24 hours. There is no µg/m³ and no ppb,

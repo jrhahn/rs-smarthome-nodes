@@ -24,9 +24,9 @@ second.
 | --- | --- | --- | --- |
 | `e0:72:a1:18:e2:c0` | `terrasse` | battery | 192.168.1.81 |
 | `ac:27:6e:80:51:f8` | `wohnzimmer` | mains | — |
-| `ac:27:6e:82:43:94` | `kueche` | mains | 192.168.1.30 |
+| `ac:27:6e:82:43:94` | `kueche` | mains, duty-cycled | 192.168.1.30 |
 | `ac:27:6e:7e:10:a0` | `schlafzimmer` | mains | — |
-| `ac:27:6e:7f:a6:b4` | `bad` | mains | — |
+| `ac:27:6e:7f:a6:b4` | `bad` | mains, duty-cycled | — |
 
 Complete as of 2026-09-10: the last two were read off `espflash board-info`
 during the RSSI rollout, so every board in the fleet is now identifiable
@@ -262,9 +262,21 @@ and the optics; a sealed enclosure would have it measuring the enclosure.
 
 ---
 
-## `kueche` — mains
+## `kueche` — mains, duty-cycled
 
-SHT31-D only, verified 2026-09-04. Nothing outstanding.
+SHT31-D only, verified 2026-09-04.
+
+Duty-cycled since 2026-09-13, together with `bad`, after the new printed boxes
+came in at least 2.5 °C high — see *A separate chamber is not the same as
+separate air* below. Two changes went together and both need reflashing and
+reprinting to take effect: the firmware now deep-sleeps between rounds, and the
+`climate_tray` has vents in the board bay. Cadence is unchanged at 120 s.
+
+Expect the boot log to say `mains, duty-cycled profile`, and expect a
+**Deep Sleep** switch to appear on the device card in Home Assistant — it did
+not have one before. Leave it on; `0` holds the node awake for bench testing and
+is exactly the state that sat retained on the broker for days further up this
+page.
 
 ---
 
@@ -355,3 +367,23 @@ SHT31-D only, verified 2026-09-04. Nothing outstanding.
   at the board, separated from room warming by using the unmoved SCD41 as a
   control. Mount temperature sensors away from the board on any node that
   reports one.
+- **A separate chamber is not the same as separate air.** Reported 2026-09-13 on
+  `kueche` and `bad` after the new printed boxes went in: at least 2.5 °C high,
+  which is a lot more than the 0.9 °C above. The boxes do have two compartments
+  with a baffle between them, so "away from the board" was already satisfied on
+  paper. What was missing was anywhere for the board's heat to go. The board bay
+  had no vents at all; the only openings in the box were at the sensor end, and
+  the baffle's full-height wire notch is 168 mm² — so the board's entire heat
+  load was drawn *through* the sensor chamber on its way out. The baffle was not
+  separating the two volumes, it was aiming one at the other.
+
+  Two fixes, both landed: the board bay gets its own chimney in `models.py`
+  (inlet low, two outlets high, both long walls, 240 mm² — the notch is left
+  alone, because the terrasse box already lost a baffle to a jumper housing that
+  would not thread through a narrower one), and both nodes moved to
+  `PowerProfile::MainsDutyCycled` so the board is off between rounds.
+
+  **Check the humidity, not just the temperature.** RH is read against
+  temperature, so a box 2.5 °C warm reports RH about seven points low. If the
+  fix worked, both numbers move, and the humidity moving is what proves it was
+  the air and not the sensor.

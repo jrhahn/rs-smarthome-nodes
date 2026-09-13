@@ -445,9 +445,11 @@ const SDS011_CONTROLS: &[Control] = &[Control {
     spec: "\"min\":0,\"max\":1,\"step\":0.01,\"mode\":\"box\",",
 }];
 
-/// Knobs that only do anything on a battery node. A mains node samples on its
-/// build-time cadence and never sleeps, so exposing these would put four dead
-/// controls on its device card.
+/// Knobs that only do anything on a battery node — the cadences it spends its
+/// cell at. Any node on a cable samples on its build-time cadence, whether it
+/// sleeps between rounds or not, so exposing these would put three dead
+/// controls on its device card. The `deep_sleep` switch is deliberately not
+/// among them; see [`SLEEP_CONTROLS`].
 const BATTERY_CONTROLS: &[Control] = &[
     Control {
         component: "number",
@@ -470,14 +472,22 @@ const BATTERY_CONTROLS: &[Control] = &[
         reads_back: true,
         spec: "\"min\":10,\"max\":86400,\"step\":10,\"unit_of_meas\":\"s\",\"mode\":\"box\",",
     },
-    Control {
-        component: "switch",
-        key: "deep_sleep",
-        name: "Deep Sleep",
-        reads_back: true,
-        spec: "\"pl_on\":\"1\",\"pl_off\":\"0\",",
-    },
 ];
+
+/// The knob every sleeping node gets, whatever it is powered from.
+///
+/// Kept apart from [`BATTERY_CONTROLS`] because the three intervals above are
+/// about spending a cell, while this one is about being reachable: turning it
+/// off is how a node is held awake on the bench, where deep sleep just churns
+/// the serial monitor. A duty-cycled mains node needs that escape hatch exactly
+/// as much as a battery one, and would otherwise need a reflash to get it.
+const SLEEP_CONTROLS: &[Control] = &[Control {
+    component: "switch",
+    key: "deep_sleep",
+    name: "Deep Sleep",
+    reads_back: true,
+    spec: "\"pl_on\":\"1\",\"pl_off\":\"0\",",
+}];
 
 /// Every command entity this node exposes.
 pub fn controls(node: &NodeConfig) -> Vec<&'static Control, MAX_CONTROLS> {
@@ -488,6 +498,7 @@ pub fn controls(node: &NodeConfig) -> Vec<&'static Control, MAX_CONTROLS> {
         .chain(SCD41_CONTROLS.iter().filter(|_| node.scd41.enabled))
         .chain(SDS011_CONTROLS.iter().filter(|_| node.sds011.compensated))
         .chain(BATTERY_CONTROLS.iter().filter(|_| node.power.is_battery()))
+        .chain(SLEEP_CONTROLS.iter().filter(|_| node.power.deep_sleeps()))
     {
         let _ = out.push(control);
     }
@@ -550,14 +561,20 @@ pub fn control_payload(
 }
 
 const _: () = {
-    // The worst case is one node carrying all three groups at once; `controls`
+    // The worst case is one node carrying every group at once; `controls`
     // returns a fixed-capacity Vec, so overflowing this would silently drop the
-    // last entities rather than fail to build.
+    // last entities rather than fail to build. No real node carries all of
+    // them — but the bound has to hold for the table someone writes next, not
+    // for the one in the file today, and that is cheaper to keep true than to
+    // keep reasoning about. `REANNOUNCE_CONTROLS` is in the sum because every
+    // node has it; it was missing while the headroom made that harmless.
     assert!(
-        SCALE_CONTROLS.len()
+        REANNOUNCE_CONTROLS.len()
+            + SCALE_CONTROLS.len()
             + SCD41_CONTROLS.len()
             + SDS011_CONTROLS.len()
             + BATTERY_CONTROLS.len()
+            + SLEEP_CONTROLS.len()
             <= MAX_CONTROLS
     );
 };
@@ -570,7 +587,7 @@ mod tests {
         availability, config_payload, config_topic, control_payload, control_topic, controls,
         announcement_tag, entities, Availability, Config, NodeConfig, Slot, BATTERY_CONTROLS,
         MAX_ENTITIES, MIN_EXPIRY_SECS,
-        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS, SCD41_CONTROLS, SDS011_CONTROLS,
+        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS, SCD41_CONTROLS, SDS011_CONTROLS, SLEEP_CONTROLS,
     };
     use crate::node::FLEET;
     use serde_json::Value;
@@ -999,19 +1016,31 @@ mod tests {
                     control.key
                 );
             }
+            // Not `is_battery`: the switch follows sleeping, so `kueche` and
+            // `bad` get it while running off a cable.
+            for control in SLEEP_CONTROLS {
+                assert_eq!(
+                    keys.contains(&control.key),
+                    node.power.deep_sleeps(),
+                    "{name}: {}",
+                    control.key
+                );
+            }
         }
     }
 
     #[test]
     fn a_node_with_nothing_to_tune_has_only_the_re_announce_button() {
         // Better a near-empty Configuration section than controls that do
-        // nothing. `kueche` is the case today: mains, no load cell, and an
-        // SDS011 whose duty cycle is a per-node constant rather than a runtime
-        // knob. The one thing every node keeps is the re-announce button,
+        // nothing. The one thing every node keeps is the re-announce button,
         // because a digest that disagrees with the broker is otherwise
         // unrecoverable — see `REANNOUNCE_CONTROLS`.
+        //
+        // No node in the fleet is bare any more: `kueche` and `bad` were, until
+        // they started duty-cycling and picked up the `deep_sleep` switch with
+        // it. The rule is still worth stating for the next one added.
         for (name, node) in FLEET {
-            if !node.power.is_battery() && !node.scale.enabled && !node.scd41.enabled {
+            if !node.power.deep_sleeps() && !node.scale.enabled && !node.scd41.enabled {
                 let keys: Vec<&str> = controls(node).iter().map(|c| c.key).collect();
                 assert_eq!(keys, vec!["reannounce"], "{name} exposes dead controls");
             }

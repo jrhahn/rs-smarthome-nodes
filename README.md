@@ -3,8 +3,8 @@
 Async `no_std` Rust ([Embassy](https://embassy.dev)) firmware for a fleet of
 **Seeed Studio XIAO ESP32-C3** smart-home sensor nodes. One image serves every
 node: `NODE=<name>` at build time selects which sensors are populated, what the
-node is called, and whether it runs on battery (deep sleep) or mains (always
-on). Home Assistant picks the nodes up automatically over **MQTT
+node is called, and whether it sleeps between readings or stays associated.
+Home Assistant picks the nodes up automatically over **MQTT
 auto-discovery** — no hand-declared entities.
 
 It started as a battery bird-feeder scale, which is still the default node
@@ -44,8 +44,8 @@ also be **provisioned** to another identity afterwards, without a rebuild — se
 | `terrasse` (default) | Terrasse | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
 | `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains |
 | `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 + SGP41 | mains (fan) |
-| `kueche` | Küche | SHT31-D | mains |
-| `bad` | Bad | SHT31-D | mains |
+| `kueche` | Küche | SHT31-D | mains, duty-cycled |
+| `bad` | Bad | SHT31-D | mains, duty-cycled |
 | `terrasse` | Terrasse | none yet — the board is on the network while it is wired up | battery, deep sleep |
 
 ### Provisioning a board
@@ -79,14 +79,23 @@ actually changes, and an unknown name is logged and ignored rather than obeyed.
 The identity lives in its own flash sector, separate from the calibration blob —
 provisioning a board never disturbs its tare or scale factor.
 
-**Power profiles** decide the loop: *battery* nodes cold-boot out of deep sleep,
-measure, publish only when there is something to say, and sleep again. *Mains*
-nodes stay associated and sample on a fixed per-node cadence — CO₂ continuity
-and the SDS011's duty-cycled fan both rule out deep sleep. A sensor whose own
-cadence is slower than the node's round says so per slot (`Slot::every`), which
-is how `wohnzimmer` reads CO₂ every minute while its fan runs four times an
-hour. On a battery node the
-`config/deep_sleep` switch can still hold it awake for bench testing.
+**Power profiles** decide the loop. *Battery* nodes cold-boot out of deep sleep,
+measure, publish only when there is something to say, and sleep again, at the
+runtime intervals below. *Mains* nodes stay associated and sample on a fixed
+per-node cadence — CO₂ continuity and the SDS011's duty-cycled fan both rule out
+deep sleep. A sensor whose own cadence is slower than the node's round says so
+per slot (`Slot::every`), which is how `wohnzimmer` reads CO₂ every minute while
+its fan runs four times an hour.
+
+*Mains, duty-cycled* is the third: on a cable, but deep-sleeping between rounds
+anyway. The reason is heat rather than power. A node that keeps Wi-Fi up draws
+something like 80–110 mA without pause, which is roughly a third of a watt
+warming the inside of a small box, and a node whose entire job is to report the
+room's temperature cannot afford to warm the air it is measuring. `kueche` and
+`bad` carry nothing that needs continuity, so they stop running between
+readings, sleeping their own `sample_secs` — the cadence they already published
+at, so no history gets a step in it. Any node that sleeps at all keeps the
+`config/deep_sleep` switch, which holds it awake for bench testing.
 
 ## Hardware
 
@@ -403,13 +412,14 @@ under `birds/scale/state`, for hand-declared entities that predated discovery.
 That topic and the whole `birds` namespace went when it was renamed to
 `terrasse`.
 
-**Availability.** A mains node registers an MQTT last will, so the broker
-publishes retained `offline` to `<namespace>/<node>/status` the moment its
-connection breaks (and the node publishes `online` on connect, disconnecting
+**Availability.** A node that stays awake registers an MQTT last will, so the
+broker publishes retained `offline` to `<namespace>/<node>/status` the moment
+its connection breaks (and the node publishes `online` on connect, disconnecting
 cleanly at the end of a round so a normal publish is never mistaken for a
-death). Battery nodes get no will — they are supposed to be offline between
-readings — so every node also carries `expire_after` in its discovery config:
-three missed publish rounds and Home Assistant invalidates the values.
+death). Sleeping nodes get no will — they are supposed to be offline between
+readings, whether that is to save a cell or to stay cool — so every node also
+carries `expire_after` in its discovery config: three missed publish rounds and
+Home Assistant invalidates the values.
 
 The tuning/calibration knobs are *commands* rather than readings, but they are
 discovered too — as `number`, `switch` and `button` entities in the device's
@@ -435,12 +445,15 @@ on / has just left the scale) and persists them. Changes therefore apply with a
 | `idle_interval`     | deep-sleep seconds while empty | battery |
 | `active_interval`   | deep-sleep seconds for a load that outlasted its awake visit window (snow, a twig) — a normal visit is watched awake and never uses this | battery |
 | `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) | battery |
-| `deep_sleep` (switch)  | `0` = stay awake with Wi-Fi up (bench testing on USB), `1` = normal battery deep sleep | battery |
+| `deep_sleep` (switch)  | `0` = stay awake with Wi-Fi up (bench testing on USB), `1` = sleep between rounds as the profile intends | any sleeping node |
 | `scd41_temp_offset` | °C the SCD41 subtracts for its own self-heating (default 4.0) | with SCD41 |
 | `sds011_kappa`      | κ for the PM humidity correction, `0` disables it (default 0.25) | with a compensated SDS011 |
 
-Only the knobs that do something on a given node are announced: a mains node
-samples on its build-time cadence and never sleeps, so it gets none of them.
+Only the knobs that do something on a given node are announced. The three
+intervals are about spending a cell, so they are battery-only: a node on a cable
+samples on its build-time cadence whether or not it sleeps between rounds. The
+`deep_sleep` switch follows sleeping instead, so `kueche` and `bad` have it and
+`schlafzimmer` does not.
 Pressing **Tarieren** publishes a retained press (the node may be asleep) which
 the firmware deletes once it has re-zeroed, so it is never replayed as a second
 tare.

@@ -2,7 +2,7 @@
 //!
 //! One firmware image serves the whole fleet: which sensors are populated, what
 //! the node is called, which MQTT namespace it publishes under and whether it
-//! runs on battery or mains all come from the table below.
+//! sleeps between readings or stays awake all come from the table below.
 //!
 //! Which entry is used is decided in two steps, at boot:
 //!
@@ -32,20 +32,68 @@ use log::warn;
 use crate::config;
 use crate::sensors::scd41::Mode as Scd41Mode;
 
-/// How a node is powered, which decides whether it deep-sleeps between samples
-/// or stays associated and loops (#17).
+/// How a node is powered *and* whether it duty-cycles, which together decide
+/// whether it deep-sleeps between samples or stays associated and loops (#17).
+///
+/// Power source and sleep policy are not the same question, and this enum used
+/// to pretend they were. A cell forces sleeping; a cable only *permits* staying
+/// awake, and permitting is not requiring -- see [`PowerProfile::MainsDutyCycled`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PowerProfile {
     /// Deep-sleep between samples; wakes cold and re-runs `main` (bird scale).
+    /// Cadence comes from the runtime intervals in [`crate::config::Config`],
+    /// because on a cell it is worth retuning without a reflash.
     Battery,
     /// Stays awake, keeps Wi-Fi up, samples on a fixed cadence. Required for the
     /// SDS011 fan and for CO₂ continuity.
     Mains,
+    /// On a cable, but deep-sleeps between rounds anyway, at the node's own
+    /// [`NodeConfig::sample_secs`].
+    ///
+    /// The reason is heat, not power. A node that keeps Wi-Fi associated draws
+    /// on the order of 80-110 mA without pause, and in a closed box that is a
+    /// third of a watt with nowhere to go. `docs/commissioning.md` measured
+    /// 0.9 °C of it on `schlafzimmer` in 2026-09, and the climate boxes are
+    /// smaller. A node whose entire job is to report the room's temperature
+    /// cannot afford to warm the air it is reporting on, and the cheapest way
+    /// not to is to stop running between readings.
+    ///
+    /// Only a node with nothing to keep continuous may take this: no SDS011 fan
+    /// to duty-cycle, no SCD41 whose self-calibration assumes it keeps running,
+    /// no SGP41 hotplate, and no load cell (whose presence logic wants the
+    /// battery profile's two-speed cadence, not a fixed one). A const assert
+    /// below enforces all four.
+    ///
+    /// Unlike [`PowerProfile::Battery`] this sleeps for `sample_secs` rather
+    /// than the runtime intervals, so the published cadence is exactly what it
+    /// was while the node stayed awake and no history gets a step in it.
+    MainsDutyCycled,
 }
 
 impl PowerProfile {
+    /// Runs off a cell, so its cadence comes from [`crate::config::Config`] and
+    /// it gets the battery tuning knobs in Home Assistant.
     pub const fn is_battery(self) -> bool {
         matches!(self, PowerProfile::Battery)
+    }
+
+    /// Sleeps between rounds, whatever it is powered from.
+    ///
+    /// This, not [`PowerProfile::is_battery`], is the question to ask about
+    /// last-wills, SCD41 mode, and which of the two loops in `main` runs: all
+    /// three turn on whether the node is reachable between readings, and a
+    /// duty-cycled mains node is exactly as absent as a battery one.
+    pub const fn deep_sleeps(self) -> bool {
+        !matches!(self, PowerProfile::Mains)
+    }
+
+    /// The word this profile goes by in the boot log.
+    pub const fn label(self) -> &'static str {
+        match self {
+            PowerProfile::Battery => "battery",
+            PowerProfile::Mains => "mains",
+            PowerProfile::MainsDutyCycled => "mains, duty-cycled",
+        }
     }
 }
 
@@ -233,8 +281,10 @@ pub struct NodeConfig {
     /// Topic namespace: state topics are `<namespace>/<id>/<key>`.
     pub namespace: &'static str,
     pub power: PowerProfile,
-    /// Mains nodes: seconds between sample+publish rounds. Battery nodes use the
-    /// runtime idle/active intervals from [`crate::config::Config`] instead.
+    /// Seconds between sample+publish rounds, for both mains profiles: awake it
+    /// is how long the loop waits, duty-cycled it is how long the node sleeps.
+    /// Battery nodes use the runtime idle/active intervals from
+    /// [`crate::config::Config`] instead.
     pub sample_secs: u64,
     pub scale: Slot,
     pub ds18b20: Slot,
@@ -265,10 +315,13 @@ impl NodeConfig {
         self.sds011.enabled
     }
 
-    /// Battery nodes take one single-shot CO₂ sample per wake; mains nodes let
-    /// the SCD41 run continuously, which is what its self-calibration expects.
+    /// A sleeping node takes one single-shot CO₂ sample per wake; a node that
+    /// stays awake lets the SCD41 run continuously, which is what its
+    /// self-calibration expects. Keyed on sleeping rather than on the power
+    /// source: a periodic measurement that is cut off by a deep sleep is not
+    /// periodic, whatever the node is plugged into.
     pub const fn scd41_mode(&self) -> Scd41Mode {
-        if self.power.is_battery() {
+        if self.power.deep_sleeps() {
             Scd41Mode::SingleShot
         } else {
             Scd41Mode::Periodic
@@ -285,12 +338,15 @@ impl NodeConfig {
     /// Whether this node backs its Home Assistant availability with an MQTT
     /// last-will.
     ///
-    /// Only mains nodes do. A battery node is *meant* to be disconnected almost
-    /// all the time — it wakes, publishes, and drops the link again — so a will
-    /// would mark it offline seconds after every reading. Those nodes rely on
-    /// the discovery `expire_after` instead (see [`crate::discovery`]).
+    /// Only a node that stays awake does. A sleeping node is *meant* to be
+    /// disconnected almost all the time — it wakes, publishes, and drops the
+    /// link again — so a will would mark it offline seconds after every
+    /// reading. Those nodes rely on the discovery `expire_after` instead (see
+    /// [`crate::discovery`]). That is about reachability, not about the power
+    /// source, so a duty-cycled mains node drops its will along with the
+    /// battery one.
     pub const fn uses_lwt(&self) -> bool {
-        !self.power.is_battery()
+        !self.power.deep_sleeps()
     }
 
     /// Retained topic carrying `online` / `offline` for a node with a last-will.
@@ -392,11 +448,20 @@ const WOHNZIMMER: NodeConfig = NodeConfig {
 ///
 /// It carried the SDS011 until the particulate sensor moved to
 /// [`WOHNZIMMER`]; see there for why.
+/// The kitchen: a XIAO and an SHT31 on wires, and nothing else.
+///
+/// Duty-cycled rather than awake. It is on a USB-C charger, so staying
+/// associated costs nothing in energy — but it costs about 0.3 W of heat in a
+/// 65 x 39 x 30 box, and a node that reports only temperature and humidity has
+/// no other output to weigh that against. Nothing here needs continuity: no
+/// fan, no CO₂ self-calibration, no hotplate. So it sleeps, and `sample_secs`
+/// below is the sleep, which keeps the 120 s cadence the published history
+/// already has.
 const KUECHE: NodeConfig = NodeConfig {
     id: "kueche",
     name: "Küche",
     namespace: "smarthome",
-    power: PowerProfile::Mains,
+    power: PowerProfile::MainsDutyCycled,
     sample_secs: 120,
     scale: Slot::off(),
     ds18b20: Slot::off(),
@@ -408,11 +473,16 @@ const KUECHE: NodeConfig = NodeConfig {
     legacy_weight_topic: None,
 };
 
+/// The bathroom: the same build as [`KUECHE`], and duty-cycled for the same
+/// reason. If anything the case is stronger here — a bathroom's humidity is the
+/// number people actually look at, and relative humidity is read against
+/// temperature, so a box that reads 2.5 K warmer than the room reports a humidity
+/// that is about seven points low.
 const BAD: NodeConfig = NodeConfig {
     id: "bad",
     name: "Bad",
     namespace: "smarthome",
-    power: PowerProfile::Mains,
+    power: PowerProfile::MainsDutyCycled,
     sample_secs: 120,
     scale: Slot::off(),
     ds18b20: Slot::off(),
@@ -514,6 +584,34 @@ const _: () = {
                 || n.scd41.compensated
                 || n.battery.compensated),
             "only the SDS011 slot honours humidity compensation"
+        );
+        i += 1;
+    }
+};
+
+// A duty-cycled mains node is asleep between rounds, which rules out every
+// sensor that has to be attended to continuously — the SDS011's fan duty cycle,
+// the SCD41's self-calibration, the SGP41's hotplate — and the load cell, whose
+// presence logic is built around the battery profile's two-speed cadence rather
+// than one fixed round. Each of those would build and then misbehave quietly:
+// an index computed from a cold hotplate is a plausible-looking number that
+// means nothing. Fail the build here, next to the table that asked for it.
+const _: () = {
+    let mut i = 0;
+    while i < FLEET.len() {
+        let n = FLEET[i].1;
+        let duty_cycled = matches!(n.power, PowerProfile::MainsDutyCycled);
+        assert!(
+            !(duty_cycled && (n.sds011.enabled || n.scd41.enabled || n.sgp41.enabled)),
+            "a duty-cycled node cannot carry a sensor that must run continuously"
+        );
+        assert!(
+            !(duty_cycled && n.scale.enabled),
+            "the load cell's presence logic needs the battery profile's cadence"
+        );
+        assert!(
+            !(duty_cycled && n.battery.enabled),
+            "a duty-cycled node is on a cable; it has no cell to measure"
         );
         i += 1;
     }
@@ -701,9 +799,11 @@ const _: () = {
     // Node names have to fit the flash slot they are provisioned into.
     assert!("schlafzimmer".len() <= crate::config::NODE_NAME_MAX);
     // The fleet's power profiles decide which sensors are even legal: the
-    // SDS011 fan and continuous CO₂ both need mains.
+    // SDS011 fan and continuous CO₂ both need a node that stays awake.
     assert!(!KUECHE.power.is_battery());
     assert!(!SCHLAFZIMMER.power.is_battery());
+    assert!(!SCHLAFZIMMER.power.deep_sleeps());
+    assert!(KUECHE.power.deep_sleeps());
     assert!(TERRASSE.power.is_battery());
 };
 
@@ -848,19 +948,40 @@ mod tests {
     }
 
     #[test]
+    fn the_climate_nodes_sleep_without_changing_what_they_publish() {
+        // The whole point of duty-cycling `kueche` and `bad`: the board stops
+        // heating the air its own SHT31 is measuring. What must *not* change is
+        // the cadence — these two have years of history at 120 s, and a node
+        // that starts reporting every ten minutes instead has quietly thrown
+        // that continuity away to fix a different problem.
+        for id in ["kueche", "bad"] {
+            let node = by_name(id).expect("in the fleet");
+            assert!(node.power.deep_sleeps(), "{id} is still staying awake");
+            assert!(!node.power.is_battery(), "{id} is on a cable, not a cell");
+            assert_eq!(node.sample_secs, 120, "{id} changed cadence");
+            // Asleep between rounds, so a will would declare it dead after
+            // every publish; Home Assistant expires it instead.
+            assert!(!node.uses_lwt(), "{id} kept a last-will it cannot honour");
+        }
+    }
+
+    #[test]
     fn the_power_profile_decides_sleep_and_availability() {
         for (name, node) in FLEET {
-            // A battery node is offline by design between readings, so a last
-            // will would declare it dead after every single publish.
+            // A sleeping node is offline by design between readings, so a last
+            // will would declare it dead after every single publish. The
+            // question is whether it sleeps, not what it is plugged into —
+            // `kueche` and `bad` are on a cable and still take the expiry path.
             assert_eq!(
                 node.uses_lwt(),
-                !node.power.is_battery(),
+                !node.power.deep_sleeps(),
                 "{name} availability does not match its power profile"
             );
-            // Single-shot CO₂ on battery; periodic is what ASC expects on mains.
+            // Single-shot CO₂ wherever the node sleeps; periodic is what ASC
+            // expects, and it only means anything on a node that stays up.
             assert_eq!(
                 node.scd41_mode() == crate::sensors::scd41::Mode::SingleShot,
-                node.power.is_battery(),
+                node.power.deep_sleeps(),
                 "{name} SCD41 mode does not match its power profile"
             );
         }

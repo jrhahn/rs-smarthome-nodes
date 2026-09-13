@@ -64,7 +64,7 @@ use rust_mqtt::{
     utils::rng_generator::CountingRng,
 };
 
-use node::Provision;
+use node::{NodeConfig, Provision};
 use rs_smarthome_nodes::{
     battery, config, discovery, ds18b20, hx711, node, platform, presence, rssi, sensors::scale,
     state, wifi,
@@ -295,11 +295,7 @@ async fn main(spawner: Spawner) {
         "node '{}' ({}) booted, {} profile",
         node.id,
         node.name,
-        if node.power.is_battery() {
-            "battery"
-        } else {
-            "mains"
-        }
+        node.power.label()
     );
     // Say where to reach this board if it needs to be told what it is; the MAC
     // is the only name it is sure of before provisioning.
@@ -413,19 +409,24 @@ async fn main(spawner: Spawner) {
     };
 
     // --- 3. Hand over to the power profile ---------------------------------
-    // Mains nodes never deep-sleep. Battery nodes normally do, but Home
-    // Assistant can hold one awake (`config/deep_sleep`) for bench testing on
-    // USB, where deep sleep just churns the serial monitor. Both branches
-    // diverge, so exactly one of them runs per boot.
-    if !node.power.is_battery() || !cfg.deep_sleep {
+    // A node that stays awake never deep-sleeps. Sleeping nodes normally do,
+    // but Home Assistant can hold one awake (`config/deep_sleep`) for bench
+    // testing on USB, where deep sleep just churns the serial monitor. Both
+    // branches diverge, so exactly one of them runs per boot.
+    if !node.power.deep_sleeps() || !cfg.deep_sleep {
         run_awake(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
     }
 
     run_battery(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
 }
 
-/// Battery profile: one measurement per cold boot, then straight back to deep
+/// Sleeping profile: one measurement per cold boot, then straight back to deep
 /// sleep. Never returns.
+///
+/// Reached by a battery node and by a duty-cycled mains one. The two differ
+/// only in how long the sleep is — see [`publish_interval`] — because from
+/// here down the question is the same either way: the node is up, it has one
+/// round to do, and then it is gone again.
 ///
 /// The cold boot per poll is the expensive part — ~270 ms of ROM boot and app
 /// init to clock out one 100 ms conversion, which at `idle_secs: 2` is about a
@@ -455,13 +456,7 @@ async fn run_battery(
     if !node.scale.enabled {
         let mut samples = collect_samples(None, None, &cfg, board).await;
         let cfg = publish(spawner, radio, &mut samples, state::baseline(), cfg).await;
-        // The *heartbeat* interval, not the idle one. `idle_interval` is the
-        // rate the load cell gets polled at — two seconds by default, which is
-        // cheap precisely because those wake-ups never touch the radio. Without
-        // a cell there is nothing to poll, so every wake-up is already a full
-        // publish with a Wi-Fi connect in it, and sleeping two seconds between
-        // those would spend the whole cell on the radio and nothing else.
-        enter_deep_sleep(lpwr, cfg.heartbeat_interval());
+        enter_deep_sleep(lpwr, publish_interval(&node, &cfg));
     }
 
     let raw = match read_scale(board).await {
@@ -760,11 +755,11 @@ async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Con
 }
 
 /// Stay-awake loop: bring Wi-Fi up once and keep it, then sample + publish +
-/// drain config on a fixed cadence. This is the normal mode for mains nodes
-/// (#17) and the bench-testing mode for a battery node with `deep_sleep` off,
-/// where it streams to the still-connected serial monitor. Never returns — it
-/// either loops forever or, if Home Assistant re-enables deep sleep on a battery
-/// node, drops into it.
+/// drain config on a fixed cadence. This is the normal mode for a node on
+/// `PowerProfile::Mains` (#17) and the bench-testing mode for any sleeping
+/// node with `deep_sleep` off, where it streams to the still-connected serial
+/// monitor. Never returns — it either loops forever or, if Home Assistant
+/// re-enables deep sleep on a node whose profile allows it, drops into it.
 async fn run_awake(
     spawner: Spawner,
     radio: Radio,
@@ -846,11 +841,20 @@ async fn run_awake(
         };
         cfg = persist_if_changed(cfg, updated);
 
-        // Honour a live switch back to deep sleep immediately (battery only —
-        // a mains node has nothing to gain and CO₂/PM continuity to lose).
-        if node.power.is_battery() && cfg.deep_sleep {
+        // Honour a live switch back to deep sleep immediately. Only for a node
+        // whose profile sleeps at all: one that stays awake has nothing to gain
+        // and CO₂/PM continuity to lose. A battery node drops to the idle
+        // cadence, where the next wake-up is a cheap load-cell poll; a node
+        // without a cell has nothing cheap to do, so it goes straight to its
+        // publish interval.
+        if node.power.deep_sleeps() && cfg.deep_sleep {
             info!("deep sleep re-enabled — sleeping");
-            enter_deep_sleep(lpwr, cfg.idle_interval());
+            let interval = if node.scale.enabled {
+                cfg.idle_interval()
+            } else {
+                publish_interval(&node, &cfg)
+            };
+            enter_deep_sleep(lpwr, interval);
         }
 
         wait_for_next_round(sample_period_secs(&cfg), board).await;
@@ -910,6 +914,32 @@ fn presence_publish_allowed(cfg: &Config) -> bool {
 fn presence_is_stuck(cfg: &Config) -> bool {
     let limit = presence::rounds_for(presence::STUCK_AFTER_SECS, cfg.active_secs);
     state::present_rounds() >= limit
+}
+
+/// How long a sleeping node without a load cell stays down between publishes.
+///
+/// Every wake-up it takes is already a full publish with a Wi-Fi connect in it,
+/// so this is the node's whole cadence, and the two profiles want different
+/// things from it.
+///
+/// A battery node uses the *heartbeat* interval, not the idle one.
+/// `idle_interval` is the rate the load cell gets polled at — two seconds by
+/// default, which is cheap precisely because those wake-ups never touch the
+/// radio. Without a cell there is nothing to poll, and sleeping two seconds
+/// between full publishes would spend the whole cell on the radio and nothing
+/// else.
+///
+/// A duty-cycled mains node uses `sample_secs` instead: it is not saving a
+/// battery, it is staying cool, and it has no reason to report any less often
+/// than it did while it was awake. Keeping the number the node already
+/// published at means the change leaves no step in the Home Assistant history
+/// and needs no new knob to explain.
+fn publish_interval(node: &NodeConfig, cfg: &Config) -> CoreDuration {
+    if node.power.is_battery() {
+        cfg.heartbeat_interval()
+    } else {
+        CoreDuration::from_secs(node.sample_secs.max(1))
+    }
 }
 
 fn sample_period_secs(cfg: &Config) -> u64 {

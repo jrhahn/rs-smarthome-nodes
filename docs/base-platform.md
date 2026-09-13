@@ -13,8 +13,8 @@ of sensors, selected with `NODE=<name>` at build time.
 | `terrasse` (default) | Terrasse | load cell (HX711) + DS18B20 + SHT31-D | battery, deep-sleep |
 | `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains, always-on |
 | `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 + SGP41 | mains (fan) |
-| `kueche` | Küche | SHT31-D | mains |
-| `bad` | Bad | SHT31-D | mains |
+| `kueche` | Küche | SHT31-D | mains, duty-cycled |
+| `bad` | Bad | SHT31-D | mains, duty-cycled |
 | `terrasse` | Terrasse | none yet — every slot off while it is wired up | battery, deep-sleep |
 
 A node's sensors need not share a cadence: `sample_secs` is the base round, and
@@ -353,15 +353,17 @@ used to be the one thing still hand-declared in YAML, which meant each node in
 the fleet needed its own copy-pasted block.
 
 Which knobs a node gets follows from what it *is*: the calibration ones only on
-a node with a load cell, the sleep/interval ones only on a battery node, since a
-mains node samples on its build-time cadence and never sleeps. A dead control on
-a device card is worse than a missing one.
+a node with a load cell, the three interval ones only on a battery node, since
+any node on a cable samples on its build-time cadence. The `deep_sleep` switch
+splits off from those and follows *sleeping* rather than the power source, so a
+duty-cycled mains node keeps its one way of being held awake on the bench. A
+dead control on a device card is worse than a missing one.
 
 Two details that are not obvious:
 
 - **The button consumes its own message.** A button's payload is a constant, so
   the firmware cannot tell one press from the next; and the message must be
-  retained, because a battery node is asleep when the button is pressed. So the
+  retained, because a sleeping node is asleep when the button is pressed. So the
   node deletes the retained message (empty retained payload) once it has
   re-zeroed. The older timestamp-token scheme still works and is still
   remembered, which doubles as a backstop if a delete is ever lost.
@@ -375,10 +377,10 @@ Two details that are not obvious:
 
 Two mechanisms, because neither alone covers a fleet that is half asleep:
 
-| | Mains node | Battery node |
+| | Always-on node | Sleeping node (battery or duty-cycled) |
 | --- | --- | --- |
 | Last will (`avty_t` → `<ns>/<node>/status`) | yes | **no** |
-| `expire_after` | 3 × `sample_secs` | 3 × `heartbeat_secs` |
+| `expire_after` | 3 × `sample_secs` | 3 × `heartbeat_secs` (battery) or 3 × `sample_secs` (duty-cycled) |
 
 A last will catches the node that dies *while connected*: the broker publishes
 retained `offline` and Home Assistant greys the entities out at once. The node
@@ -387,12 +389,14 @@ a proper MQTT `DISCONNECT` when a round is done, which tells the broker to
 discard the will. Without that, a mains node that reconnects per round would be
 declared dead after every single publish.
 
-Battery nodes get **no** will at all: they are legitimately disconnected almost
+Sleeping nodes get **no** will at all: they are legitimately disconnected almost
 all the time, so a will would mark them offline seconds after every reading.
-They rely on `expire_after` instead, which is also what catches a mains node
-that dies *between* rounds (a clean disconnect discards the will, so nothing
-else would notice). Three missed rounds is the threshold — one miss is a lost
-packet or a failed join, three is a node that stopped — with a 120 s floor.
+That is about reachability rather than about the power source, so a duty-cycled
+mains node drops its will along with the battery one. They rely on
+`expire_after` instead, which is also what catches an always-on node that dies
+*between* rounds (a clean disconnect discards the will, so nothing else would
+notice). Three missed rounds is the threshold — one miss is a lost packet or a
+failed join, three is a node that stopped — with a 120 s floor.
 
 `expire_after` is derived from the live config, so changing the heartbeat
 interval clears the "discovery published" flag and re-announces the entities
@@ -400,21 +404,27 @@ with the new expiry.
 
 ## Power profiles (#17)
 
-- **battery**: deep-sleep between samples (the bird-scale behaviour).
+- **battery**: deep-sleep between samples (the bird-scale behaviour), at the
+  runtime idle/active/heartbeat intervals.
 - **mains**: stay awake with Wi-Fi up, sample + publish every
-  `NodeConfig::sample_secs` (60 s indoors, 900 s in the kitchen so the SDS011
-  fan is only spun 4×/h). Continuous operation is required for CO₂ value and for
-  the fan.
+  `NodeConfig::sample_secs` (60 s in the bedroom and living room). Continuous
+  operation is required for the CO₂ value and for the SDS011's fan, whose duty
+  cycle is a per-slot period rather than a node cadence (`Slot::every`).
+- **mains, duty-cycled**: on a cable, but deep-sleeping between rounds anyway,
+  for `sample_secs` (120 s in the kitchen and bathroom). See below — this
+  profile exists because of the thermal problem, not the power one.
 
 The profile is a per-node build-time choice. The live `config/deep_sleep` switch
-still works, but only on a battery node — a mains node has nothing to gain from
-sleeping and CO₂/PM continuity to lose, so it ignores it. The SCD41 follows the
-profile too: periodic measurement on mains (what its self-calibration expects),
-single-shot on battery.
+works on any node whose profile sleeps at all — a node that stays awake has
+nothing to gain from sleeping and CO₂/PM continuity to lose, so it ignores it.
+The SCD41 follows sleeping rather than the power source: periodic measurement
+where the node stays up (what its self-calibration expects), single-shot
+wherever it sleeps, because a periodic measurement cut off by a deep sleep is
+not periodic.
 
 ### Staying awake is a thermal problem
 
-A mains node never sleeps, so everything it burns turns into heat inside the
+A node that never sleeps turns everything it burns into heat inside the
 enclosure — and the sensors then measure their own board instead of the room.
 Measured on `schlafzimmer` against a reference thermometer, 2026-09-03: the air
 at the electronics sat ~1.5 °C above the room, and both the SHT31-D and the
@@ -422,10 +432,13 @@ SCD41 reported it faithfully. Worse, the SCD41's temperature offset had been
 calibrated against that same warm SHT31-D, so the error had been copied into it
 and the two agreeing with each other proved nothing.
 
-Three things came out of that, in order of how much they were worth:
+Four things came out of that, in order of how much they were worth:
 
-1. **Mount the sensors away from the board.** No firmware can undo a sensor
-   sitting in warm air. This is the fix; the rest are refinements.
+1. **Mount the sensors away from the board, and get the board's heat out of the
+   box.** No firmware can undo a sensor sitting in warm air. This is the fix;
+   the rest are refinements. "Away from the board" is not enough on its own —
+   see the 2026-09-13 entry below, where a separate chamber still read 2.5 °C
+   warm because the board's only way out led through it.
 2. **80 MHz instead of 160.** The minimum esp-wifi will run the radio at
    (`MIN_CLOCK` in its `init`), and dynamic power scales with the clock. A round
    is a few I²C transactions and one publish, and I²C/UART timing comes off APB
@@ -437,10 +450,23 @@ Three things came out of that, in order of how much they were worth:
    collected; everything inbound here is a Home Assistant knob, and outbound
    traffic never waits on the sleep schedule.
 
+4. **Stop running.** The three above shave the heat; this removes it. A node
+   carrying nothing that has to be attended to continuously does not need to be
+   associated between readings at all, and `PowerProfile::MainsDutyCycled` says
+   so: mains-powered, deep-sleeping for its own `sample_secs`. `kueche` and
+   `bad` took it on 2026-09-13. It is not available to `schlafzimmer` or
+   `wohnzimmer` — the SCD41's self-calibration and the SGP41's hotplate both
+   need a node that stays up — which is exactly why it is a profile and not a
+   global setting.
+
 Deliberately *not* done: a software temperature offset for the SHT31-D. The
 overtemperature is roughly constant (P·R_th), so an offset is defensible in
 principle, but it hides the problem rather than fixing it, depends on airflow,
-and would have to correct the humidity alongside the temperature.
+and would have to correct the humidity alongside the temperature. The last of
+those is the one that keeps deciding it: relative humidity is read against
+temperature, so a box 2.5 °C warm reports an RH about seven points low, and an
+offset that fixes only the temperature leaves the humidity wrong and now also
+unexplained.
 
 ## Testing
 
