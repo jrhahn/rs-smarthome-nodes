@@ -581,15 +581,16 @@ print("           M5 must reach %.0f mm of pad plus the bar's thread"
 ## SHT31 a vented chamber of its own, 90 mm of still air from the board, because
 ## a board-warmed SHT31 reports a humidity that is too low and the error lands in
 ## the corrected PM figures. With 40 mm to play with, the SHT31 goes *up* instead
-## of *away*: a card slot at the far end of the particulate compartment holds it
-## above the module, in the draught between its own wall vents and the lid, and
-## the wall it stood behind is gone.
+## of *away*: it hangs at the far end of the particulate compartment, in the
+## draught between its own wall vents and the lid, and the wall it stood behind
+## is gone. A printed card slot held it there until it turned out to be
+## unprintable; see the comment where it used to be cut.
 ##
 ## So, two compartments in a row:
 ##
 ##   -X  particulate + humidity   the SDS011 in a square pocket, the SHT31 on
-##                                edge in the 10 mm strip at the end, clear of
-##                                the module and of the exhaust
+##                                its wires in the 10 mm strip at the end, clear
+##                                of the module and of the exhaust
 ##   +X  board bay                XIAO, SCD41 and SGP41, 50 mm wide, open floor:
 ##                                three boards on wires do not want a pocket
 ##                                shaped for one
@@ -618,9 +619,9 @@ SDS_XY = 73.5                     # 71 x 70 module, pocket kept SQUARE so it
                                   # can be turned to any of four orientations
                                   # -- which edge carries the intake nozzle
                                   # differs between units, and the tube has to
-                                  # reach the stub.
+                                  # reach the intake port.
 SDS_SERVICE = 10.0                # strip along +Y for tube and wiring
-SHT_STRIP = 10.0                  # strip at the -X end for the SHT31 card
+SHT_STRIP = 10.0                  # strip at the -X end the SHT31 hangs in
 BOARD_BAY = 50.0                  # asked for; holds all three boards
 
 # Compartment boundaries in X, left to right.
@@ -656,7 +657,7 @@ WZ_POST_XY = [(sx * (WZ_IN_X / 2 - WZ_POST / 2), sy * (WZ_IN_Y / 2 - WZ_POST / 2
 # the boards end up flat rather than stacked, this is the line to change.
 USB_Z = 20.0
 
-INTAKE_OD, INTAKE_ID, INTAKE_L = 6.0, 4.0, 8.0   # stub mimics the SDS011 nozzle
+INTAKE_ID = 4.0                   # bore through the wall; see the intake port
 SLOT_W = 2.5                                      # every vent slot
 
 
@@ -683,19 +684,31 @@ wz_tray = wz_tray.cut(
     _box(3 * WZ_BAF, 8.0, WZ_IN_H, (SDS_X1 + WZ_BAF / 2, 0, WZ_FLOOR))
 )
 
-# Intake stub in the +Y wall: the SDS011's own nozzle is tubed to it so the
+# Intake port in the +Y wall: the SDS011's own nozzle is tubed to it so the
 # module draws room air rather than its own exhaust.
-stub_c = ((SDS_X0 + SDS_X1) / 2, WZ_Y1 + WZ_WALL - INTAKE_L / 2, WZ_FLOOR + 9.0)
-wz_tray = wz_tray.union(
-    cq.Workplane("XZ").circle(INTAKE_OD / 2).extrude(INTAKE_L)
-    .translate((stub_c[0], WZ_Y1 + WZ_WALL, stub_c[2]))
-)
+#
+# A bare 4 mm bore through the wall, and it used to be a stub: a 6 mm cylinder
+# reaching 8 mm inward from the wall's inner face into the service strip, bored
+# 4 mm, there so the module's own nozzle could be tubed to it -- inboard, where
+# the tube is, rather than outside the box.
+#
+# It came off for the same reason the SHT31's card slot did. This part prints
+# floor down, so a horizontal cylinder hanging off a vertical wall at z = 12 is
+# 8 mm of circular overhang begun in mid-air, and support inside a 4 mm bore is
+# not support, it is a plug to be dug out afterwards.
+#
+# What stays is the airway, 4 mm, exactly what the stub carried: the module
+# still draws room air rather than its own exhaust. What goes is somewhere for
+# the tube to grip. Push the tube at the bore and seal it, or print the stub as
+# its own part, on its axis where it needs no support, and glue it to the inner
+# face -- the numbers to reproduce it are in this comment.
+INTAKE_Z = WZ_FLOOR + 9.0
 wz_tray = wz_tray.cut(
-    cq.Workplane("XZ").circle(INTAKE_ID / 2).extrude(INTAKE_L + WZ_WALL + 2)
-    .translate((stub_c[0], WZ_Y1 + WZ_WALL + 1, stub_c[2]))
+    cq.Workplane("XZ").circle(INTAKE_ID / 2).extrude(3 * WZ_WALL)
+    .translate(((SDS_X0 + SDS_X1) / 2, WZ_Y1 + 2 * WZ_WALL, INTAKE_Z))
 )
 
-# Exhaust, low in the -Y wall and on the far side of the module from the stub.
+# Exhaust, low in the -Y wall and on the far side of the module from the intake.
 for z in (6.0, 11.0, 16.0):
     wz_tray = _slots(wz_tray, 4, 17.0, (14.0, 3 * WZ_WALL, SLOT_W),
                      ((SDS_X0 + SDS_X1) / 2, -WZ_Y1, WZ_FLOOR + z), axis="x")
@@ -704,16 +717,32 @@ for z in (6.0, 11.0, 16.0):
 wz_tray = wz_tray.union(_box(SDS_XY, WZ_BAF, 6.0,
                        ((SDS_X0 + SDS_X1) / 2, SDS_RIB_Y + WZ_BAF / 2, WZ_FLOOR)))
 
-# --- the SHT31, standing in the strip at the -X end ------------------------
-# On edge rather than flat, and tall rather than deep: what matters is that the
-# sensor sits above the module in moving air, not that the card is held firmly.
-# The slot runs the full height so the card can be pushed to whatever depth
-# leaves its sensor clear of the module's top.
-SHT_SLOT_X = WZ_X0 + SHT_STRIP / 2       # -63, centred in the strip
-wz_tray = wz_tray.union(_box(6.0, 18.0, 34.0, (SHT_SLOT_X, 0, WZ_FLOOR)))
-wz_tray = wz_tray.cut(_box(2.0, 22.0, 33.0, (SHT_SLOT_X, 0, WZ_FLOOR + 1.5)))
+# --- the SHT31, in the strip at the -X end ---------------------------------
+# There is no card slot here any more, and this is the second time this box has
+# given up a feature for the SHT31 rather than the other way round: it lost the
+# sensor's own compartment to the 40 mm height limit, and now it loses the
+# holder that replaced it. Removed because it could not be printed.
+#
+# The holder was a 6 x 18 x 34 tower with a 2 mm slot up the middle, so 2 mm of
+# wall on each side of the card. What was not noticed is that the -X wall vents
+# below are cut with a 3 * WZ_WALL block -- 7.5 mm of x, reaching to x = -64.25
+# -- while the tower's -X wall stood at x = -66 .. -64. The vent cut therefore
+# took 1.75 of that wall's 2 mm at each of three heights, leaving 0.25 mm of
+# plastic holding it and the plate above the top notch standing on nothing at
+# all. A slicer prints that as three courses of air.
+#
+# It is fixable -- narrow the vent cut, or move the tower inboard of it -- and
+# it is deliberately not being fixed. The holder was never doing much: the
+# comment that stood here said as much, "what matters is that the sensor sits
+# above the module in moving air, not that the card is held firmly". The card
+# is on four jumper wires with 90 mm of run and the strip is 10 mm wide, so the
+# wires and the strip already hold it in x and y. What goes with the tower is
+# the height: nothing now stops the card from resting on the floor of the strip
+# instead of standing in the draught. Dress the wires so it sits high, or bring
+# the holder back on the numbers above.
+SHT_STRIP_X = WZ_X0 + SHT_STRIP / 2      # -63, centred in the strip
 
-# Its own air: the -X wall beside the card, high, where the card's sensor is.
+# The SHT31's air: the -X wall, high, where the card's sensor should sit.
 for z in (20.0, 26.0, 32.0):
     wz_tray = wz_tray.cut(_box(3 * WZ_WALL, 22.0, SLOT_W, (WZ_X0, 0, WZ_FLOOR + z)))
 
@@ -759,9 +788,9 @@ wz_lid = _slots(wz_lid, 7, 8.0, (44.0, 3.0, WZ_LID + 2),
                 (BOARD_MID, 0, -1.0), axis="y")
 
 # Over the SHT31's end of the other compartment, for the same reason in
-# miniature: the card is in the draught between these and its wall slots.
+# miniature: the card hangs in the draught between these and its wall slots.
 wz_lid = _slots(wz_lid, 3, 8.0, (16.0, 3.0, WZ_LID + 2),
-                (SHT_SLOT_X + 2.0, 0, -1.0), axis="y")
+                (SHT_STRIP_X + 2.0, 0, -1.0), axis="y")
 
 wz_lid = (
     wz_lid.faces(">Z").workplane()
