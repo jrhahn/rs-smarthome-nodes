@@ -378,10 +378,16 @@ page.
   separating the two volumes, it was aiming one at the other.
 
   Two fixes, both landed: the board bay gets its own chimney in `models.py`
-  (inlet low, two outlets high, both long walls, 240 mm² — the notch is left
+  (inlet low, two outlets high, both long walls, 225 mm² — the notch is left
   alone, because the terrasse box already lost a baffle to a jumper housing that
   would not thread through a narrower one), and both nodes moved to
   `PowerProfile::MainsDutyCycled` so the board is off between rounds.
+
+  The slots stop short of `x = 6` on purpose. The jumpers to the SHT31 loop
+  through the 8.5 mm between board and baffle, and slots that reach the board
+  edge put a 2.5 mm opening at jumper-housing height right where a wire is
+  handled. A wire fits through one. Keep the corridor blank when adding vents to
+  any box in `models.py`.
 
   **Check the humidity, not just the temperature.** RH is read against
   temperature, so a box 2.5 °C warm reports RH about seven points low. If the

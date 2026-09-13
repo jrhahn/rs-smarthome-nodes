@@ -876,11 +876,22 @@ for sy in (-1, 1):
 # leaving an opening above the board. These two live in a kitchen and a
 # bathroom, where what falls from above is grease and condensate.
 #
-# Kept inboard of the +X corner posts (x >= 22.5) and clear of the baffle, so
-# every slot opens onto air rather than onto a post.
-KL_BOARD_VENT_X = 11.0
-KL_BOARD_VENT_L = 16.0
-for z in (5.0, 13.0, 19.0):
+# Bounded on BOTH sides, and the -X bound is the one worth explaining. The four
+# jumpers to the SHT31 leave the board at its -X end, loop in the 8.5 mm of
+# slack between board and baffle, and drop through the notch. That corridor runs
+# x = -6 .. 2.5, and the first version of these slots started at x = 3.0, hard
+# against the board edge with its lowest row at 8..10.5 mm -- which is exactly
+# where a jumper housing sits. A wire passes a 2.5 mm slot easily, so that was
+# an invitation to snag one while closing the box.
+#
+# Starting at x = 6 instead leaves the whole corridor plus 3.5 mm of margin with
+# no opening in either wall, at any height. The +X bound keeps the slots inboard
+# of the corner posts (x >= 22.5), so each opens onto air rather than onto a
+# post. The heat source does not mind: the ESP32 sits mid-board, still under the
+# slots.
+KL_BOARD_VENT_X = 13.5
+KL_BOARD_VENT_L = 15.0
+for z in (5.0, 12.0, 19.0):
     for sy in (-1, 1):
         kl_tray = kl_tray.cut(_box(KL_BOARD_VENT_L, 3 * KL_WALL, SLOT_W,
                              (KL_BOARD_VENT_X, sy * KL_IN_Y / 2, KL_FLOOR + z)))
