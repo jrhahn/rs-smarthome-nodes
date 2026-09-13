@@ -9,15 +9,36 @@ rustPlatform.buildRustPackage {
   pname = "smarthome-timeseries";
   version = "0.1.0";
 
-  # Only this directory, and not its build output: `target` is gigabytes of
-  # incremental artefacts that would be copied into the store on every change
-  # and invalidate the hash each time.
-  src = lib.cleanSourceWith {
-    src = ./..;
-    filter = path: type:
-      let base = baseNameOf (toString path);
-      in !(type == "directory" && base == "target");
-  };
+  # Two directories stay out, and both for the same reason: a change in them is
+  # not a change to the program, and anything inside `src` that moves forces a
+  # full rebuild of it.
+  #
+  # `target` is gigabytes of incremental artefacts, which would also be copied
+  # into the store on the way past.
+  #
+  # `nix` is this file and the module beside it. The packaging cannot be an
+  # input to the package it describes -- Nix reads these through the flake, not
+  # out of the derivation -- but while it sat in `src`, editing the module meant
+  # recompiling the whole crate. Which is how it was found: capping QuestDB's
+  # heap in module.nix cost a thirteen-minute Rust build on the home server.
+  #
+  # Anchored to the top level rather than matched by name at any depth, so a
+  # directory that happens to be called either of these further down still
+  # counts as source.
+  src =
+    let
+      root = ./..;
+      relative = path: lib.removePrefix (toString root + "/") (toString path);
+    in
+    lib.cleanSourceWith {
+      src = root;
+      filter =
+        path: type:
+        let
+          rel = relative path;
+        in
+        !(type == "directory" && (rel == "target" || rel == "nix"));
+    };
   cargoLock.lockFile = ../Cargo.lock;
 
   # `.cargo/config.toml` in this directory hard-codes x86_64, because it has to
