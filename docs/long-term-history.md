@@ -87,13 +87,18 @@ A hole is at least visible: the chart simply has no points there.
 ### Backups that are not backups
 
 `/var/lib/questdb` is the directory that matters, and copying it while the
-database is running is a coin flip — the WAL may be mid-apply. QuestDB has
-`SNAPSHOT PREPARE` and `SNAPSHOT COMPLETE` for exactly this: prepare, let the
-backup run over the directory, complete. Without that pair, a restore is
+database is running is a coin flip — the WAL may be mid-apply. QuestDB's answer
+is a checkpoint: `CHECKPOINT CREATE`, let the backup run over the directory,
+`CHECKPOINT RELEASE`. (`SNAPSHOT PREPARE` / `SNAPSHOT COMPLETE` is the older
+spelling of the same pair; 9.3.5 accepts both.) Without it, a restore is
 untested by construction.
 
-This is the only item on this page whose absence goes unnoticed until the day it
-matters.
+The release is the half that is easy to get wrong. It has to run even when the
+backup fails, because a checkpoint left held makes QuestDB keep every WAL
+segment from that moment on — which shows up days later as a disk filling up,
+with nothing pointing back at the night the backup broke. In `home-server` it is
+therefore an `ExecStopPost` on the borg unit rather than the job's own
+`postHook`, which does not run on failure.
 
 ### A series nobody can interpret in three years
 
@@ -121,7 +126,10 @@ being kept until the table exists.
    which defaults to fifty. *Long* rather than unlimited because QuestDB will
    change a view's TTL but not clear it, so the alternative was a view that
    could never be re-tuned.
-3. **Snapshot-aware backup** of `/var/lib/questdb` in the existing borg run.
+3. ~~**Snapshot-aware backup**~~ — done, in `home-server`: the data directory is
+   in the family borg paths, the job brackets itself with `CHECKPOINT CREATE` /
+   `CHECKPOINT RELEASE`, and the release hangs off `ExecStopPost` so a failed
+   backup cannot leave a checkpoint held.
 4. **Annotations** — started, by hand, in [`annotations.md`](annotations.md). A
    table in the database is still the better home for them, so a chart can show
    them; a dated list costs nothing and is already worth more than the memory it
