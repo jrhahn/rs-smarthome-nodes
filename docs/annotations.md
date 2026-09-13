@@ -150,3 +150,40 @@ What is worth keeping from this: the fault was localised without opening
 anything. A full I²C scan answering nowhere said "not the chip", and the clock
 said "whatever was touched this morning". Both were right, and the scan line is
 in the boot log of every node, every boot.
+
+## 2026-09-13 20:43–22:23 — kueche — moved about, and then a USB-A port
+
+The node was unplugged from the kitchen at 20:43:24 for the reflash and did not
+publish reliably again until 22:23:10. Two separate things to know about that
+window, and the second is the one that will mislead somebody.
+
+**The gap is not empty.** `kueche` published from the laptop several times while
+it was being worked on — 22:07, 22:09, and a continuous run from 22:37 to 22:58
+— and those rows look exactly like kitchen readings. They are not. They are a
+board in another room, being carried around, in an open box. Anything from
+`kueche` between these two timestamps is the node's own air, not the kitchen's.
+
+**Why it would not stay up in the kitchen.** It came back after each plug-in,
+published exactly one round, and went silent. Always exactly one, which is not
+what a loose connection looks like. The board itself was fine: on a laptop USB
+port it ran ten consecutive wakes at 125 s, and `bad` — same firmware, same
+`MainsDutyCycled`, same 120 s sleep — never missed one all evening.
+
+The kitchen's socket strip has a USB-A and a USB-C port, and the node works on
+the C and dies on the A. That difference is the whole explanation. A USB-C
+source decides that something is attached by measuring the sink's 5.1 kΩ on CC —
+a static resistance, true whether the device draws an amp or nothing. A USB-A
+port has no such line and no other way to tell "asleep" from "unplugged", so it
+watches the current and shuts down below its threshold; standby-power rules
+require it to. In deep sleep the ESP32-C3 draws tens of microamps. The port
+switched off, and a board with no rail never wakes — hence one round per
+plug-in, and hence the red power LED going out, which is a 3V3 LED the firmware
+never touches and deep sleep never dims.
+
+**The rule: a duty-cycled node goes on USB-C or on a dumb supply, never on a
+USB-A charging port.** This became possible only this morning. As a plain mains
+node `kueche` stayed awake and drew enough to hold the port up; the duty cycle
+created the idle it switches off in. Nothing was broken — the firmware is right
+and the strip is right, they just cannot be combined. **`bad` runs the same
+profile; check what it is plugged into before this happens there too.**
+
