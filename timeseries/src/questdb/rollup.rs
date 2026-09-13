@@ -177,7 +177,11 @@ mod tests {
             .filter(|t| t.keeps == Keeps::WithTheRawTable)
             .map(|t| t.suffix)
             .collect();
-        assert_eq!(short, vec!["_1m"], "the coarse summaries are the long-lived ones");
+        assert_eq!(
+            short,
+            vec!["_1m"],
+            "the coarse summaries are the long-lived ones"
+        );
     }
 
     #[test]

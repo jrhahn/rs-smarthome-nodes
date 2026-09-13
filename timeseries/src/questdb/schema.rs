@@ -112,6 +112,7 @@ pub async fn ensure(
     client: &Client,
     table: &str,
     status_table: &str,
+    annotations_table: &str,
     retention: &Retention,
     rollup_retention: &Retention,
     rollups: bool,
@@ -119,6 +120,11 @@ pub async fn ensure(
     client.exec(&create_table_ddl(table, retention)).await?;
     client
         .exec(&create_status_ddl(status_table, retention))
+        .await?;
+    // No retention argument, and that is the whole point of it being a separate
+    // statement: a note has to outlive the readings it explains.
+    client
+        .exec(&super::annotations::create_table_ddl(annotations_table))
         .await?;
 
     for t in [table, status_table] {
@@ -239,7 +245,10 @@ mod tests {
         // `ALTER TABLE` is refused on a materialized view, so the table form
         // must not be what reaches one.
         let ddl = alter_view_ttl_ddl("readings_1d", &Retention::parse("50y").unwrap()).unwrap();
-        assert_eq!(ddl, "ALTER MATERIALIZED VIEW 'readings_1d' SET TTL 50 YEARS");
+        assert_eq!(
+            ddl,
+            "ALTER MATERIALIZED VIEW 'readings_1d' SET TTL 50 YEARS"
+        );
         assert!(!ddl.starts_with("ALTER TABLE"));
     }
 

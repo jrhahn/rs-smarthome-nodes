@@ -72,6 +72,8 @@ pub struct QuestDb {
     pub table: String,
     /// Table for the nodes' online/offline transitions.
     pub status_table: String,
+    /// Table for the notes that explain the readings. Never expired.
+    pub annotations_table: String,
     /// How long to keep the raw readings, as a QuestDB TTL. Empty keeps them
     /// for ever.
     pub retention: String,
@@ -108,6 +110,7 @@ impl Default for QuestDb {
             password_file: None,
             table: "readings".into(),
             status_table: "node_status".into(),
+            annotations_table: "annotations".into(),
             retention: "3y".into(),
             rollup_retention: "50y".into(),
             rollups: true,

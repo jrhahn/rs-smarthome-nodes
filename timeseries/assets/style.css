@@ -1,158 +1,265 @@
-/* One stylesheet, no framework. The page has a header, a list and a chart;
-   anything more would be more build than dashboard. */
+/* One stylesheet, no framework. Colours are declared once as roles and used by
+   role everywhere, so the two themes swap in one place -- and so the chart code
+   can read them off the document instead of carrying a second copy.
 
-:root {
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --ink: #1c2024;
-  --muted: #6b7480;
-  --line: #dfe3e8;
-  --accent: #2f6f9f;
-  --band: rgba(47, 111, 159, 0.18);
-  --ok: #2e7d4f;
-  --bad: #b3261e;
-  --radius: 10px;
+   The dark values are chosen for the dark surface rather than derived from the
+   light ones: an automatic flip lands a mark at the wrong lightness against a
+   near-black background. Both accent steps were checked against their own
+   surface for contrast (>= 3:1) before being written down. */
+
+.viz-root {
+  color-scheme: light;
+
+  --surface-0: #f4f4f2;   /* page */
+  --surface-1: #fcfcfb;   /* cards, chart surface */
+  --border: #e1e0db;
+  --grid: #ebeae5;
+
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #83817a;
+
+  --series: #2a78d6;
+  --series-band: rgba(42, 120, 214, 0.16);
+
+  --good: #0ca30c;
+  --critical: #d03b3b;
+
+  --radius: 12px;
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.06), 0 4px 16px rgba(11, 11, 11, 0.04);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #14181c;
-    --panel: #1b2026;
-    --ink: #e6e9ec;
-    --muted: #94a0ad;
-    --line: #2b333c;
-    --accent: #6fb3e0;
-    --band: rgba(111, 179, 224, 0.22);
-    --ok: #67c08a;
-    --bad: #f2837c;
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+
+    --surface-0: #131312;
+    --surface-1: #1a1a19;
+    --border: #2e2e2b;
+    --grid: #262623;
+
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #918f85;
+
+    --series: #3987e5;
+    --series-band: rgba(57, 135, 229, 0.22);
+
+    --good: #0ca30c;
+    --critical: #d03b3b;
+
+    --shadow: none;
   }
+}
+
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-0: #131312;
+  --surface-1: #1a1a19;
+  --border: #2e2e2b;
+  --grid: #262623;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #918f85;
+  --series: #3987e5;
+  --series-band: rgba(57, 135, 229, 0.22);
+  --shadow: none;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
+
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h1 { font-size: 1.15rem; }
+h2 { font-size: 1.4rem; }
+h3 { font-size: 0.95rem; }
+
+.sub { margin: 0.15rem 0 0; color: var(--text-secondary); font-size: 0.85rem; }
+.hint { color: var(--text-secondary); }
+.foot { color: var(--text-muted); font-size: 0.8rem; margin: 0.6rem 0 0; }
+.error { color: var(--critical); }
+
+/* --- header ------------------------------------------------------------- */
 
 header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.9rem 1.2rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 1.4rem;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 5;
 }
 
-h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
-h2 { font-size: 1.15rem; margin: 0; font-weight: 600; }
+.health { display: flex; gap: 1rem; font-size: 0.8rem; color: var(--text-secondary); }
+.health b { font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
 
-.health { font-size: 0.82rem; color: var(--muted); display: flex; gap: 0.9rem; }
+/* A status dot never carries meaning alone -- every one of them sits beside a
+   word, because green and red are the one pair colour-blind readers cannot
+   separate. */
+.dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; display: inline-block; margin-right: 0.35rem; }
+.dot.up { background: var(--good); }
+.dot.down { background: var(--critical); }
 
-/* Not scoped to .health: the same dot marks a node's availability in the
-   sidebar, where an unsized span would simply be invisible. */
-.dot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; margin-right: 0.35rem; vertical-align: baseline; }
-.dot.up { background: var(--ok); }
-.dot.down { background: var(--bad); }
-
-main {
-  display: grid;
-  grid-template-columns: minmax(240px, 300px) 1fr;
-  gap: 1rem;
-  padding: 1rem 1.2rem 2rem;
-  align-items: start;
-}
-
-@media (max-width: 820px) {
-  main { grid-template-columns: 1fr; }
-}
-
-nav {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.4rem;
-  max-height: calc(100vh - 6rem);
-  overflow-y: auto;
-}
-
-.node-name {
-  font-size: 0.74rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  padding: 0.7rem 0.6rem 0.3rem;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-button.channel {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 0.6rem;
-  width: 100%;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  padding: 0.4rem 0.6rem;
-  border-radius: 7px;
-  cursor: pointer;
-}
-
-button.channel:hover { background: var(--bg); }
-button.channel[aria-current="true"] { background: var(--accent); color: #fff; }
-button.channel[aria-current="true"] .value { color: #fff; }
-
-.channel .value { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.channel .stale { opacity: 0.5; }
-
-section#detail {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem 1.1rem 1.2rem;
-  min-height: 22rem;
-}
-
-.chart-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
-.sub { color: var(--muted); margin: 0.2rem 0 0; font-size: 0.85rem; }
-.foot { color: var(--muted); font-size: 0.78rem; margin: 0.7rem 0 0; }
-.hint { color: var(--muted); padding: 0.8rem; margin: 0; font-size: 0.88rem; }
-
-.ranges { display: flex; flex-wrap: wrap; gap: 0.3rem; }
-.ranges button {
-  border: 1px solid var(--line);
-  background: var(--panel);
-  color: var(--muted);
-  border-radius: 999px;
-  padding: 0.25rem 0.7rem;
+.ranges { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+.ranges button,
+.detail-actions button,
+.back {
   font: inherit;
   font-size: 0.82rem;
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
   cursor: pointer;
 }
-.ranges button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ranges button:hover,
+.detail-actions button:hover,
+.back:hover { color: var(--text-primary); border-color: var(--text-muted); }
+.ranges button[aria-pressed="true"],
+.detail-actions button[aria-pressed="true"] {
+  background: var(--series);
+  border-color: var(--series);
+  color: #fff;
+}
 
-.chart-wrap { position: relative; margin-top: 0.9rem; }
-canvas { width: 100%; height: 340px; display: block; }
+/* --- layout ------------------------------------------------------------- */
+
+main { padding: 1.4rem; max-width: 1500px; margin: 0 auto; }
+
+.node-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin: 1.6rem 0 0.7rem;
+}
+.node-head:first-child { margin-top: 0; }
+.node-head h3 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-secondary); }
+.node-head .state { font-size: 0.78rem; color: var(--text-muted); }
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 0.8rem;
+}
+
+.tile {
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0.8rem 0.9rem 0.6rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.tile:hover { border-color: var(--text-muted); }
+.tile .label { font-size: 0.82rem; color: var(--text-secondary); }
+.tile .value {
+  font-size: 1.6rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+.tile .value span { font-size: 0.9rem; font-weight: 500; color: var(--text-secondary); margin-left: 0.15rem; }
+.tile canvas { width: 100%; height: 40px; display: block; }
+.tile .range { font-size: 0.72rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.tile .stale { color: var(--critical); }
+
+/* --- detail ------------------------------------------------------------- */
+
+#detail {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.1rem 1.2rem 1.3rem;
+}
+.detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.detail-head .back { margin-bottom: 0.5rem; }
+.detail-actions { display: flex; gap: 0.4rem; }
+
+.stats { display: flex; flex-wrap: wrap; gap: 1.6rem; margin: 1rem 0 0.2rem; }
+.stats div { display: flex; flex-direction: column; }
+.stats dt { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.stats dd { margin: 0.1rem 0 0; font-size: 1.25rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.chart-wrap { position: relative; margin-top: 0.8rem; }
+#chart { width: 100%; height: 360px; display: block; }
 
 .tooltip {
   position: absolute;
   pointer-events: none;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0.35rem 0.55rem;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
   font-size: 0.78rem;
+  line-height: 1.4;
   white-space: nowrap;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow);
   font-variant-numeric: tabular-nums;
 }
 
-.error { color: var(--bad); }
+table { border-collapse: collapse; width: 100%; margin-top: 0.8rem; font-size: 0.82rem; }
+caption { text-align: left; color: var(--text-muted); font-size: 0.78rem; padding-bottom: 0.4rem; }
+th, td { text-align: right; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; }
+thead th { color: var(--text-secondary); font-weight: 600; }
+
+#notes { margin-top: 1.4rem; border-top: 1px solid var(--border); padding-top: 0.9rem; }
+#note-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+#note-list li { font-size: 0.85rem; color: var(--text-secondary); display: flex; gap: 0.6rem; }
+#note-list time { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#note-list .none { color: var(--text-muted); }
+
+/* --- dialog ------------------------------------------------------------- */
+
+dialog {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  padding: 1.2rem;
+  max-width: 30rem;
+  box-shadow: var(--shadow);
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+dialog label { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.8rem; font-size: 0.8rem; color: var(--text-secondary); }
+dialog input {
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-0);
+  color: var(--text-primary);
+}
+dialog menu { display: flex; justify-content: flex-end; gap: 0.5rem; margin: 1.2rem 0 0; padding: 0; }
+dialog button {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.35rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+dialog button.primary { background: var(--series); border-color: var(--series); color: #fff; }

@@ -249,6 +249,80 @@ async fn run_series(
     })
 }
 
+/// One statement for every channel's recent shape.
+///
+/// The overview draws a sparkline per channel, and there are thirty-one of them.
+/// Asking per channel would be thirty-one round trips to answer one screen; the
+/// same `SAMPLE BY` without a node/sensor filter answers all of them at once,
+/// because the rollups are already grouped by channel. The rows come back
+/// interleaved and are split by key on this side, which is arithmetic rather
+/// than work.
+pub fn overview_sql(
+    base: &str,
+    tier: Option<&Tier>,
+    from: Micros,
+    to: Micros,
+    bucket: &str,
+) -> String {
+    let (table, average) = match tier {
+        Some(t) => (t.view(base), "sum(sv)/sum(n) av"),
+        None => (base.to_string(), "avg(value) av"),
+    };
+    format!(
+        "SELECT cast(timestamp AS long) t, node, sensor, av FROM (\
+         SELECT timestamp, node, sensor, {average} FROM {table} \
+         WHERE timestamp >= cast({from} AS timestamp) AND timestamp < cast({to} AS timestamp) \
+         SAMPLE BY {bucket} ALIGN TO CALENDAR)"
+    )
+}
+
+/// One channel's recent shape: its key, and the mean per bucket.
+pub type Sparkline = ((String, String), Vec<(i64, f64)>);
+
+/// `(node, sensor)` to its sparkline, for every channel with data in the window.
+pub async fn fetch_overview(
+    client: &Client,
+    base: &str,
+    views: &[String],
+    from: Micros,
+    to: Micros,
+    points: i64,
+) -> Result<Vec<Sparkline>> {
+    let (width, bucket) = choose_bucket(from, to, points);
+    let (from, to) = snap(from, to, width);
+    let tier = rollup::pick(width, views, base);
+    let data = client
+        .exec(&overview_sql(base, tier, from, to, bucket))
+        .await?;
+    let (ti, n, s, av) = (
+        data.require("t")?,
+        data.require("node")?,
+        data.require("sensor")?,
+        data.require("av")?,
+    );
+
+    let mut out: Vec<Sparkline> = Vec::new();
+    for row in data.rows() {
+        let Some(key) = (|| {
+            Some((
+                as_str(row.get(n)?)?.to_string(),
+                as_str(row.get(s)?)?.to_string(),
+            ))
+        })() else {
+            continue;
+        };
+        let Some(point) = (|| Some((as_i64(row.get(ti)?)? / 1_000, as_f64(row.get(av)?)?)))()
+        else {
+            continue;
+        };
+        match out.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, series)) => series.push(point),
+            None => out.push((key, vec![point])),
+        }
+    }
+    Ok(out)
+}
+
 /// Every channel the database has ever seen, with the time of its last row.
 ///
 /// Asked of the coarsest available rollup, which is the whole point of having
@@ -513,6 +587,19 @@ mod tests {
         assert!(channels_sql("readings", &partial).contains("FROM readings_1m"));
         // No views at all: the base table still answers, just slowly.
         assert!(channels_sql("readings", &[]).contains("FROM readings"));
+    }
+
+    #[test]
+    fn the_overview_asks_for_every_channel_at_once() {
+        // No node/sensor filter, and both identifiers in the projection: one
+        // statement has to answer a screen with thirty-one sparklines on it.
+        let tier = &rollup::TIERS[1];
+        let sql = overview_sql("readings", Some(tier), 0, 100, "1h");
+        assert!(sql.contains("SELECT timestamp, node, sensor,"), "{sql}");
+        assert!(!sql.contains("WHERE node ="), "{sql}");
+        assert!(sql.contains("sum(sv)/sum(n) av"), "{sql}");
+        // The raw shape has to work too, for a window finer than a minute.
+        assert!(overview_sql("readings", None, 0, 100, "10s").contains("avg(value) av"));
     }
 
     #[test]

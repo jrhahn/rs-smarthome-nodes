@@ -122,9 +122,54 @@ below, which compares every zoom level against a full scan of the raw table.
 | Endpoint | |
 | --- | --- |
 | `GET /` | the dashboard (three embedded files, no CDN, no build step) |
-| `GET /api/channels` | every channel, with unit, display name and last value |
-| `GET /api/series` | one chart |
+| `GET /api/overview` | every channel at once: labels, last value, and a sparkline |
+| `GET /api/series` | one channel, full resolution |
+| `GET /api/annotations` | the notes in a window; `POST` writes one |
+| `GET /api/channels` | the channel list without any series — for scripts |
 | `GET /api/health` | broker and database reachability, rollups, counters |
+
+`/api/overview` is one database query for the whole screen rather than one per
+channel. Thirty-one round trips to paint a page would be the obvious way and the
+wrong one; the rollups are already grouped by channel, so the same `SAMPLE BY`
+without a `node`/`sensor` filter answers all of them together.
+
+## What the dashboard shows
+
+Two views, and the split is the useful part.
+
+**The overview** is a wall of tiles, one per channel, grouped by node: the
+current value, its unit, a sparkline over the selected range, and the span that
+sparkline covers. Small multiples rather than one chart with thirty-one lines
+on it — the channels are in different units, and a shared axis across
+micrograms, parts per million and degrees would be a lie. Node headings carry an
+online/offline word beside the dot, because green and red are precisely the pair
+a colour-blind reader cannot separate.
+
+**The detail view** is one channel at full size: the min/max band with the mean
+through it, min / mean / max / last as numbers above it, a crosshair that reads
+out the bucket under the pointer, and the same numbers as a table for anything a
+curve reads badly. Time ticks land on the hour, midnight or the first of the
+month rather than on the span divided by eight — evenly spaced ticks put
+`10.09.` on the axis twice on a week-wide chart.
+
+Both views live in the URL: `#c/<node>/<sensor>/<range>` is a chart worth
+sending to someone, and reloading keeps it.
+
+## Annotations
+
+A series outlives the memory of the hardware that produced it. The terrace's
+weight steps because the scale was recalibrated, not because a heavier bird
+arrived; the living room's VOC index climbs from 1 for a day because the
+algorithm is learning the room. None of that is in the numbers.
+
+`annotations` is a table beside the readings — timestamp, node, one sentence —
+and the notes are drawn on the chart at the moment they describe. **It carries
+no TTL at any setting**: a note that expires before the data it explains is
+worse than no note at all.
+
+The dashboard's *Notiz …* button writes one. `docs/annotations.md` in this
+repository keeps the same history in prose and is the better place for the long
+version; this is the half that a chart can draw.
 
 ## Configuration
 

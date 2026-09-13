@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
         &client,
         &settings.questdb.table,
         &settings.questdb.status_table,
+        &settings.questdb.annotations_table,
         &settings.retention(),
         &settings.rollup_retention(),
         settings.questdb.rollups,
