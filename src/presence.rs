@@ -261,11 +261,113 @@ impl Window {
     }
 }
 
+/// How many readings a re-zero is taken over.
+///
+/// A tare used to be one number. That is fine on a bench and wrong on a feeder:
+/// the press arrives retained, the node acts on it whenever it next wakes, and
+/// nothing stops a bird being on the perch at that moment. One sample makes
+/// that bird the new zero, permanently and silently.
+///
+/// Sixteen at the cell's ~10 SPS is about 1.6 s of sampling, and the median of
+/// them survives anything that occupies a minority of that window -- a landing,
+/// a hop, a gust. It does not survive a bird that sits still through the whole
+/// window, and nothing measured only at tare time could: the node has no way to
+/// tell that weight from the feeder's own. That case is the human's to avoid,
+/// which is why the count is small enough to stay inside "I am looking at it".
+pub const TARE_SAMPLES: usize = 16;
+
+/// Largest spread, in raw ticks, a re-zero will accept across its samples.
+///
+/// The median handles a *minority* of disturbed samples. This catches the case
+/// it cannot: readings that disagree wildly throughout, meaning something was
+/// moving the whole time and no single number describes the empty feeder. Then
+/// refusing is right -- a tare is not urgent, and a wrong zero is expensive to
+/// notice, since every later weight is quietly shifted by it.
+///
+/// Sized off the measured resting scatter: `docs/commissioning.md` recorded
+/// about ±70 counts on a settled chain 2026-09-04, so 2000 is far outside
+/// normal noise while still well under a bird.
+pub const TARE_MAX_SPREAD: i32 = 2000;
+
+/// Whether a set of tare samples is consistent enough to re-zero from.
+pub fn tare_spread_ok(samples: &[i32]) -> bool {
+    let Some(&first) = samples.first() else {
+        return false;
+    };
+    let mut lo = first;
+    let mut hi = first;
+    for &v in samples {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    hi.saturating_sub(lo) <= TARE_MAX_SPREAD
+}
+
 /// Format a duration in milliseconds as seconds with one decimal, in the same
 /// float-free style as the other published values.
 pub fn write_secs(buf: &mut heapless::String<16>, millis: u64) {
     let tenths = (millis + 50) / 100;
     let _ = write!(buf, "{}.{}", tenths / 10, tenths % 10);
+}
+
+#[cfg(test)]
+mod tare_tests {
+    use super::*;
+
+    /// A median over the window is the whole point: one bird landing mid-tare
+    /// must not become the new zero.
+    #[test]
+    fn a_bird_arriving_partway_through_does_not_move_the_zero() {
+        let mut w = Window::new();
+        // Eleven readings of an empty feeder, then five with a 20 g bird on it.
+        for _ in 0..11 {
+            w.push(1000);
+        }
+        for _ in 0..5 {
+            w.push(1000 + 8400);
+        }
+        assert_eq!(w.median(), Some(1000));
+    }
+
+    /// The guard the median cannot give: if nothing held still, refuse.
+    #[test]
+    fn readings_that_never_settle_are_refused() {
+        let steady: Vec<i32> = (0..TARE_SAMPLES as i32).map(|i| 1000 + i * 10).collect();
+        assert!(tare_spread_ok(&steady), "resting scatter must be accepted");
+
+        let mut restless = steady.clone();
+        restless[7] = 1000 + TARE_MAX_SPREAD + 1;
+        assert!(!tare_spread_ok(&restless));
+    }
+
+    /// Refusing on no samples at all, rather than inventing a zero.
+    #[test]
+    fn no_samples_is_not_a_valid_tare() {
+        assert!(!tare_spread_ok(&[]));
+        assert_eq!(Window::new().median(), None);
+    }
+
+    /// The spread is a range, so it must not overflow on extreme readings.
+    #[test]
+    fn an_extreme_pair_does_not_overflow_the_spread() {
+        assert!(!tare_spread_ok(&[i32::MIN, i32::MAX]));
+    }
+
+    /// A majority of disturbed samples is beyond what a median can repair --
+    /// stated as a test so the limit is written down rather than assumed.
+    #[test]
+    fn a_bird_that_sits_through_the_whole_window_is_not_caught() {
+        let mut w = Window::new();
+        for _ in 0..TARE_SAMPLES {
+            w.push(1000 + 8400);
+        }
+        assert_eq!(w.median(), Some(9400));
+        let all: Vec<i32> = core::iter::repeat(9400).take(TARE_SAMPLES).collect();
+        assert!(
+            tare_spread_ok(&all),
+            "a still bird looks exactly like a still feeder"
+        );
+    }
 }
 
 #[cfg(test)]

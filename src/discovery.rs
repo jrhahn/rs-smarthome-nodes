@@ -691,19 +691,21 @@ mod tests {
                 // Two values, because one of them may happen to equal the
                 // default and `apply` reports "changed", not "understood".
                 //
-                // Two controls are not config values at all: `reannounce`
-                // forgets the discovery digest and `reset_visits` zeroes the
-                // visit counter. Both of those live in RTC RAM rather than in
-                // the config blob, so `main`'s drain acts on them and `Config`
-                // has nothing to store. Anything else reaching this list
+                // Three controls are not config values at all, and are acted
+                // on by `main`'s drain instead: `reannounce` forgets the
+                // discovery digest, `reset_visits` zeroes the visit counter --
+                // both RTC RAM, nothing for `Config` to store -- and `tare`
+                // needs a burst of fresh readings off the load cell, which is a
+                // measurement rather than an assignment and needs a bus
+                // `Config` cannot reach. Anything else reaching this list
                 // without `apply` knowing it would be a control that silently
                 // does nothing.
-                if matches!(control.key, "reannounce" | "reset_visits") {
+                if matches!(control.key, "reannounce" | "reset_visits" | "tare") {
                     continue;
                 }
                 let mut probe = Config::DEFAULT;
                 assert!(
-                    probe.apply(control.key, "1", 0) || probe.apply(control.key, "0", 0),
+                    probe.apply(control.key, "1") || probe.apply(control.key, "0"),
                     "{} is not a key Config::apply knows",
                     control.key
                 );

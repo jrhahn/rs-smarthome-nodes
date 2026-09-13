@@ -77,29 +77,48 @@ Replaced the node formerly called `draussen`. It carries the bird-feeder scale.
   real mass. That, not a mechanical fault, is what had the node publishing
   visits all day against an uncalibrated scale.
 
-### Taring adopts the presence baseline, not a fresh reading
+### Taring takes its own readings
 
-`Config::apply` sets `offset = tare_ref`, and `main` passes `state::baseline()`
-— the persisted presence baseline, not a reading taken when the button is
-pressed. Two consequences decide the whole procedure:
+Since 2026-09-13 a tare **measures**: the press is noticed while the node is
+draining retained config, and once that round is over — back where the load cell
+is reachable — it takes `presence::TARE_SAMPLES` readings, about 1.6 s at the
+cell's ~10 SPS, and adopts their **median** as both the gram zero and the
+presence baseline. If the readings spread more than `TARE_MAX_SPREAD` ticks it
+refuses, says so, and leaves the old zero standing; press it again once things
+are still.
 
-**Press it only after the baseline has caught up.** Hanging the house is a load
-far above the threshold, so the node reads `Arrived`/`Staying` and only absorbs
-it into the baseline once `STUCK_AFTER_SECS` (600 s) has passed. Tare before
-that and it copies a stale zero.
+The median is there because the press arrives retained and is acted on whenever
+the node next wakes, which nothing stops a bird from coinciding with. A landing,
+a hop or a gust occupies a minority of the window and the median ignores it. A
+bird that sits *still* through the whole 1.6 s is not caught and cannot be — no
+measurement taken at tare time can tell that weight from the feeder's own. That
+one is yours to avoid, which is why the window is short enough to stay inside
+"I am looking at it".
 
-**Removing a calibration mass leaves the baseline stuck.** Once absorbed, taking
-the mass off is a large *negative* delta: `decide` classifies it as
-`Unexplained`, which deliberately leaves the baseline alone, and nothing else
-ever moves it back. Tare in that state would copy the mass-inclusive value and
-show roughly minus its weight.
+**What this replaced, and why it is worth knowing.** `Config::apply` used to set
+`offset = tare_ref`, and `main` passed `state::baseline()` — the drift-tracked
+presence baseline, not a reading taken when the button was pressed. That made
+taring inherit every problem the baseline had:
 
-The way out needs no physical access. Raise `threshold` far enough that the step
-lands inside the drift band (`threshold/4`) — 3000 g for a 545 g mass — let the
-`Quiet` drift pull the baseline back, then set it to 10 g again. The drift keeps
-15/16 of the error per 2 s round, so 600 s is 300 rounds and
-`(15/16)^300 = 3.9e-09`: from 1 015 226 ticks that leaves 0.004 ticks. The
-firmware accepts any finite `threshold ≥ 0` over MQTT; the 500 g maximum is
+- *You had to wait for the baseline to catch up.* Hanging the house is a load
+  far above the threshold, so the node read `Arrived`/`Staying` and only
+  absorbed it once `STUCK_AFTER_SECS` (600 s) had passed. Taring before that
+  copied a stale zero.
+- *Removing a calibration mass left the baseline stuck.* Once absorbed, taking
+  the mass off is a large negative delta, which `decide` classifies as
+  `Unexplained` — deliberately leaving the baseline alone, with nothing to ever
+  move it back. Taring then copied the mass-inclusive value and showed roughly
+  minus its weight. The same trap caught any remount that did not reproduce the
+  beam's preload.
+- The documented way out was to raise `threshold` until the step fell inside the
+  drift band (`threshold/4`) — 3000 g for a 545 g mass — wait for the `Quiet`
+  drift to pull the baseline back, then set it to 10 g again. The arithmetic
+  still holds if you ever need it: the drift keeps 15/16 of the error per 2 s
+  round, so 600 s is 300 rounds and `(15/16)^300 = 3.9e-09`, leaving 0.004 ticks
+  of 1 015 226. You should not need it. A tare now writes the baseline itself,
+  which is the same escape in one button press.
+
+The firmware accepts any finite `threshold ≥ 0` over MQTT; the 500 g maximum is
 only the Home Assistant slider's.
 
 ### The socket is wired with the colours crossed, and that is correct

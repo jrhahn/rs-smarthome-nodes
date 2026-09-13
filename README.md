@@ -441,7 +441,7 @@ on / has just left the scale) and persists them. Changes therefore apply with a
 | `offset`            | raw HX711 value at 0 g (tare zero) | with load cell |
 | `scale_factor`      | raw ticks per gram | with load cell |
 | `threshold`         | grams that count as "a bird landed" | with load cell |
-| `tare` (button)     | re-zero: adopts the current empty baseline as `offset` | with load cell |
+| `tare` (button)     | re-zero: takes a burst of fresh readings on the empty feeder and adopts their median as `offset` *and* as the presence baseline | with load cell |
 | `idle_interval`     | deep-sleep seconds while empty | battery |
 | `active_interval`   | deep-sleep seconds for a load that outlasted its awake visit window (snow, a twig) — a normal visit is watched awake and never uses this | battery |
 | `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) | battery |
@@ -456,7 +456,11 @@ samples on its build-time cadence whether or not it sleeps between rounds. The
 `schlafzimmer` does not.
 Pressing **Tarieren** publishes a retained press (the node may be asleep) which
 the firmware deletes once it has re-zeroed, so it is never replayed as a second
-tare.
+tare. Because the press waits for the node rather than the other way round, the
+re-zero is a *median* of sixteen readings taken when it wakes — a bird landing
+partway through the ~1.6 s of sampling cannot become the new zero, and readings
+that never settle are refused outright rather than guessed at. See
+`docs/commissioning.md`.
 
 On a blank flash the firmware falls back to built-in defaults
 (`src/config.rs` — `offset` mid-scale, `scale_factor` 420, `threshold` 10 g,

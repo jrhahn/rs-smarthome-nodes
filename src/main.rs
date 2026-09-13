@@ -455,7 +455,7 @@ async fn run_battery(
     // it does have, publish, and go back to sleep.
     if !node.scale.enabled {
         let mut samples = collect_samples(None, None, &cfg, board).await;
-        let cfg = publish(spawner, radio, &mut samples, state::baseline(), cfg).await;
+        let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
         enter_deep_sleep(lpwr, publish_interval(&node, &cfg));
     }
 
@@ -473,7 +473,7 @@ async fn run_battery(
             if wakes >= cfg.heartbeat_wakes() {
                 state::set_idle_wakes(0);
                 let mut samples = collect_samples(None, None, &cfg, board).await;
-                let cfg = publish(spawner, radio, &mut samples, state::baseline(), cfg).await;
+                let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
                 enter_deep_sleep(lpwr, cfg.idle_interval());
             }
             state::set_idle_wakes(wakes);
@@ -535,7 +535,7 @@ async fn run_battery(
             if presence_publish_allowed(&cfg) {
                 let mut samples =
                     collect_samples(Some(visit.weight), Some(visit.millis), &cfg, board).await;
-                let cfg = publish(spawner, radio, &mut samples, baseline, cfg).await;
+                let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
                 state::set_idle_wakes(0);
 
                 // A load that outlasted the window drops back to the old cheap
@@ -597,7 +597,7 @@ async fn run_battery(
                 // here instead made the node mute — see the tail.
             } else if presence_publish_allowed(&cfg) {
                 let mut samples = collect_samples(Some(raw), None, &cfg, board).await;
-                let cfg = publish(spawner, radio, &mut samples, baseline, cfg).await;
+                let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
                 state::set_idle_wakes(0);
                 enter_deep_sleep(lpwr, cfg.active_interval());
             }
@@ -615,7 +615,7 @@ async fn run_battery(
             state::set_present_rounds(0);
             if presence_publish_allowed(&cfg) {
                 let mut samples = collect_samples(Some(raw), None, &cfg, board).await;
-                let cfg = publish(spawner, radio, &mut samples, baseline, cfg).await;
+                let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
                 state::set_idle_wakes(0);
                 enter_deep_sleep(lpwr, cfg.idle_interval());
             }
@@ -656,7 +656,7 @@ async fn run_battery(
         info!("heartbeat: publishing periodic readings");
         state::set_idle_wakes(0);
         let mut samples = collect_samples(Some(raw), None, &cfg, board).await;
-        let cfg = publish(spawner, radio, &mut samples, baseline, cfg).await;
+        let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
         enter_deep_sleep(lpwr, cfg.idle_interval());
     }
     state::set_idle_wakes(wakes);
@@ -819,25 +819,25 @@ async fn run_awake(
             warn!("HX711 not responding");
         }
 
-        let baseline = state::baseline();
         let mut samples = collect_samples(raw, None, &cfg, board).await;
 
         // Publish every cycle for a live view; this also drains retained config.
-        let updated = match with_timeout(
-            WIFI_BUDGET,
-            publish_samples(stack, &mut samples, baseline, cfg),
-        )
-        .await
-        {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                warn!("publish failed: {}", e);
-                cfg
-            }
-            Err(_) => {
-                warn!("publish exceeded {:?}", WIFI_BUDGET);
-                cfg
-            }
+        let drained =
+            match with_timeout(WIFI_BUDGET, publish_samples(stack, &mut samples, cfg)).await {
+                Ok(Ok(d)) => d,
+                Ok(Err(e)) => {
+                    warn!("publish failed: {}", e);
+                    Drained { cfg, tare: false }
+                }
+                Err(_) => {
+                    warn!("publish exceeded {:?}", WIFI_BUDGET);
+                    Drained { cfg, tare: false }
+                }
+            };
+        let updated = if drained.tare {
+            retare(board, drained.cfg).await
+        } else {
+            drained.cfg
         };
         cfg = persist_if_changed(cfg, updated);
 
@@ -1075,6 +1075,17 @@ fn persist_if_changed(old: Config, new: Config) -> Config {
     new
 }
 
+/// What one round with the broker came back with.
+///
+/// The tare flag rides along rather than being acted on where it is found: the
+/// press is noticed deep inside the MQTT drain, which holds a socket and a
+/// client and no load cell at all. Re-zeroing means *measuring*, so the flag
+/// travels back out to the loop that owns the board. See [`retare`].
+struct Drained {
+    cfg: Config,
+    tare: bool,
+}
+
 /// Bring up Wi-Fi + the network stack, publish `samples`, and pull any retained
 /// config from Home Assistant — all bounded by [`WIFI_BUDGET`]. Returns the
 /// (possibly HA-updated) config and persists it to flash when it changed. All
@@ -1085,26 +1096,103 @@ async fn publish(
     spawner: Spawner,
     radio: Radio,
     samples: &mut Samples,
-    baseline: i32,
     cfg: Config,
+    board: &mut Board<'_>,
 ) -> Config {
-    let updated = match with_timeout(
+    let drained = match with_timeout(
         WIFI_BUDGET,
-        connect_and_publish(spawner, radio, samples, baseline, cfg),
+        connect_and_publish(spawner, radio, samples, cfg),
     )
     .await
     {
-        Ok(Ok(c)) => c,
+        Ok(Ok(d)) => d,
         Ok(Err(e)) => {
             warn!("publish failed: {}", e);
-            cfg
+            Drained { cfg, tare: false }
         }
         Err(_) => {
             warn!("Wi-Fi/publish exceeded {:?}, giving up", WIFI_BUDGET);
-            cfg
+            Drained { cfg, tare: false }
         }
     };
+    let updated = if drained.tare {
+        retare(board, drained.cfg).await
+    } else {
+        drained.cfg
+    };
     persist_if_changed(cfg, updated)
+}
+
+/// Re-zero the scale from a fresh burst of readings.
+///
+/// Called once, when someone has pressed the button and can see the feeder is
+/// empty. It does three things a single reading could not:
+///
+/// * it **measures**. The old tare adopted `state::baseline()`, the drift-tracked
+///   empty-house value — which only moves on a `Quiet` round, i.e. when the
+///   reading is already close to it. After the cell is remounted it never is:
+///   every round lands in `Unexplained`, the baseline stays where it was, and
+///   taring copied that stale number into `offset`, making the weight worse
+///   rather than better. Remounting was exactly when someone would press it.
+/// * it takes the **median** of [`presence::TARE_SAMPLES`], so a bird landing
+///   partway through cannot become the new zero.
+/// * it re-anchors the **presence baseline** to the same number. The gram zero
+///   and the presence reference describe one physical state, and letting them
+///   disagree is what stranded the node in `Unexplained` in the first place.
+async fn retare(board: &mut Board<'_>, cfg: Config) -> Config {
+    let Some(scale) = board.scale.as_mut() else {
+        warn!("tare requested on a node with no load cell");
+        return cfg;
+    };
+
+    // The first conversion after a pause carries the filter's settling, the
+    // same reason `read_scale` throws one away.
+    let _ = scale.read(HX711_TIMEOUT).await;
+
+    let mut window = presence::Window::new();
+    let mut seen: heapless::Vec<i32, { presence::TARE_SAMPLES }> = heapless::Vec::new();
+    for _ in 0..presence::TARE_SAMPLES {
+        match scale.read(HX711_TIMEOUT).await {
+            Some(raw) => {
+                window.push(raw);
+                let _ = seen.push(raw);
+            }
+            None => break,
+        }
+    }
+
+    if seen.len() < presence::TARE_SAMPLES {
+        warn!(
+            "tare: only {} of {} readings arrived; leaving the zero alone",
+            seen.len(),
+            presence::TARE_SAMPLES
+        );
+        return cfg;
+    }
+    if !presence::tare_spread_ok(&seen) {
+        warn!(
+            "tare: readings never settled (spread over {} ticks); leaving the zero alone.              Something was on the scale or moving it — try again once it is still.",
+            presence::TARE_MAX_SPREAD
+        );
+        return cfg;
+    }
+    let Some(zero) = window.median() else {
+        return cfg;
+    };
+
+    info!(
+        "tare: zero {} -> {} (median of {}), presence baseline re-anchored",
+        cfg.offset,
+        zero,
+        presence::TARE_SAMPLES
+    );
+    state::set_baseline(zero);
+    state::set_bird_present(false);
+    state::set_present_rounds(0);
+    Config {
+        offset: zero,
+        ..cfg
+    }
 }
 
 /// Initialise esp-wifi (STA + DHCP), spawn the background tasks, and wait for a
@@ -1151,12 +1239,11 @@ async fn connect_and_publish(
     spawner: Spawner,
     radio: Radio,
     samples: &mut Samples,
-    baseline: i32,
     cfg: Config,
-) -> Result<Config, &'static str> {
+) -> Result<Drained, &'static str> {
     let stack = bring_up_wifi(spawner, radio).await?;
 
-    let updated = publish_samples(stack, samples, baseline, cfg).await?;
+    let updated = publish_samples(stack, samples, cfg).await?;
 
     // Give the TCP stack a moment to flush the FIN before we cut power.
     Timer::after(Duration::from_millis(200)).await;
@@ -1198,9 +1285,8 @@ async fn wait_for_network(stack: &'static WifiStack) {
 async fn publish_samples(
     stack: &'static WifiStack,
     samples: &mut Samples,
-    baseline: i32,
     cfg: Config,
-) -> Result<Config, &'static str> {
+) -> Result<Drained, &'static str> {
     let node = node::active();
     let mut rx_buffer = [0u8; 1536];
     let mut tx_buffer = [0u8; 1536];
@@ -1417,7 +1503,14 @@ async fn publish_samples(
                         // Tracked separately from `apply`'s "did anything
                         // change" answer: taring an already-zeroed scale changes
                         // nothing, but the press still has to be consumed.
-                        tare_pressed |= key == TARE_KEY && !value.is_empty();
+                        // Noticed here rather than inside `apply`, for the same
+                        // reason `reset_visits` is: acting on it is not a field
+                        // assignment. `apply` owns settings; a re-zero is a
+                        // measurement, and it happens once this round is over
+                        // and the board is reachable again (see `retare`).
+                        if key == TARE_KEY && updated.tare_press_is_new(value) {
+                            tare_pressed = true;
+                        }
 
                         // Forget what the broker is believed to hold, so the
                         // next connect announces everything again. The only
@@ -1442,7 +1535,7 @@ async fn publish_samples(
                             state::set_visit_count(0);
                             reset_visits_pressed = true;
                         }
-                        if updated.apply(key, value, baseline) {
+                        if updated.apply(key, value) {
                             info!("config: {} = {}", key, value);
                         }
                     }
@@ -1520,7 +1613,10 @@ async fn publish_samples(
         apply_provisioning(request);
     }
 
-    Ok(updated)
+    Ok(Drained {
+        cfg: updated,
+        tare: tare_pressed,
+    })
 }
 
 /// Store the new identity and restart into it.

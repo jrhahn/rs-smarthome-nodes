@@ -158,6 +158,33 @@ impl Config {
         (self.heartbeat_secs / self.idle_secs.max(1)).max(1)
     }
 
+    /// Whether a `tare` payload is a fresh press rather than an echo of one
+    /// already acted on, remembering the token if it is.
+    ///
+    /// Two ways to ask for a re-zero, both landing here:
+    ///
+    /// * a discovered Home Assistant *button*, whose payload is a constant —
+    ///   every press looks identical, so the caller deletes the retained
+    ///   message once it has acted on it;
+    /// * a numeric token (the older automation that published a timestamp),
+    ///   where a repeat of the same value is a replay, not a new press.
+    ///   Remembering the token means that keeps working, and doubles as a
+    ///   backstop if the button's retained message ever fails to clear.
+    ///
+    /// Split out of [`Config::apply`] so the decision stays host-tested while
+    /// the measurement that follows it lives where the load cell is.
+    pub fn tare_press_is_new(&mut self, value: &str) -> bool {
+        if value.is_empty() {
+            return false;
+        }
+        let token = value.parse::<u32>().unwrap_or(0);
+        if token != 0 && token == self.tare_token {
+            return false;
+        }
+        self.tare_token = token;
+        true
+    }
+
     /// Convert a raw HX711 reading to grams using the stored calibration, and
     /// format it as a fixed-point decimal string with one fractional digit
     /// (float-free formatting, matching the DS18B20 path). A non-positive /
@@ -187,9 +214,13 @@ impl Config {
     /// Apply one `key=value` pair received from a `<namespace>/<node>/config/<key>`
     /// topic. Returns `true` if it parsed and actually changed a field.
     ///
-    /// `tare` is special: it re-zeros the scale by adopting `tare_ref` (the
-    /// caller passes the current empty-house baseline) as the gram offset.
-    pub fn apply(&mut self, key: &str, value: &str, tare_ref: i32) -> bool {
+    /// `tare` is deliberately **not** handled here. It used to be, adopting a
+    /// caller-supplied reference as the gram offset, but a re-zero is not a
+    /// setting that arrives in a message -- it is a measurement the node has to
+    /// go and take, which needs the bus this type cannot reach. The replay
+    /// logic that decides whether a press is new still lives here, in
+    /// [`Config::tare_press_is_new`]; the measuring is the caller's half.
+    pub fn apply(&mut self, key: &str, value: &str) -> bool {
         let before = *self;
         match key {
             "offset" => {
@@ -247,25 +278,6 @@ impl Config {
                     if v.is_finite() && v >= 0.0 {
                         let centi = (v * 100.0) as u32;
                         self.sds011_kappa_centi = centi.min(sds011::MAX_KAPPA_CENTI);
-                    }
-                }
-            }
-            "tare" => {
-                if !value.is_empty() {
-                    // Two ways to ask for a re-zero, both landing here:
-                    //
-                    // * a discovered Home Assistant *button*, whose payload is a
-                    //   constant — every press looks identical, so the caller
-                    //   deletes the retained message once we have acted on it;
-                    // * a numeric token (the older automation that published a
-                    //   timestamp), where a repeat of the same value is a
-                    //   replay, not a new press. Remembering the token means
-                    //   that keeps working, and doubles as a backstop if the
-                    //   button's retained message ever fails to clear.
-                    let token = value.parse::<u32>().unwrap_or(0);
-                    if token == 0 || token != self.tare_token {
-                        self.tare_token = token;
-                        self.offset = tare_ref;
                     }
                 }
             }
@@ -633,35 +645,35 @@ mod tests {
     #[test]
     fn apply_parses_every_key() {
         let mut cfg = Config::DEFAULT;
-        assert!(cfg.apply("offset", "-500", 0));
+        assert!(cfg.apply("offset", "-500"));
         assert_eq!(cfg.offset, -500);
-        assert!(cfg.apply("scale_factor", "123.5", 0));
+        assert!(cfg.apply("scale_factor", "123.5"));
         assert_eq!(cfg.scale_factor, 123.5);
-        assert!(cfg.apply("threshold", "42", 0));
+        assert!(cfg.apply("threshold", "42"));
         assert_eq!(cfg.threshold_grams, 42.0);
-        assert!(cfg.apply("idle_interval", "7", 0));
+        assert!(cfg.apply("idle_interval", "7"));
         assert_eq!(cfg.idle_secs, 7);
-        assert!(cfg.apply("active_interval", "17", 0));
+        assert!(cfg.apply("active_interval", "17"));
         assert_eq!(cfg.active_secs, 17);
-        assert!(cfg.apply("heartbeat_interval", "900", 0));
+        assert!(cfg.apply("heartbeat_interval", "900"));
         assert_eq!(cfg.heartbeat_secs, 900);
-        assert!(cfg.apply("deep_sleep", "0", 0));
+        assert!(cfg.apply("deep_sleep", "0"));
         assert!(!cfg.deep_sleep);
-        assert!(cfg.apply("sds011_kappa", "0.4", 0));
+        assert!(cfg.apply("sds011_kappa", "0.4"));
         assert_eq!(cfg.sds011_kappa_centi, 40);
     }
 
     #[test]
     fn kappa_is_clamped_to_its_slider_rather_than_dropped() {
         let mut cfg = Config::DEFAULT;
-        assert!(cfg.apply("sds011_kappa", "9.9", 0));
+        assert!(cfg.apply("sds011_kappa", "9.9"));
         assert_eq!(cfg.sds011_kappa_centi, sds011::MAX_KAPPA_CENTI);
         // Zero is a legitimate setting: it switches the correction off.
-        assert!(cfg.apply("sds011_kappa", "0", 0));
+        assert!(cfg.apply("sds011_kappa", "0"));
         assert_eq!(cfg.sds011_kappa_centi, 0);
         // Nonsense leaves the last good value alone.
         for bad in ["-1", "", "off", "NaN"] {
-            assert!(!cfg.apply("sds011_kappa", bad, 0), "{bad}");
+            assert!(!cfg.apply("sds011_kappa", bad), "{bad}");
             assert_eq!(cfg.sds011_kappa_centi, 0, "{bad}");
         }
     }
@@ -671,8 +683,8 @@ mod tests {
         // What keeps a retained message, re-delivered on every connect, from
         // rewriting flash for ever.
         let mut cfg = Config::DEFAULT;
-        assert!(cfg.apply("idle_interval", "5", 0));
-        assert!(!cfg.apply("idle_interval", "5", 0));
+        assert!(cfg.apply("idle_interval", "5"));
+        assert!(!cfg.apply("idle_interval", "5"));
     }
 
     #[test]
@@ -691,7 +703,7 @@ mod tests {
             ("no_such_key", "1"),    //
             ("", "1"),               //
         ] {
-            assert!(!cfg.apply(key, value, 0), "{key}={value:?} was accepted");
+            assert!(!cfg.apply(key, value), "{key}={value:?} was accepted");
         }
         assert!(cfg == Config::DEFAULT);
     }
@@ -701,46 +713,56 @@ mod tests {
         let mut cfg = Config::DEFAULT;
         for value in ["0", "false", "off", "OFF"] {
             cfg.deep_sleep = true;
-            assert!(cfg.apply("deep_sleep", value, 0));
+            assert!(cfg.apply("deep_sleep", value));
             assert!(!cfg.deep_sleep);
         }
         for value in ["1", "true", "on", "ON"] {
             cfg.deep_sleep = false;
-            assert!(cfg.apply("deep_sleep", value, 0));
+            assert!(cfg.apply("deep_sleep", value));
             assert!(cfg.deep_sleep);
         }
     }
 
     #[test]
-    fn tare_adopts_the_baseline() {
+    fn every_button_press_counts_as_a_new_tare() {
         let mut cfg = Config::DEFAULT;
         // The discovered button sends a constant payload, so every press must
         // count — it is the caller that stops the retained message repeating.
-        assert!(cfg.apply("tare", "tare", 4242));
-        assert_eq!(cfg.offset, 4242);
-        assert!(cfg.apply("tare", "tare", 99));
-        assert_eq!(cfg.offset, 99);
+        assert!(cfg.tare_press_is_new("tare"));
+        assert!(cfg.tare_press_is_new("tare"));
     }
 
     #[test]
-    fn tare_ignores_a_replayed_token_but_honours_a_new_one() {
+    fn a_replayed_token_is_not_a_press_but_a_new_one_is() {
         // The older automation published a timestamp; the same one arriving
         // again is the broker replaying, not a second press.
         let mut cfg = Config::DEFAULT;
-        assert!(cfg.apply("tare", "1000", 4242));
-        assert_eq!(cfg.offset, 4242);
-        assert!(!cfg.apply("tare", "1000", 77));
-        assert_eq!(cfg.offset, 4242);
-        assert!(cfg.apply("tare", "1001", 77));
-        assert_eq!(cfg.offset, 77);
+        assert!(cfg.tare_press_is_new("1000"));
+        assert!(!cfg.tare_press_is_new("1000"));
+        assert!(cfg.tare_press_is_new("1001"));
     }
 
     #[test]
-    fn tare_ignores_an_empty_payload() {
+    fn an_empty_payload_is_not_a_press() {
         // How a retained message is deleted — it must not read as a press.
         let mut cfg = Config::DEFAULT;
-        assert!(!cfg.apply("tare", "", 4242));
-        assert_eq!(cfg.offset, Config::DEFAULT.offset);
+        assert!(!cfg.tare_press_is_new(""));
+    }
+
+    #[test]
+    fn a_tare_press_never_moves_the_zero_by_itself() {
+        // The regression this guards is the whole point of the split: deciding
+        // that a press is new must not, on its own, change the calibration.
+        // `offset` is now only written after a burst of readings has been taken
+        // and checked (see `main::retare`), so a press arriving while the node
+        // cannot measure leaves the stored zero exactly as it was.
+        let mut cfg = Config::DEFAULT;
+        let before = cfg.offset;
+        assert!(cfg.tare_press_is_new("tare"));
+        assert_eq!(cfg.offset, before);
+        // And it is not reachable through the settings path at all any more.
+        assert!(!cfg.apply("tare", "tare"));
+        assert_eq!(cfg.offset, before);
     }
 
     // --- Derived values -----------------------------------------------------
