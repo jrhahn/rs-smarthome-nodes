@@ -584,10 +584,10 @@ mod tests {
     // Deliberately not a glob import: `super::String` / `super::Vec` are the
     // heapless ones, and the tests want the std types.
     use super::{
-        availability, config_payload, config_topic, control_payload, control_topic, controls,
-        announcement_tag, entities, Availability, Config, NodeConfig, Slot, BATTERY_CONTROLS,
-        MAX_ENTITIES, MIN_EXPIRY_SECS,
-        MISSED_ROUNDS, PREFIX, SCALE_CONTROLS, SCD41_CONTROLS, SDS011_CONTROLS, SLEEP_CONTROLS,
+        announcement_tag, availability, config_payload, config_topic, control_payload,
+        control_topic, controls, entities, Availability, Config, NodeConfig, Slot,
+        BATTERY_CONTROLS, MAX_ENTITIES, MIN_EXPIRY_SECS, MISSED_ROUNDS, PREFIX, SCALE_CONTROLS,
+        SCD41_CONTROLS, SDS011_CONTROLS, SLEEP_CONTROLS,
     };
     use crate::node::FLEET;
     use serde_json::Value;
@@ -1186,7 +1186,10 @@ mod tests {
         // the whole entity over it rather than falling back to none.
         assert!(!payload.contains("dev_cla"), "{payload}");
         assert!(!payload.contains("unit_of_meas"), "{payload}");
-        assert!(payload.contains("\"stat_cla\":\"total_increasing\""), "{payload}");
+        assert!(
+            payload.contains("\"stat_cla\":\"total_increasing\""),
+            "{payload}"
+        );
 
         // The omission must not have eaten a separator on the way out.
         let parsed = parse(&payload);
@@ -1210,8 +1213,12 @@ mod tests {
             .iter()
             .map(|e| config_topic(&node, e).to_string())
             .collect();
-        assert!(topics.contains(&"homeassistant/sensor/terrasse/battery_voltage/config".to_string()));
-        assert!(topics.contains(&"homeassistant/sensor/terrasse/battery_percent/config".to_string()));
+        assert!(
+            topics.contains(&"homeassistant/sensor/terrasse/battery_voltage/config".to_string())
+        );
+        assert!(
+            topics.contains(&"homeassistant/sensor/terrasse/battery_percent/config".to_string())
+        );
         for entity in entities(&node) {
             assert!(config_payload(&node, &entity, &avail).is_some());
         }
@@ -1280,7 +1287,12 @@ mod tests {
         // Zero means "RTC RAM holds nothing"; a real node must never collide
         // with it, or its first announce would be skipped.
         for (_, node) in FLEET {
-            assert_ne!(announcement_tag(node, &availability_of(node)), 0, "{}", node.id);
+            assert_ne!(
+                announcement_tag(node, &availability_of(node)),
+                0,
+                "{}",
+                node.id
+            );
         }
     }
 
@@ -1295,5 +1307,4 @@ mod tests {
             seen.push(tag);
         }
     }
-
 }

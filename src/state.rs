@@ -157,7 +157,6 @@ pub fn set_discovery_tag(tag: u32) {
     unsafe { core::ptr::addr_of_mut!(DISCOVERY_TAG).write(tag) }
 }
 
-
 /// How many consecutive rounds a load has been on the scale.
 pub fn present_rounds() -> u32 {
     unsafe { core::ptr::addr_of!(PRESENT_ROUNDS).read() }

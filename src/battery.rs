@@ -367,10 +367,7 @@ mod tests {
         let mut mv = 3000;
         while mv <= 4300 {
             let p = percent(mv);
-            assert!(
-                p >= previous,
-                "percent({mv}) = {p} after {previous}"
-            );
+            assert!(p >= previous, "percent({mv}) = {p} after {previous}");
             assert!(p <= 100, "percent({mv}) = {p}");
             previous = p;
             mv += 1;
@@ -405,5 +402,4 @@ mod tests {
         // that anyone surprised by it finds the reason next to the surprise.
         assert_eq!(percent(cell_millivolts(2100)), 100);
     }
-
 }
