@@ -792,6 +792,28 @@ wz_lid = _slots(wz_lid, 7, 8.0, (44.0, 3.0, WZ_LID + 2),
 wz_lid = _slots(wz_lid, 3, 8.0, (16.0, 3.0, WZ_LID + 2),
                 (SHT_STRIP_X + 2.0, 0, -1.0), axis="y")
 
+# Over the SDS011 itself, which is the stretch of this lid that had nothing.
+# Same 7 rows and 8 mm pitch as the board bay, so the whole cover reads as one
+# grille and the webs stay 5 mm.
+#
+# The module's intake is not affected by this and could not be: it is tubed to
+# the port in the +Y wall, so it draws what the port gives it whatever the lid
+# does. What changes is the exhaust, which until now had one way out -- the
+# slots low in the -Y wall, deliberately on the far side of the module -- and
+# now has a second, straight up and away from the intake. That is the right
+# direction for it.
+#
+# It also covers the case the intake stub's removal opened up. If the tube is
+# not sealed at the bore, the module draws compartment air instead of room air;
+# with the lid open above it, compartment air *is* room air, which is the
+# failure mode one would have chosen.
+#
+# x runs -49 .. 13: clear of the SHT31 rows that end at -53 by a 4 mm web,
+# stopping short of the baffle at 15.5 and leaving 7.75 mm to the board bay's
+# grille. Nothing here goes near the corner posts or their countersinks.
+wz_lid = _slots(wz_lid, 7, 8.0, (62.0, 3.0, WZ_LID + 2),
+                (-18.0, 0, -1.0), axis="y")
+
 wz_lid = (
     wz_lid.faces(">Z").workplane()
     .pushPoints(WZ_POST_XY)
