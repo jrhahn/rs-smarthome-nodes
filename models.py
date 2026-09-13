@@ -568,45 +568,48 @@ print("           M5 must reach %.0f mm of pad plus the bar's thread"
 ##
 ## Two printed parts:
 ##
-##   wohnzimmer_tray   floor, walls and the three compartments
-##   wohnzimmer_lid    flat cover, four screws
+##   wohnzimmer_tray   floor, walls and the two compartments
+##   wohnzimmer_lid    flat cover, four screws, vented over both
 ##
-## Indoors, so nothing here is about rain. The shape is driven by two
-## constraints the commissioning notes already state:
+## This is the second box for this node and it is not a revision of the first,
+## which is in git (`git show cb9a0f9:models.py`). What changed is the node: it
+## grew an SGP41, so the board compartment now holds three boards on jumper
+## wires instead of one, and the interior went from 26 mm to 40 mm to take them
+## standing rather than lying.
 ##
-##   "keep the SHT31-D away from the board [...] a board-warmed SHT31 reports
-##    a relative humidity that is too low, the correction then subtracts too
-##    little, and the error lands in the PM figures"
-##   "a sealed enclosure would have it measuring the enclosure"
+## That extra height is also what removed a compartment. The first box gave the
+## SHT31 a vented chamber of its own, 90 mm of still air from the board, because
+## a board-warmed SHT31 reports a humidity that is too low and the error lands in
+## the corrected PM figures. With 40 mm to play with, the SHT31 goes *up* instead
+## of *away*: a card slot at the far end of the particulate compartment holds it
+## above the module, in the draught between its own wall vents and the lid, and
+## the wall it stood behind is gone.
 ##
-## Hence three compartments in a row, divided by full-height baffles that also
-## carry the wz_lid across its span:
+## So, two compartments in a row:
 ##
-##   -X  sensor chamber   SHT31 + SCD41, vented on three sides, ~90 mm of
-##                        still air away from the board. Both sensors here
-##                        want room air and neither runs a fan.
-##       SDS011 bay       a pocket the module drops into. Its intake is tubed
-##                        to a stub in the +Y wall so it draws room air, not
-##                        its own exhaust; the exhaust leaves through the -Y
-##                        wall, 84 mm away on the far side of the module.
-##   +X  board bay        a fitted pocket, cable out through the +X wall.
+##   -X  particulate + humidity   the SDS011 in a square pocket, the SHT31 on
+##                                edge in the 10 mm strip at the end, clear of
+##                                the module and of the exhaust
+##   +X  board bay                XIAO, SCD41 and SGP41, 50 mm wide, open floor:
+##                                three boards on wires do not want a pocket
+##                                shaped for one
 ##
-## A 10 mm service strip runs along +Y past the SDS011 for the intake tube and
-## for the sensor wiring, which has to cross the bay to reach the board. The
-## baffles are notched at floor level to let it through.
+## Both are vented on their long walls and through the lid. The board bay needs
+## it twice over -- the SCD41 measures room air and the SGP41 wants the same air
+## the room has, and neither can do that inside a sealed box.
 ##
 ## Print both parts flat on the plate, wz_tray floor down. Slots are vertical
 ## cuts in vertical walls, so only their tops bridge -- no support needed.
 
-WZ_X, WZ_Y, WZ_Z = 145.0, 89.0, 42.0
+WZ_X, WZ_Y, WZ_Z = 141.0, 89.0, 46.0
 WZ_WALL = 2.5
 WZ_FLOOR = 3.0
 WZ_LID = 3.0
 
-WZ_IN_X = WZ_X - 2 * WZ_WALL      # 140
+WZ_IN_X = WZ_X - 2 * WZ_WALL      # 136
 WZ_IN_Y = WZ_Y - 2 * WZ_WALL      # 84
-WZ_IN_H = WZ_Z - WZ_FLOOR - WZ_LID  # 26
-WZ_TOP = WZ_FLOOR + WZ_IN_H       # 29, where the wz_lid lands
+WZ_IN_H = WZ_Z - WZ_FLOOR - WZ_LID  # 40, as asked
+WZ_TOP = WZ_FLOOR + WZ_IN_H       # 43, where the wz_lid lands
 
 WZ_BAF = 2.0
 
@@ -617,27 +620,41 @@ SDS_XY = 73.5                     # 71 x 70 module, pocket kept SQUARE so it
                                   # differs between units, and the tube has to
                                   # reach the stub.
 SDS_SERVICE = 10.0                # strip along +Y for tube and wiring
-SENS_X = 18.0                     # sensor chamber depth
-BOARD_X, BOARD_Y = 34.0, 56.0     # 33 x 55 board plus clearance
-BOARD_RIB = 8.0                   # pocket rib height
+SHT_STRIP = 10.0                  # strip at the -X end for the SHT31 card
+BOARD_BAY = 50.0                  # asked for; holds all three boards
 
 # Compartment boundaries in X, left to right.
-WZ_X0 = -WZ_IN_X / 2              # -70
-SENS_X1 = WZ_X0 + SENS_X          # -52
-SDS_X0 = SENS_X1 + WZ_BAF         # -50
-SDS_X1 = SDS_X0 + SDS_XY          # 23.5
-BOARD_X0 = SDS_X1 + WZ_BAF        # 25.5
+WZ_X0 = -WZ_IN_X / 2              # -68
+SHT_X1 = WZ_X0 + SHT_STRIP        # -58, where the module may start
+SDS_X0 = SHT_X1                   # -58
+SDS_X1 = SDS_X0 + SDS_XY          # 15.5
+BOARD_X0 = SDS_X1 + WZ_BAF        # 17.5
+# 17.5 -> 68 is 50.5 mm of bay, the 50 asked for plus the half millimetre that
+# falls out of the pocket being square.
 
 WZ_Y1 = WZ_IN_Y / 2               # 42
 SDS_RIB_Y = WZ_Y1 - SDS_SERVICE - WZ_BAF   # 30, module stops here
 
 WZ_POST = 8.0
-# 3.5 mm for a heat-set insert, not a self-tapping pilot. That leaves 2.25 mm
-# of post wall around it -- brass expands as it goes in, so check it against
-# the insert you actually have before printing four of them.
-WZ_PILOT, WZ_CLEAR, WZ_CSK = 3.5, 3.4, 6.6
+# 3.5 mm for a heat-set insert, as asked. That is the M2.5 size: with an insert
+# of 4.0 mm outer diameter the brass has plastic to displace, with one of 3.5 it
+# has none -- check the insert in hand before melting four of them in.
+WZ_PILOT = 3.5
+# M2.5 countersunk: 2.9 clearance, head 4.7 plus a lip.
+WZ_CLEAR, WZ_CSK = 2.9, 5.7
 WZ_POST_XY = [(sx * (WZ_IN_X / 2 - WZ_POST / 2), sy * (WZ_IN_Y / 2 - WZ_POST / 2))
               for sx in (-1, 1) for sy in (-1, 1)]
+# The posts at the -X end stand *inside* the SHT31 strip, which is why the
+# module starts 10 mm in rather than against the wall: a 73.5 mm pocket pushed
+# to the wall would have run straight into them.
+
+# Height of the middle of the USB-C window, above the interior floor.
+#
+# Asked for at 20 mm, which is a statement about where the XIAO sits: a plug is
+# rigid, so the window has to line up with the connector rather than the cable
+# bending to meet it. On a board lying on the floor that is about 5 mm, so if
+# the boards end up flat rather than stacked, this is the line to change.
+USB_Z = 20.0
 
 INTAKE_OD, INTAKE_ID, INTAKE_L = 6.0, 4.0, 8.0   # stub mimics the SDS011 nozzle
 SLOT_W = 2.5                                      # every vent slot
@@ -658,24 +675,16 @@ def _slots(shape, n, pitch, size, at, axis="z"):
 wz_tray = _box(WZ_X, WZ_Y, WZ_TOP).edges("|Z").fillet(CORNER_R)
 wz_tray = wz_tray.cut(_box(WZ_IN_X, WZ_IN_Y, WZ_IN_H, (0, 0, WZ_FLOOR)))
 
-# Baffles. Full height: they separate the three air volumes and they are what
-# keeps a 145 mm wz_lid from sagging between its four corner screws.
-for bx in (SENS_X1 + WZ_BAF / 2, SDS_X1 + WZ_BAF / 2):
-    wz_tray = wz_tray.union(_box(WZ_BAF, WZ_IN_Y, WZ_IN_H, (bx, 0, WZ_FLOOR)))
-    # Full-height slot inside the service strip, for the sensor wiring: the
-    # wire drops in from above instead of being threaded through a window.
-    # Seal it after routing -- see the note on the terrasse baffle.
-    wz_tray = wz_tray.cut(
-        _box(3 * WZ_BAF, 8.0, WZ_IN_H, (bx, WZ_Y1 - SDS_SERVICE / 2, WZ_FLOOR))
-    )
+# The one baffle left, notched at floor level so the SHT31's four wires can
+# cross into the board bay.
+wz_tray = wz_tray.union(_box(WZ_BAF, WZ_IN_Y, WZ_IN_H,
+                       (SDS_X1 + WZ_BAF / 2, 0, WZ_FLOOR)))
+wz_tray = wz_tray.cut(
+    _box(3 * WZ_BAF, 8.0, WZ_IN_H, (SDS_X1 + WZ_BAF / 2, 0, WZ_FLOOR))
+)
 
-# Rib that stops the SDS011 short of the service strip.
-wz_tray = wz_tray.union(_box(SDS_XY, WZ_BAF, 6.0,
-                       ((SDS_X0 + SDS_X1) / 2, SDS_RIB_Y + WZ_BAF / 2, WZ_FLOOR)))
-
-# Intake stub in the +Y wall: push a short silicone tube from the module's
-# nozzle onto this, and the fan draws room air instead of the bay's own
-# exhaust. Without it the sensor slowly re-measures what it just measured.
+# Intake stub in the +Y wall: the SDS011's own nozzle is tubed to it so the
+# module draws room air rather than its own exhaust.
 stub_c = ((SDS_X0 + SDS_X1) / 2, WZ_Y1 + WZ_WALL - INTAKE_L / 2, WZ_FLOOR + 9.0)
 wz_tray = wz_tray.union(
     cq.Workplane("XZ").circle(INTAKE_OD / 2).extrude(INTAKE_L)
@@ -686,42 +695,44 @@ wz_tray = wz_tray.cut(
     .translate((stub_c[0], WZ_Y1 + WZ_WALL + 1, stub_c[2]))
 )
 
-# Exhaust, -Y wall, the full length of the bay and as far from the intake as
-# the box allows. The top row sits where it does because the walls grew 10 mm:
-# a chimney is driven by the height between inlet and outlet, so the extra
-# height is worth spending on one more row rather than on dead air.
-for z in (8.0, 13.0, 18.0, 23.0):
+# Exhaust, low in the -Y wall and on the far side of the module from the stub.
+for z in (6.0, 11.0, 16.0):
     wz_tray = _slots(wz_tray, 4, 17.0, (14.0, 3 * WZ_WALL, SLOT_W),
-                  ((SDS_X0 + SDS_X1) / 2, -WZ_Y1, WZ_FLOOR + z), axis="x")
+                     ((SDS_X0 + SDS_X1) / 2, -WZ_Y1, WZ_FLOOR + z), axis="x")
 
-# Sensor chamber: vented on the -X end and both long walls, so it sees room
-# air by convection alone. No fan reaches in here.
-for z in (7.0, 12.0, 17.0, 22.0):
-    wz_tray = _slots(wz_tray, 2, 34.0, (3 * WZ_WALL, 26.0, SLOT_W),
-                  (-WZ_IN_X / 2, 0, WZ_FLOOR + z), axis="y")
-    # Kept inboard of the corner posts: a slot cut across one would open the
-    # wall onto solid plastic and vent nothing.
+# Rib the module rests against, so it cannot slide into the service strip.
+wz_tray = wz_tray.union(_box(SDS_XY, WZ_BAF, 6.0,
+                       ((SDS_X0 + SDS_X1) / 2, SDS_RIB_Y + WZ_BAF / 2, WZ_FLOOR)))
+
+# --- the SHT31, standing in the strip at the -X end ------------------------
+# On edge rather than flat, and tall rather than deep: what matters is that the
+# sensor sits above the module in moving air, not that the card is held firmly.
+# The slot runs the full height so the card can be pushed to whatever depth
+# leaves its sensor clear of the module's top.
+SHT_SLOT_X = WZ_X0 + SHT_STRIP / 2       # -63, centred in the strip
+wz_tray = wz_tray.union(_box(6.0, 18.0, 34.0, (SHT_SLOT_X, 0, WZ_FLOOR)))
+wz_tray = wz_tray.cut(_box(2.0, 22.0, 33.0, (SHT_SLOT_X, 0, WZ_FLOOR + 1.5)))
+
+# Its own air: the -X wall beside the card, high, where the card's sensor is.
+for z in (20.0, 26.0, 32.0):
+    wz_tray = wz_tray.cut(_box(3 * WZ_WALL, 22.0, SLOT_W, (WZ_X0, 0, WZ_FLOOR + z)))
+
+# --- board bay: CO2 and VOC both need room air -----------------------------
+BOARD_MID = (BOARD_X0 + WZ_IN_X / 2) / 2
+for z in (8.0, 16.0, 24.0, 32.0):
     for sy in (-1, 1):
-        wz_tray = wz_tray.cut(_box(8.0, 3 * WZ_WALL, SLOT_W,
-                             (WZ_X0 + WZ_POST + 5.0, sy * WZ_Y1, WZ_FLOOR + z)))
+        wz_tray = _slots(wz_tray, 3, 14.0, (10.0, 3 * WZ_WALL, SLOT_W),
+                         (BOARD_MID, sy * WZ_Y1, WZ_FLOOR + z), axis="x")
 
-# Card slot for the SHT31, standing on edge at the far end of the chamber
-# from the SCD41, which shares the compartment and does run slightly warm.
-wz_tray = wz_tray.union(_box(6.0, 18.0, 6.0, (WZ_X0 + SENS_X / 2, -22.0, WZ_FLOOR)))
-wz_tray = wz_tray.cut(_box(2.0, 22.0, 5.0, (WZ_X0 + SENS_X / 2, -22.0, WZ_FLOOR + 1.5)))
+# Cable out, sized for a USB-C plug's overmould. Height per USB_Z above.
+USB_W, USB_H = 15.0, 9.0
+wz_tray = wz_tray.cut(_box(3 * WZ_WALL, USB_W, USB_H,
+                     (WZ_IN_X / 2, 0, WZ_FLOOR + USB_Z - USB_H / 2)))
+# ... and air around it, since this wall is otherwise solid.
+for z in (8.0, 32.0):
+    wz_tray = _slots(wz_tray, 2, 26.0, (3 * WZ_WALL, 16.0, SLOT_W),
+                     (WZ_IN_X / 2, 0, WZ_FLOOR + z), axis="y")
 
-# Board pocket, and the cable out through the +X wall.
-wz_tray = wz_tray.union(_box(WZ_BAF, BOARD_Y, BOARD_RIB,
-                       (BOARD_X0 + BOARD_X + WZ_BAF / 2, 0, WZ_FLOOR)))
-for sy in (-1, 1):
-    wz_tray = wz_tray.union(_box(BOARD_X + WZ_BAF, WZ_BAF, BOARD_RIB,
-                           (BOARD_X0 + (BOARD_X + WZ_BAF) / 2,
-                            sy * (BOARD_Y + WZ_BAF) / 2, WZ_FLOOR)))
-wz_tray = wz_tray.cut(_box(18.0, 14.0, 10.0, (WZ_IN_X / 2, 0, WZ_FLOOR)))
-for z in (16.0, 20.0):
-    wz_tray = wz_tray.cut(_box(3 * WZ_WALL, 26.0, SLOT_W, (WZ_IN_X / 2, 0, WZ_FLOOR + z)))
-
-# Corner posts for the wz_lid.
 for (px, py) in WZ_POST_XY:
     wz_tray = wz_tray.union(_box(WZ_POST, WZ_POST, WZ_IN_H, (px, py, WZ_FLOOR)))
     wz_tray = wz_tray.cut(
@@ -732,15 +743,26 @@ for (px, py) in WZ_POST_XY:
 display(wz_tray)
 _export(wz_tray, "wohnzimmer_tray")
 
-
 # ---------------------------------------------------------------------------
 # Lid
 # ---------------------------------------------------------------------------
-# The wz_lid prints underside-down, so its top edge is the LAST thing laid down
-# and each layer of the round is smaller than the one below it. Free to print,
-# unlike the same edge on the terrasse roof.
+# Edge break first: once the vent slots are cut, `>Z` edges are no longer just
+# the outline, and a fillet on the 4 mm web between two slots is not a fillet.
 wz_lid = _box(WZ_X, WZ_Y, WZ_LID).edges("|Z").fillet(CORNER_R)
 wz_lid = wz_lid.faces(">Z").edges().fillet(TOP_BREAK)
+
+# Over the board bay: this is the chimney's outlet, and the reason the CO2 and
+# VOC readings are about the room rather than about the box. Slots run along X
+# so the material between them is continuous across the lid's long span, which
+# is what a cover with screws only in its corners needs.
+wz_lid = _slots(wz_lid, 7, 8.0, (44.0, 3.0, WZ_LID + 2),
+                (BOARD_MID, 0, -1.0), axis="y")
+
+# Over the SHT31's end of the other compartment, for the same reason in
+# miniature: the card is in the draught between these and its wall slots.
+wz_lid = _slots(wz_lid, 3, 8.0, (16.0, 3.0, WZ_LID + 2),
+                (SHT_SLOT_X + 2.0, 0, -1.0), axis="y")
+
 wz_lid = (
     wz_lid.faces(">Z").workplane()
     .pushPoints(WZ_POST_XY)
@@ -799,6 +821,13 @@ KL_POST = 8.0
 # of post wall back around it instead of 2.0, which matters here because
 # KL_POST cannot grow -- the screw centres are pinned by KL_POST_XY.
 KL_PILOT = 3.5
+# Its own clearance and countersink, rather than the living room's. These used
+# to read `WZ_CLEAR, WZ_CSK`, which was true and load-bearing at the same time:
+# the two boxes happened to use the same screw, so borrowing looked tidy -- and
+# when the living room moved to M2.5, this lid quietly followed it and stopped
+# fitting the M3 screws the printed trays are tapped for. A number two boxes
+# share has to be shared on purpose or not at all.
+KL_CLEAR, KL_CSK = 3.4, 6.6   # M3 countersunk, matching the M3 insert above
 # Measured, not derived -- the same reason BOSS_XY is pinned on the terrace box.
 # Flush against the inner walls the centres come out at (26.0, 13.0), and a test
 # fit of the printed pair showed the lid would not sit down: the holes had to
@@ -914,7 +943,7 @@ kl_lid = kl_lid.faces(">Z").edges().fillet(TOP_BREAK)
 kl_lid = (
     kl_lid.faces(">Z").workplane()
     .pushPoints(KL_POST_XY)
-    .cskHole(WZ_CLEAR, WZ_CSK, 90)
+    .cskHole(KL_CLEAR, KL_CSK, 90)
 )
 
 display(kl_lid)
