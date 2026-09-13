@@ -429,6 +429,24 @@ page.
   would not thread through a narrower one), and both nodes moved to
   `PowerProfile::MainsDutyCycled` so the board is off between rounds.
 
+  The lid was left solid in that first pass, on the argument that nothing in
+  this box needs room air the way the `schlafzimmer` SCD41 does. That answers
+  the wrong question: the board does not need room air, it needs its heat gone,
+  and the wall outlets sit at `z = 19` of a 24 mm bay, so the warm air has to
+  turn to reach them. The lid now carries a 187 mm² grille over the board bay,
+  on the same `x` bounds as the wall slots, and a 125 mm² one over the sensor
+  chamber — the second is not about heat but about response time, since every
+  other opening into that end is a side slot the room air has to turn to come
+  through.
+
+  **Both cuts rest on a fact about the rooms, not about the box.** An open lid
+  in a kitchen or a bathroom is where grease and condensate get in, and the
+  sensor is the part that never reports its own failure: a wet RH sensor still
+  returns a number. What makes it affordable is that `kueche` and `bad` sit on
+  a shelf, not under a hob or a shower head. Re-check that before printing this
+  design for a third room; if the next one has to hang somewhere exposed, the
+  sensor grille is the cut to leave out.
+
   The slots stop short of `x = 6` on purpose. The jumpers to the SHT31 loop
   through the 8.5 mm between board and baffle, and slots that reach the board
   edge put a 2.5 mm opening at jumper-housing height right where a wire is

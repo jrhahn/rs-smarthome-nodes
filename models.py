@@ -800,9 +800,18 @@ print("wohnzimmer wz_tray %.1f cm3  wz_lid %.1f cm3" % (
 ## measures the air it is in, so heating the air by 2.5 C without adding water
 ## to it drops the reported RH by about seven points.
 ##
-## So the board bay gets its own chimney -- inlet low, two outlets high, on both
-## long walls -- and the notch stops being the path of least resistance. The
-## notch itself is left alone deliberately; see the comment on it below.
+## So the board bay gets its own chimney -- inlet low, outlets high in both long
+## walls and a grille in the lid above the board -- and the notch stops being
+## the path of least resistance. The notch itself is left alone deliberately;
+## see the comment on it below.
+##
+## The lid is vented over both chambers, which it was not at first. Over the
+## board bay it is the top of that chimney; over the sensor chamber it is not
+## about heat at all but about response time, since every other opening into
+## that end is a side slot the room air has to turn to come through. Both cuts
+## rest on where these two boxes actually sit -- on a shelf, not under a hob or
+## a shower head -- because an open lid in a kitchen or a bathroom is otherwise
+## exactly where grease and condensate get in.
 
 KL_X, KL_Y, KL_Z = 65.0, 39.0, 30.0
 KL_WALL, KL_FLOOR, KL_LID = 2.5, 3.0, 3.0
@@ -899,11 +908,13 @@ for sy in (-1, 1):
 # baffle. Inlet just above the corral ribs, two outlets high where the warm air
 # actually is. Both long walls, so it is a cross-draught and not one hole.
 #
-# Walls only, no slots in the kl_lid -- unlike the schlafzimmer box, which has
-# them because its SCD41 needs room air and not box air. Nothing in here needs
-# room air; it only needs its heat gone, and a high wall slot does that without
-# leaving an opening above the board. These two live in a kitchen and a
-# bathroom, where what falls from above is grease and condensate.
+# The kl_lid carries the top of this chimney, over the same stretch of x; see
+# the grille cut into it below. This used to be walls only, on the argument
+# that nothing in here needs room air the way the schlafzimmer box's SCD41
+# does -- true of the board, and it answers the wrong question about it. The
+# board does not need room air, it needs its heat gone, and warm air leaves
+# upward. A high wall slot is where the warm air has to turn to reach it; a lid
+# slot is where it was already going.
 #
 # Bounded on BOTH sides, and the -X bound is the one worth explaining. The four
 # jumpers to the SHT31 leave the board at its -X end, loop in the 8.5 mm of
@@ -938,8 +949,59 @@ for (px, py) in KL_POST_XY:
 display(kl_tray)
 _export(kl_tray, "climate_tray")
 
+# ---------------------------------------------------------------------------
+# Lid
+# ---------------------------------------------------------------------------
+# Edge break before the slots, for the reason spelled out on the schlafzimmer
+# lid: once they are cut, `>Z` is no longer just the outline, and TOP_BREAK on
+# a 3 mm web is a failed kernel call rather than a fillet.
 kl_lid = _box(KL_X, KL_Y, KL_LID).edges("|Z").fillet(CORNER_R)
 kl_lid = kl_lid.faces(">Z").edges().fillet(TOP_BREAK)
+
+# Grille over the board bay -- the top of the chimney whose inlet and wall
+# outlets are cut into the kl_tray above. 5 x 15 x 2.5 = 187 mm2, against the
+# 225 in the walls, and it is the opening the stack effect actually uses: the
+# wall outlets sit at z = 19 of a 24 mm bay, so warm air has to turn to reach
+# them.
+#
+# The x bounds are the wall slots' bounds, deliberately shared: KL_BOARD_VENT_X
+# and _L already encode both the jumper corridor that must stay blank (x = -6
+# .. 2.5, plus margin) and the corner posts the openings must stay inboard of.
+# Rows run along x and step across y, so each one spans the board rather than
+# the gap beside it, and the 3 mm webs between them run the short way.
+kl_lid = _slots(kl_lid, 5, 5.5, (KL_BOARD_VENT_L, SLOT_W, KL_LID + 2),
+                (KL_BOARD_VENT_X, 0, -1.0), axis="y")
+
+# Grille over the sensor chamber. 4 x 12.5 x 2.5 = 125 mm2, on top of the 150
+# in the -X end wall and the 120 in the two long walls, and it is not there for
+# heat -- this end has no heat in it. It is there for response time. Every
+# other opening into this chamber is a side slot, so room air reaches the SHT31
+# by crossing a wall and turning; a lid slot puts it straight down onto the
+# card, which stands at x = -19 directly under the grille.
+#
+# What this costs, and why it is affordable here. An opening over the sensor is
+# the one thing this lid was originally solid to avoid: these boxes go to a
+# kitchen and a bathroom, and grease or a drop of condensate lands on the one
+# part that never reports its own failure -- a wet RH sensor still returns a
+# number. The reason it is cut anyway is placement, not modelling: both nodes
+# sit on a shelf, not under a hob and not under a shower head. That is a fact
+# about where the box lives rather than about the box, so it is the first thing
+# to re-check before this design is printed for a third room.
+#
+# Bounds. x = -21.5 .. -9 -- short of the baffle at x = -8, which stands full
+# height and would otherwise take a slot's far end, and inboard of the -X
+# corner posts at x <= -22.5, so each row opens onto air. Four rows, not the
+# board bay's five: the outer pair of five would run to y = +-12.25, and with
+# the row ends already 5 mm from the countersinks at (-26.5, +-13.75) that
+# leaves 1.9 mm of lid in the corner. Four rows keep the ends at y = +-9.5 and
+# the thinnest section at 3.3 mm, which is more than the 2.4 mm the board
+# bay's grille leaves and more than the 2.45 mm this lid already has at its
+# edge.
+KL_SENS_VENT_X = -15.25
+KL_SENS_VENT_L = 12.5
+kl_lid = _slots(kl_lid, 4, 5.5, (KL_SENS_VENT_L, SLOT_W, KL_LID + 2),
+                (KL_SENS_VENT_X, 0, -1.0), axis="y")
+
 kl_lid = (
     kl_lid.faces(">Z").workplane()
     .pushPoints(KL_POST_XY)
