@@ -125,6 +125,7 @@ below, which compares every zoom level against a full scan of the raw table.
 | `GET /api/overview` | every channel at once: labels, last value, and a sparkline |
 | `GET /api/series` | one channel, full resolution |
 | `GET /api/annotations` | the notes in a window; `POST` writes one |
+| `POST /api/annotations/void` | takes one back, by `at_ms` and `node` |
 | `GET /api/channels` | the channel list without any series — for scripts |
 | `GET /api/health` | broker and database reachability, rollups, counters |
 
@@ -170,6 +171,41 @@ worse than no note at all.
 The dashboard's *Notiz …* button writes one. `docs/annotations.md` in this
 repository keeps the same history in prose and is the better place for the long
 version; this is the half that a chart can draw.
+
+### A note is confirmed, and can be taken back
+
+Two properties this table needs that the readings do not, both learned the
+expensive way on 2026-09-13.
+
+**The write is read back before it returns.** QuestDB answers before it stores:
+ILP over HTTP returns 204 once the line is *accepted*, so a line written against
+a table created moments earlier can be dropped with the caller told it
+succeeded. That is tolerable for a reading — another arrives in two minutes —
+and not for a note, which is written once, by hand, about something nobody will
+remember well enough to write again. `insert` therefore polls until the row is
+visible and fails loudly if it never is.
+
+**A note can be voided, because it can never be corrected.** The timestamp is
+the designated column, so no `UPDATE` may move it, and QuestDB deletes no rows
+at all. Before this, one mistyped timestamp could only be fixed by dropping the
+whole table. Each note now carries `voided`, the *zurücknehmen* button beside it
+sets it, and voided notes are left out of `GET /api/annotations`.
+
+Marked rather than removed, on purpose: a log of what happened to the fleet
+that silently loses its own corrections has a blind spot exactly where somebody
+already got something wrong once. The row stays, and `select ... from
+annotations` still shows it.
+
+`UPDATE` needs the same read-back as the insert, and for a sharper reason —
+QuestDB reports `{"dml":"OK","updated":N}` where `N` is a running total, not the
+rows this statement touched. An `UPDATE` that matched nothing is indistinguishable
+from one that matched everything. So voiding checks that a note is standing
+there first, and afterwards that it no longer is.
+
+An existing table is migrated on start: `CREATE TABLE IF NOT EXISTS` leaves one
+alone, so the column is added by a separate `ALTER TABLE ... ADD COLUMN IF NOT
+EXISTS`, which QuestDB accepts repeatedly and backfills as `false` — every note
+written before anyone could take one back still counts.
 
 ## Configuration
 

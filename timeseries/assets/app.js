@@ -348,12 +348,40 @@ function renderNotes() {
   }
   dom.noteList.innerHTML = state.notes
     .map(
-      (n) =>
+      (n, i) =>
         `<li><time>${esc(new Date(n.at_ms).toLocaleString("de-DE"))}</time>` +
-        `<span>${esc(n.note)}${n.node && n.node !== "fleet" ? "" : " <em>(Flotte)</em>"}</span></li>`,
+        `<span>${esc(n.note)}${n.node && n.node !== "fleet" ? "" : " <em>(Flotte)</em>"}</span>` +
+        `<button class="void" type="button" data-note="${i}" ` +
+        `title="Diese Notiz zurücknehmen">zurücknehmen</button></li>`,
     )
     .join("");
 }
+
+// Zurücknehmen statt Löschen: der Zeitstempel einer Notiz ist die designierte
+// Spalte der Tabelle und lässt sich nicht ändern, Zeilen löschen kann QuestDB
+// gar nicht. Eine auf die falsche Minute gesetzte Notiz kann also nur als
+// ungültig markiert und daneben neu geschrieben werden. Sie bleibt in der
+// Datenbank stehen -- bei einem Protokoll darüber, was passiert ist, ist eine
+// sichtbare Korrektur mehr wert als eine spurlose.
+dom.noteList.addEventListener("click", async (ev) => {
+  const button = ev.target.closest("button.void");
+  if (!button) return;
+  const note = state.notes[Number(button.dataset.note)];
+  if (!note) return;
+  if (!window.confirm(`Diese Notiz zurücknehmen?\n\n${note.note}`)) return;
+  button.disabled = true;
+  try {
+    await getJSON("/api/annotations/void", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ at_ms: note.at_ms, node: note.node }),
+    });
+    loadDetail();
+  } catch (e) {
+    button.disabled = false;
+    dom.foot.innerHTML = `<span class="error">Notiz nicht zurückgenommen: ${esc(e.message)}</span>`;
+  }
+});
 
 function drawChart() {
   const canvas = dom.chart;

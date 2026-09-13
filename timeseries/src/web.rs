@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -40,6 +40,7 @@ pub fn router(app: App) -> Router {
             "/api/annotations",
             get(annotations_handler).post(add_annotation),
         )
+        .route("/api/annotations/void", post(void_annotation))
         .route("/api/health", get(health))
         .with_state(app)
 }
@@ -338,6 +339,41 @@ async fn add_annotation(
     Ok(Json(note))
 }
 
+/// Which note to take back. By instant and node, because that is how a note is
+/// addressed everywhere else here -- there is no id, and inventing one would
+/// mean rewriting every row already stored.
+#[derive(Deserialize)]
+struct VoidAnnotation {
+    at_ms: i64,
+    #[serde(default)]
+    node: String,
+}
+
+async fn void_annotation(
+    State(app): State<App>,
+    Json(body): Json<VoidAnnotation>,
+) -> ApiResult<Json<Voided>> {
+    annotations::void(
+        &app.client,
+        &app.settings.questdb.annotations_table,
+        body.at_ms,
+        &body.node,
+    )
+    .await?;
+    Ok(Json(Voided {
+        at_ms: body.at_ms,
+        node: body.node,
+        voided: true,
+    }))
+}
+
+#[derive(Serialize)]
+struct Voided {
+    at_ms: i64,
+    node: String,
+    voided: bool,
+}
+
 #[derive(Serialize)]
 struct Health {
     broker_connected: bool,
@@ -382,6 +418,7 @@ mod tests {
         "/api/series",
         "/api/overview",
         "/api/annotations",
+        "/api/annotations/void",
         "/api/health",
     ];
 

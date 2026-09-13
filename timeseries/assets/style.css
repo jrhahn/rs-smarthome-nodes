@@ -226,9 +226,43 @@ thead th { color: var(--text-secondary); font-weight: 600; }
 
 #notes { margin-top: 1.4rem; border-top: 1px solid var(--border); padding-top: 0.9rem; }
 #note-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
-#note-list li { font-size: 0.85rem; color: var(--text-secondary); display: flex; gap: 0.6rem; }
+/* Auf Lesebreite begrenzt, und das aus zwei Gründen: eine Zeile über die volle
+   Breite eines 1400-px-Schirms ist schwer zu lesen, und der Zurücknehmen-Knopf
+   steht sonst zentimeterweit von der Notiz entfernt, zu der er gehört -- bei
+   untereinander liegenden Zeilen ist das eine Einladung, die falsche zu
+   treffen. */
+#note-list li {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  display: flex;
+  gap: 0.6rem;
+  max-width: 80ch;
+}
 #note-list time { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 #note-list .none { color: var(--text-muted); }
+/* Rechtsbündig und ruhig: eine Notiz zurückzunehmen ist die Ausnahme, also darf
+   der Knopf nicht mit dem Text konkurrieren -- aber er ist immer sichtbar und
+   nicht erst beim Hovern, weil ein Bedienelement, das man nicht sieht, auf
+   einem Touchscreen keines ist. */
+#note-list .void {
+  margin-left: auto;
+  flex: none;
+  align-self: flex-start;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.05rem 0.35rem;
+  cursor: pointer;
+}
+#note-list .void:hover:not(:disabled),
+#note-list .void:focus-visible {
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+#note-list .void:disabled { opacity: 0.5; cursor: default; }
 
 /* --- dialog ------------------------------------------------------------- */
 

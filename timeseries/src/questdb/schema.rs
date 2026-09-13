@@ -126,6 +126,12 @@ pub async fn ensure(
     client
         .exec(&super::annotations::create_table_ddl(annotations_table))
         .await?;
+    // And bring an older one up to the current shape. `IF NOT EXISTS` on the
+    // CREATE above means an existing table is left untouched, so a database
+    // written before notes could be taken back would never grow the column.
+    client
+        .exec(&super::annotations::add_voided_ddl(annotations_table))
+        .await?;
 
     for t in [table, status_table] {
         if let Some(ddl) = alter_ttl_ddl(t, retention) {
