@@ -84,8 +84,8 @@ unreachable between rounds, so their `sample_secs = 120` is now also the
 resolution of anything they publish.
 
 **This is when the code changed, not when the boards did.** A node keeps running
-what it was last flashed with. See the entry below for `kueche`; `bad` had not
-been reflashed either as of that evening.
+what it was last flashed with. `bad` was flashed that day and runs the profile;
+`kueche` did not get it until the evening — see its entry below.
 
 ## 2026-09-13 20:26 — kueche — duty-cycled firmware actually flashed
 
@@ -112,5 +112,28 @@ those back *before* reflashing a node, not after: a board whose credentials live
 only in the image goes off the network for good if it is rebuilt without
 `SSID=`/`PASSWORD=`, and it cannot be told about it afterwards.
 
-`bad` did not report at all through this evening — no readings, no status rows
-— so it is not merely unflashed, it is off the air. Unrelated to this change.
+## 2026-09-13 11:54 — bad — SHT31-D silent, and it is the bus
+
+`bad` stopped publishing `temperature` and `humidity` at 09:54:15Z. It did not
+stop publishing: `rssi` continues on the same 120 s cadence, so the node boots,
+joins, and reports — it simply has no sensor to read. **Everything after this
+timestamp is missing, not zero**, and the node's own availability says nothing
+about it, because a node with a dead sensor is still online.
+
+The firmware says which half is broken, and it is not the chip:
+
+    no SHT31-D at 0x44 or 0x45
+    I²C scan: nothing answered between 0x08 and 0x77 — the bus itself is not
+    working (SDA/SCL swapped, no pull-ups, or no power)
+
+A full scan with no reply at any address rules the sensor out. One dead chip
+leaves the bus usable; silence across all 112 addresses is power or wiring.
+
+The timing points the same way. The new printed box went in that morning, and in
+that design the jumpers to the SHT31 loop through the 8.5 mm between board and
+baffle — the corridor `models.py` deliberately keeps clear of vent slots. A wire
+pulled or pinched during assembly fits the evidence exactly; a chip that died
+three hours after being handled does not.
+
+Not a firmware problem: the board is on `MainsDutyCycled`, joins as
+192.168.1.143 at −53 dBm, and publishes. It needs a look inside the box.
