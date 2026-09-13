@@ -112,7 +112,7 @@ those back *before* reflashing a node, not after: a board whose credentials live
 only in the image goes off the network for good if it is rebuilt without
 `SSID=`/`PASSWORD=`, and it cannot be told about it afterwards.
 
-## 2026-09-13 11:54 — bad — SHT31-D silent, and it is the bus
+## 2026-09-13 11:54–20:55 — bad — SHT31-D silent, and it was a broken wire
 
 `bad` stopped publishing `temperature` and `humidity` at 09:54:15Z. It did not
 stop publishing: `rssi` continues on the same 120 s cadence, so the node boots,
@@ -136,4 +136,17 @@ pulled or pinched during assembly fits the evidence exactly; a chip that died
 three hours after being handled does not.
 
 Not a firmware problem: the board is on `MainsDutyCycled`, joins as
-192.168.1.143 at −53 dBm, and publishes. It needs a look inside the box.
+192.168.1.143 at −53 dBm, and publishes. It needed a look inside the box.
+
+**Resolved at 18:55:16Z: one of the jumpers had broken off.** Readings resume on
+the next round, so the gap is 09:54:15Z to 18:55:16Z — nine hours and one
+minute with no `temperature` or `humidity` from this node, and `rssi` throughout.
+
+The first two rounds back read 27.9 °C / 63.4 % then 27.4 °C / 58.0 %. Falling,
+because the box was open and being worked on; treat the first few minutes after
+this line as the sensor settling, not as the bathroom.
+
+What is worth keeping from this: the fault was localised without opening
+anything. A full I²C scan answering nowhere said "not the chip", and the clock
+said "whatever was touched this morning". Both were right, and the scan line is
+in the boot log of every node, every boot.
