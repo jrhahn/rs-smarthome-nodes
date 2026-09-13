@@ -97,6 +97,21 @@ in
       '';
     };
 
+    questdb.httpEndpoint = lib.mkOption {
+      type = lib.types.str;
+      default = "127.0.0.1:9000";
+      description = ''
+        Where QuestDB answers HTTP: ILP ingest, SQL, and the web console. It is
+        an option rather than a line in {option}`questdb.extraConfig` because
+        three things need to agree on it -- the config file, the archiver's
+        `questdb.url`, and anything that takes a checkpoint before a backup --
+        and free text cannot be read back.
+
+        Loopback by default, and it should stay there: none of those three
+        interfaces authenticates anything.
+      '';
+    };
+
     questdb.dataDir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/questdb";
@@ -108,10 +123,12 @@ in
 
     questdb.extraConfig = lib.mkOption {
       type = lib.types.lines;
-      default = ''
-        http.bind.to=127.0.0.1:9000
-        pg.net.bind.to=127.0.0.1:8812
-        line.tcp.net.bind.to=127.0.0.1:9009
+      defaultText = lib.literalExpression ''
+        '''
+          http.bind.to=''${questdb.httpEndpoint}
+          pg.net.bind.to=127.0.0.1:8812
+          line.tcp.net.bind.to=127.0.0.1:9009
+        '''
       '';
       description = ''
         Contents of QuestDB's `server.conf`, rewritten on every start.
@@ -124,6 +141,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # Derived rather than repeated: see `questdb.httpEndpoint`.
+    services.smarthome-timeseries.questdb.extraConfig = lib.mkDefault ''
+      http.bind.to=${cfg.questdb.httpEndpoint}
+      pg.net.bind.to=127.0.0.1:8812
+      line.tcp.net.bind.to=127.0.0.1:9009
+    '';
+
     systemd.services.smarthome-timeseries = {
       description = "Smart-home MQTT to QuestDB archiver";
       wantedBy = [ "multi-user.target" ];
