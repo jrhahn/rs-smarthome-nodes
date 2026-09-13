@@ -16,7 +16,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::client::{as_str, Client};
-use super::rollup::{Tier, TIERS};
+use super::rollup::{Keeps, Tier, TIERS};
 use crate::config::Retention;
 
 /// The base table: one row per reading.
@@ -65,6 +65,8 @@ pub fn alter_ttl_ddl(table: &str, retention: &Retention) -> Option<String> {
 /// what makes the cascade possible at all -- and what lets the reader use one
 /// query for every tier.
 pub fn create_view_ddl(base: &str, tier: &Tier, retention: &Retention) -> String {
+    // `retention` here is already the one this tier is kept for; the caller
+    // picks between the two settings (see `for_tier`).
     let aggregates = if tier.reads_raw() {
         "min(value) lo, max(value) hi, sum(value) sv, count() n"
     } else {
@@ -83,6 +85,27 @@ pub fn create_view_ddl(base: &str, tier: &Tier, retention: &Retention) -> String
     )
 }
 
+/// Which of the two retentions a tier is kept for.
+pub fn for_tier<'a>(tier: &Tier, raw: &'a Retention, rollup: &'a Retention) -> &'a Retention {
+    match tier.keeps {
+        Keeps::WithTheRawTable => raw,
+        Keeps::LongTerm => rollup,
+    }
+}
+
+/// Change a materialized view's TTL.
+///
+/// Views need their own statement: `ALTER TABLE ... SET TTL` is refused with
+/// "cannot modify materialized view", and the working form cannot clear a TTL
+/// either -- zero comes back as "TTL value must be an integer multiple of
+/// partition size". A view created with a TTL therefore has one for ever, which
+/// is why the rollups are kept for a long time rather than for an unlimited one.
+pub fn alter_view_ttl_ddl(view: &str, retention: &Retention) -> Option<String> {
+    retention
+        .as_sql()
+        .map(|ttl| format!("ALTER MATERIALIZED VIEW '{view}' SET TTL {ttl}"))
+}
+
 /// Create what is missing and re-apply the retention. Returns the views that
 /// exist afterwards, which is what the reader routes against.
 pub async fn ensure(
@@ -90,6 +113,7 @@ pub async fn ensure(
     table: &str,
     status_table: &str,
     retention: &Retention,
+    rollup_retention: &Retention,
     rollups: bool,
 ) -> Result<Vec<String>> {
     client.exec(&create_table_ddl(table, retention)).await?;
@@ -119,14 +143,29 @@ pub async fn ensure(
     }
 
     for tier in TIERS {
-        let ddl = create_view_ddl(table, tier, retention);
+        let kept_for = for_tier(tier, retention, rollup_retention);
+        let ddl = create_view_ddl(table, tier, kept_for);
         match client.exec(&ddl).await {
-            Ok(_) => info!(view = tier.view(table), "rollup view ready"),
+            Ok(_) => info!(
+                view = tier.view(table),
+                retention = kept_for.as_sql().unwrap_or("unlimited"),
+                "rollup view ready"
+            ),
             Err(e) => warn!(
                 view = tier.view(table),
                 error = %e,
                 "could not create the rollup view; charts at this grain will read the base table"
             ),
+        }
+
+        // Re-applied for the same reason the tables' TTL is: `IF NOT EXISTS`
+        // leaves an existing view alone, so a changed setting would otherwise
+        // only ever reach a database that did not have the view yet -- which is
+        // every database except the one that matters.
+        if let Some(ddl) = alter_view_ttl_ddl(&tier.view(table), kept_for) {
+            if let Err(e) = client.exec(&ddl).await {
+                warn!(view = tier.view(table), error = %e, "could not set the view's TTL");
+            }
         }
     }
 
@@ -177,6 +216,31 @@ mod tests {
         assert!(ddl.contains("node SYMBOL"), "{ddl}");
         assert!(ddl.contains("sensor SYMBOL"), "{ddl}");
         assert!(ddl.contains("value DOUBLE"), "{ddl}");
+    }
+
+    #[test]
+    fn the_summaries_are_kept_longer_than_the_readings() {
+        let raw = Retention::parse("3y").unwrap();
+        let long = Retention::parse("50y").unwrap();
+        let by = |suffix: &str| TIERS.iter().find(|t| t.suffix == suffix).unwrap();
+
+        assert_eq!(for_tier(by("_1m"), &raw, &long).as_sql(), Some("3 YEARS"));
+        for suffix in ["_1h", "_1d"] {
+            assert_eq!(
+                for_tier(by(suffix), &raw, &long).as_sql(),
+                Some("50 YEARS"),
+                "{suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_views_ttl_is_altered_with_its_own_statement() {
+        // `ALTER TABLE` is refused on a materialized view, so the table form
+        // must not be what reaches one.
+        let ddl = alter_view_ttl_ddl("readings_1d", &Retention::parse("50y").unwrap()).unwrap();
+        assert_eq!(ddl, "ALTER MATERIALIZED VIEW 'readings_1d' SET TTL 50 YEARS");
+        assert!(!ddl.starts_with("ALTER TABLE"));
     }
 
     #[test]

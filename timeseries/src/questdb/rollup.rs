@@ -53,6 +53,24 @@ pub struct Tier {
     /// Partition unit for the view. Never finer than the bucket, or QuestDB
     /// rejects it; never so coarse that the TTL cannot drop anything.
     pub partition: &'static str,
+    /// Which of the two retentions this tier is kept for.
+    pub keeps: Keeps,
+}
+
+/// How long a tier is kept, as a choice between the two settings rather than a
+/// number: the tiers differ in kind, not in how many years someone picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keeps {
+    /// As long as the raw table. The minute view is the same data at the same
+    /// order of magnitude -- about as many rows as the readings themselves --
+    /// so keeping it longer than what it summarises buys nothing.
+    WithTheRawTable,
+    /// Far longer than the readings. The rollups were built for *speed*, never
+    /// to save space: a day of `_1d` is thirty-one rows, and it is the only
+    /// part of the archive a question spanning years actually reads. Letting
+    /// the summaries die with their readings would throw exactly that away to
+    /// reclaim nothing. See `docs/long-term-history.md` for the measurement.
+    LongTerm,
 }
 
 /// Finest first. Ordering is load-bearing: `source_suffix` refers backwards
@@ -84,6 +102,7 @@ pub const TIERS: &[Tier] = &[
         grain: MINUTE,
         source_suffix: None,
         partition: "DAY",
+        keeps: Keeps::WithTheRawTable,
     },
     Tier {
         suffix: "_1h",
@@ -91,6 +110,7 @@ pub const TIERS: &[Tier] = &[
         grain: HOUR,
         source_suffix: Some("_1m"),
         partition: "MONTH",
+        keeps: Keeps::LongTerm,
     },
     Tier {
         suffix: "_1d",
@@ -101,6 +121,7 @@ pub const TIERS: &[Tier] = &[
         // put one row per channel in a partition of its own, and QuestDB only
         // ever drops whole partitions.
         partition: "YEAR",
+        keeps: Keeps::LongTerm,
     },
 ];
 
@@ -147,6 +168,16 @@ mod tests {
 
     fn all_views(base: &str) -> Vec<String> {
         TIERS.iter().map(|t| t.view(base)).collect()
+    }
+
+    #[test]
+    fn only_the_finest_tier_expires_with_the_readings() {
+        let short: Vec<&str> = TIERS
+            .iter()
+            .filter(|t| t.keeps == Keeps::WithTheRawTable)
+            .map(|t| t.suffix)
+            .collect();
+        assert_eq!(short, vec!["_1m"], "the coarse summaries are the long-lived ones");
     }
 
     #[test]

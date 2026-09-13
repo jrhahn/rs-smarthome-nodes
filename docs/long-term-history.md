@@ -52,10 +52,19 @@ as the base table with four more columns per row, and `_1h` (≈740 rows/day) an
 it is not a storage decision, and the rollups exist for *speed*, not for space —
 a full-range chart reads `_1d` either way.
 
-**The intended shape is raw for a few years, rollups for ever.** A year-on-year
-comparison in 2032 reads 31 rows a day; there is no reason for that to expire.
-That needs one change to the service: retention is currently a single value
-applied to the base table and every view alike, and it should be per tier.
+**The shape is raw for a few years, rollups for decades.** A year-on-year
+comparison in 2032 reads 31 rows a day; there is no reason for that to expire
+with the readings it summarises. The service now keeps two retentions —
+`retention` for the raw table and the minute view, `rollup_retention` for the
+hour and day views.
+
+Not *unlimited*, though, and the reason is worth knowing before someone tries to
+"fix" it: QuestDB accepts `ALTER MATERIALIZED VIEW ... SET TTL` but rejects a
+TTL of zero ("must be an integer multiple of partition size"), and `ALTER TABLE
+... SET TTL` is refused on a view outright. A view created without a TTL keeps
+none, but one created *with* one can only ever be changed, never cleared. Fifty
+years is therefore the honest way to say "not in this house's lifetime" while
+leaving the number adjustable.
 
 ## What actually threatens a long series
 
@@ -107,7 +116,11 @@ being kept until the table exists.
    server needs the flake input, the module import, an MQTT password as a
    secret, and a proxy entry. Everything below is hypothetical until this is
    done.
-2. **Retention per tier** — raw 3 years, rollups without expiry.
+2. ~~**Retention per tier**~~ — done: the raw table and the `_1m` view follow
+   `retention` (3 years), the `_1h` and `_1d` views follow `rollup_retention`,
+   which defaults to fifty. *Long* rather than unlimited because QuestDB will
+   change a view's TTL but not clear it, so the alternative was a view that
+   could never be re-tuned.
 3. **Snapshot-aware backup** of `/var/lib/questdb` in the existing borg run.
 4. **Annotations** — started, by hand, in [`annotations.md`](annotations.md). A
    table in the database is still the better home for them, so a chart can show

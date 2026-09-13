@@ -41,6 +41,16 @@ status_table = "node_status"
 # M(ONTHS), Y(EARS). An empty value keeps everything for ever.
 retention = "3y"
 
+# How long the coarse rollup views (_1h, _1d) are kept. Long rather than
+# unlimited, and that is QuestDB's constraint rather than a preference: a view's
+# TTL can be changed with ALTER MATERIALIZED VIEW but not cleared -- zero is
+# refused as "not an integer multiple of partition size" -- so a view created
+# with one carries it for ever. Fifty years of _1d is about 566,000 rows.
+#
+# The _1m view follows `retention` above instead: it holds about as many rows as
+# the readings themselves, so outliving them would buy nothing.
+rollup_retention = "50y"
+
 # Create and maintain the rollup views (readings_1m / _1h / _1d). Turning this
 # off leaves every chart reading the base table: same numbers, slower once the
 # history is years deep.

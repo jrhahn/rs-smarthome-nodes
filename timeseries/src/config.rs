@@ -72,8 +72,19 @@ pub struct QuestDb {
     pub table: String,
     /// Table for the nodes' online/offline transitions.
     pub status_table: String,
-    /// How long to keep data, as a QuestDB TTL. Empty keeps it for ever.
+    /// How long to keep the raw readings, as a QuestDB TTL. Empty keeps them
+    /// for ever.
     pub retention: String,
+    /// How long to keep the coarse rollup views (`_1h`, `_1d`).
+    ///
+    /// Long rather than unlimited, and that is a QuestDB constraint rather than
+    /// a preference: a materialized view's TTL can be *changed* with `ALTER
+    /// MATERIALIZED VIEW ... SET TTL` but not cleared -- zero is rejected as
+    /// "not an integer multiple of partition size" -- so a view created with a
+    /// TTL carries one for ever. A number that can be altered later is worth
+    /// more than an absence that cannot, and fifty years of `_1d` is about
+    /// 566,000 rows.
+    pub rollup_retention: String,
     /// Create and maintain the rollup materialized views.
     pub rollups: bool,
     /// How often the batch of buffered readings is flushed.
@@ -98,6 +109,7 @@ impl Default for QuestDb {
             table: "readings".into(),
             status_table: "node_status".into(),
             retention: "3y".into(),
+            rollup_retention: "50y".into(),
             rollups: true,
             flush_interval_secs: 5,
             batch_max: 1000,
@@ -169,6 +181,7 @@ impl Settings {
         // rather than at the first `ALTER TABLE` with whatever QuestDB makes
         // of it.
         Retention::parse(&self.questdb.retention)?;
+        Retention::parse(&self.questdb.rollup_retention)?;
         Ok(())
     }
 
@@ -179,6 +192,11 @@ impl Settings {
 
     pub fn retention(&self) -> Retention {
         Retention::parse(&self.questdb.retention).expect("validated at load")
+    }
+
+    /// What the coarse rollup views are kept for.
+    pub fn rollup_retention(&self) -> Retention {
+        Retention::parse(&self.questdb.rollup_retention).expect("validated at load")
     }
 }
 
@@ -257,6 +275,13 @@ mod tests {
         assert_eq!(s.questdb.table, "readings");
         assert_eq!(s.retention().as_sql(), Some("3 YEARS"));
         assert_eq!(s.questdb_base(), "http://127.0.0.1:9000");
+    }
+
+    #[test]
+    fn the_summaries_outlive_the_readings_by_default() {
+        let s = Settings::load(None).unwrap();
+        assert_eq!(s.retention().as_sql(), Some("3 YEARS"));
+        assert_eq!(s.rollup_retention().as_sql(), Some("50 YEARS"));
     }
 
     #[test]
