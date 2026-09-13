@@ -173,6 +173,33 @@ done
 Start it *before* plugging the node in. The 20 ms poll matters: at 200 ms most
 of the window is gone before the first attempt.
 
+**`head -1` is wrong the moment a second board is plugged in**, and that is the
+normal case when you are flashing one node from a desk with another already
+attached. The loop above would have written the terrace image onto the living
+room node on 2026-09-13. Pick the port by MAC instead — `udevadm` reports it
+without touching the board, which `espflash board-info` cannot claim, since it
+resets the chip to ask:
+
+```bash
+udevadm info -q property -n /dev/ttyACM0 | sed -n 's/^ID_SERIAL_SHORT=//p'
+# -> AC:27:6E:80:51:F8
+```
+
+That is also the quickest way to answer "which of these two is which" before
+doing anything at all.
+
+**And check whether you need the loop.** It exists for a node that never
+enumerates. Once a `/dev/ttyACM*` is present and *stays* — the board is in the
+ROM bootloader, or `deep_sleep = 0` has taken effect — a plain
+`espflash flash --port` is simpler, and it reports its own success. A poll loop
+that is watching a port which is already sitting there is a loop with a bug in
+it, not a safety net.
+
+One more thing the loop has to survive: a port that has just appeared may not
+have its udev ACL applied yet, so the first open fails with `Permission denied`
+even though the device is there. Retry a few times rather than treating the
+first failure as absence.
+
 `--port` is required, not optional: without it `espflash` asks which port to
 use, and a non-interactive shell gets `IO error: not a terminal` rather than a
 prompt.

@@ -235,6 +235,34 @@ go through the same code** — the calibration above could not have landed.
   (`discovery::announcement_tag`), so a changed entity set re-announces itself
   and a stale word in RTC RAM fails to match by construction.
 
+**Reflashed 2026-09-13**, from `develop`, to pick up the one-second minimum on a
+visit (`deeafed`) and the I²C failure reporting (`afb34db`). Two things it
+settled:
+
+- **The visit counter survived the reflash: `visits` came back at 219.** That is
+  the first real test of the `VISIT_COUNT` / `VISIT_CHECK` pair from `36b5e36`,
+  against the 2 345 324 652 that leftover RTC memory produced before it existed.
+  The pair is only a defence while both words are already on the board; a board
+  flashed from *before* `36b5e36` gains `VISIT_CHECK` as fresh garbage, the two
+  disagree, and the counter correctly reads zero and restarts. Either outcome is
+  fine and neither needs intervention — but they look different in Home
+  Assistant, so know which one to expect.
+- **A battery node held awake on the bench publishes every `idle_secs`, i.e.
+  every two seconds by default.** `sample_period_secs` takes the idle interval
+  for a battery profile, and the stay-awake loop publishes every round. Off its
+  beam the node also reports nonsense weight (−456.6 g here, with an
+  `Unexplained` warning each round, because the RTC baseline is from the
+  mounted state). Both go straight into Home Assistant *and* into QuestDB's
+  three-year retention, and `smarthome/terrasse/temperature` is the outdoor
+  series — so bench-testing this node indoors writes room temperature into it at
+  two-second resolution. Set `deep_sleep` back to `1` as soon as the flashing is
+  done, not when the node goes back outside.
+
+After remounting on the beam, press **Tarieren** once with the feeder empty: the
+RTC baseline is from the previous mounting and no remount reproduces the beam's
+preload exactly. The button publishes retained, so a sleeping node collects it
+on its next round — up to ten minutes away. Press it once and wait.
+
 ---
 
 ## `wohnzimmer` — mains
@@ -282,20 +310,19 @@ page.
 
 ## Open across the fleet
 
-- **`terrasse` still runs firmware without `rssi`.** The other four were
-  flashed 2026-09-10 and report on every round: `bad` −58, `kueche` −49,
-  `schlafzimmer` −49, `wohnzimmer` −58 dBm. All four sit in the top bar, so the
-  indicator has not yet been read against a link that is actually weak — which
-  is the case it exists for. `wohnzimmer` alternates −58/−61 and therefore
+- **The whole fleet reports `rssi`.** The four indoor nodes were flashed
+  2026-09-10 (`bad` −58, `kueche` −49, `schlafzimmer` −49, `wohnzimmer` −58 dBm)
+  and `terrasse` followed on 2026-09-13 at −51. All five sit in the top bar, so
+  the indicator has still not been read against a link that is actually weak —
+  which is the case it exists for. `wohnzimmer` alternates −58/−61 and therefore
   straddles the three-bar threshold (`>= -61`), so its tile will flicker between
   three bars and two.
 
-  Flashing `terrasse` needs the listener loop in
-  [`../FLASHING.md`](../FLASHING.md), and it is safe for the calibration:
-  `espflash` reported `Segment at address '0x0' has not changed` and the same
-  for `0x8000` on all four boards, and the config blob lives at `0x9000` in the
-  `nvs` partition, which a plain `espflash flash` never touches. The boot log
-  confirms the layout: `boot: 0 nvs WiFi data 01 02 00009000 00006000`.
+  Flashing is safe for the calibration: `espflash` reported `Segment at address
+  '0x0' has not changed` and the same for `0x8000` on all boards, and the config
+  blob lives at `0x9000` in the `nvs` partition, which a plain `espflash flash`
+  never touches. The boot log confirms the layout:
+  `boot: 0 nvs WiFi data 01 02 00009000 00006000`.
 - **A newly announced entity loses its first reading.** Not a fault, but it
   cost an hour of misdiagnosis: `bad` showed `sensor.bad_signal` as
   `unavailable` while temperature and humidity published normally, and the
