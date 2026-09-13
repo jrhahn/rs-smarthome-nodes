@@ -97,7 +97,8 @@ improving.
 None of that is in the numbers. A small `annotations` table — timestamp, node,
 one sentence — or even a dated list in this repo is what turns a pile of
 readings into a measurement series. It is the cheapest thing here and the one
-most likely to be skipped.
+most likely to be skipped; [`annotations.md`](annotations.md) is where it is
+being kept until the table exists.
 
 ## The order of work
 
@@ -108,6 +109,9 @@ most likely to be skipped.
    done.
 2. **Retention per tier** — raw 3 years, rollups without expiry.
 3. **Snapshot-aware backup** of `/var/lib/questdb` in the existing borg run.
-4. **Annotations**, starting with the events already known from this month.
+4. **Annotations** — started, by hand, in [`annotations.md`](annotations.md). A
+   table in the database is still the better home for them, so a chart can show
+   them; a dated list costs nothing and is already worth more than the memory it
+   replaces.
 5. Optionally, once the archive has been running a while: trim Home Assistant's
    recorder to ~10 days. Its job becomes the live view; the history lives here.
