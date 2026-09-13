@@ -99,6 +99,15 @@ pub struct Sht31<I2C> {
     /// have to parse back a string it just printed.
     last_rh_tenths: Option<i32>,
     last_t_tenths: Option<i32>,
+    /// Why the last measurement produced nothing, in the caller's terms.
+    ///
+    /// Worth keeping because the boot probe is a *write* and nothing more
+    /// (`acks` in `platform.rs`), so "found at 0x44" and "answers a
+    /// measurement" are different claims -- and on 2026-09-13 this sensor
+    /// spent three rounds satisfying the first while failing the second. The
+    /// generic "not responding" the caller falls back to was, by then, the
+    /// least true sentence available.
+    fault: Option<&'static str>,
 }
 
 #[cfg(feature = "drivers")]
@@ -110,6 +119,7 @@ impl<I2C: I2cBus> Sht31<I2C> {
             addr: ADDR,
             last_rh_tenths: None,
             last_t_tenths: None,
+            fault: None,
         }
     }
 
@@ -120,6 +130,7 @@ impl<I2C: I2cBus> Sht31<I2C> {
             addr,
             last_rh_tenths: None,
             last_t_tenths: None,
+            fault: None,
         }
     }
 
@@ -154,22 +165,50 @@ impl<I2C: I2cBus> Sht31<I2C> {
     /// Errors are ignored on purpose: if the sensor is unreachable the probe
     /// that follows says so with better wording than this could.
     pub async fn soft_reset(&mut self) {
-        let _ = self.i2c.write(self.addr, &CMD_SOFT_RESET.to_be_bytes()).await;
+        let _ = self
+            .i2c
+            .write(self.addr, &CMD_SOFT_RESET.to_be_bytes())
+            .await;
         Timer::after(Duration::from_millis(RESET_MS)).await;
     }
 
     /// One single-shot conversion -> `(temperature_raw, humidity_raw)`, or
     /// `None` if the sensor did not ACK or a word failed its CRC.
     async fn sample(&mut self) -> Option<(u16, u16)> {
-        self.i2c
+        if self
+            .i2c
             .write(self.addr, &CMD_SINGLE_HIGH.to_be_bytes())
             .await
-            .ok()?;
+            .is_err()
+        {
+            self.fault = Some(
+                "will not take a measure command. If a bus scan still finds its address it is \
+                 powered and addressable and has stopped listening -- which is the state a \
+                 restart mid-transaction leaves it in, and which only a power cycle has been \
+                 seen to clear",
+            );
+            return None;
+        }
         Timer::after(Duration::from_millis(CONVERSION_MS)).await;
 
         let mut buf = [0u8; 6];
-        self.i2c.read(self.addr, &mut buf).await.ok()?;
-        Some((crc_word(&buf[0..3])?, crc_word(&buf[3..6])?))
+        if self.i2c.read(self.addr, &mut buf).await.is_err() {
+            self.fault = Some("took the measure command and then returned nothing");
+            return None;
+        }
+        match (crc_word(&buf[0..3]), crc_word(&buf[3..6])) {
+            (Some(t_raw), Some(rh_raw)) => {
+                self.fault = None;
+                Some((t_raw, rh_raw))
+            }
+            _ => {
+                self.fault = Some(
+                    "answered with a failed checksum -- the bytes arrive and are spoiled \
+                          on the way, so look at the contacts rather than at the part",
+                );
+                None
+            }
+        }
     }
 
     fn push(readings: &mut Vec<Reading, MAX_READINGS>, key: &'static str, tenths: i32) {
@@ -189,13 +228,29 @@ impl<I2C: I2cBus> Sensor for Sht31<I2C> {
         DESCRIPTORS
     }
 
+    fn fault(&self) -> Option<&'static str> {
+        self.fault
+    }
+
     async fn measure(&mut self) -> Vec<Reading, MAX_READINGS> {
         let mut out = Vec::new();
         // A missing or mis-wired sensor simply contributes nothing; the caller
         // logs it and publishes whatever else answered.
         self.last_rh_tenths = None;
         self.last_t_tenths = None;
-        if let Some((t_raw, rh_raw)) = self.sample().await {
+
+        // A second chance behind a reset, because the failure this recovers
+        // from is not rare: a sensor left part-way through a command by an MCU
+        // restart answers its address and refuses everything else, and the
+        // reset issued once at boot is no help at all if it enters that state
+        // afterwards. One retry, not a loop -- a sensor that is genuinely gone
+        // should cost one extra command a round, not a stall.
+        let mut sampled = self.sample().await;
+        if sampled.is_none() {
+            self.soft_reset().await;
+            sampled = self.sample().await;
+        }
+        if let Some((t_raw, rh_raw)) = sampled {
             Self::push(&mut out, "temperature", temp_tenths(t_raw));
             Self::push(&mut out, "humidity", rh_tenths(rh_raw));
             self.last_rh_tenths = Some(rh_tenths(rh_raw));
@@ -220,6 +275,57 @@ mod tests {
     // tests want the growable one.
     #[allow(unused_imports)]
     use std::vec::Vec;
+
+    /// "not responding" used to be the only thing the caller could say about
+    /// this sensor, and on 2026-09-13 it was the least true sentence
+    /// available: the part answered its address for three rounds while
+    /// refusing every measurement.
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_sensor_that_will_not_take_the_command_says_so() {
+        use super::super::mock::{block_on, FakeI2c};
+        let mut sensor = Sht31::new(FakeI2c::empty());
+        assert!(block_on(sensor.measure()).is_empty());
+        let fault = sensor
+            .fault()
+            .expect("a failed measurement explains itself");
+        assert!(fault.contains("will not take a measure command"), "{fault}");
+        assert!(fault.contains("power cycle"), "{fault}");
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_corrupt_answer_is_not_reported_as_an_absent_sensor() {
+        use super::super::mock::{block_on, FakeI2c};
+        // Two reads -- the measurement and the retry behind the reset -- both
+        // with broken checksums.
+        let bad = vec![0x12, 0x34, 0x00, 0x56, 0x78, 0x00];
+        let mut sensor = Sht31::new(FakeI2c::new(ADDR, [bad.clone(), bad]));
+        assert!(block_on(sensor.measure()).is_empty());
+        let fault = sensor.fault().unwrap();
+        assert!(fault.contains("failed checksum"), "{fault}");
+    }
+
+    #[cfg(feature = "drivers")]
+    #[test]
+    fn a_stuck_sensor_gets_one_reset_and_a_second_chance() {
+        use super::super::mock::{block_on, FakeI2c};
+        // First read is corrupt, the retry after the soft reset is good: the
+        // round still produces its two readings, which is the whole point of
+        // the retry.
+        let bad = vec![0x12, 0x34, 0x00, 0x56, 0x78, 0x00];
+        // 25.0 °C and 50.0 %RH, with the checksums Sensirion's CRC-8 actually
+        // produces -- a made-up checksum would fail the retry for the wrong
+        // reason and the test would still look green in the wrong way.
+        let good = vec![0x66, 0x66, 0x93, 0x80, 0x00, 0xA2];
+        let mut sensor = Sht31::new(FakeI2c::new(ADDR, [bad, good]));
+        let readings = block_on(sensor.measure());
+        assert_eq!(readings.len(), 2, "temperature and humidity");
+        assert_eq!(readings[0].value.as_str(), "25.0");
+        assert_eq!(readings[1].value.as_str(), "50.0");
+        assert_eq!(sensor.fault(), None, "a recovered round reports no fault");
+        assert!(sensor.last_humidity_tenths().is_some());
+    }
 
     #[test]
     fn conversions_hit_the_datasheet_endpoints() {

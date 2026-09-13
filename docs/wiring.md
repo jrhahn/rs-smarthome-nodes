@@ -494,6 +494,32 @@ conditioning steps, then the algorithm's 45-second blackout, and only then does
 **NOx will read its floor indoors, more or less for ever.** NOx comes from
 combustion; a flat NOx index is the channel working, not failing.
 
+### When the gas sensor goes quiet
+
+A bus scan is not the answer here, and on 2026-09-13 it was actively
+misleading: the scan found `0x59`, so the part was on the bus and powered, and
+it answered no command at all. "The sensor is missing" and "the sensor is there
+and has stopped talking" look identical from a scan.
+
+What tells them apart is how far a command got, and the driver now says which of
+the three it was:
+
+| Log line | What it means | Where to look |
+| --- | --- | --- |
+| `refuses every measure command at 0x59` | the write was not acknowledged | the part itself, or a stuck state — a **power cycle** clears the second and not the first |
+| `takes a measure command at 0x59 and then returns nothing` | the write landed, the read did not answer | the part or its supply, not SDA/SCL |
+| `answers at 0x59 with a failed checksum` | bytes arrive and are corrupted | contacts, bus length, a marginal jumper |
+
+Two habits are worth having with this node. **A reset is not a power cycle**:
+`espflash monitor` and a reflash both restart the MCU while the sensors keep
+their 3V3, and a Sensirion part left part-way through a command answers its
+address for ever after while refusing every command — the SHT31-D did exactly
+that for three rounds until the board was actually unplugged. And **a sensor
+that has stopped answering is no longer asked every second**: after ten
+consecutive failures the driver drops to one attempt a minute (see
+`sgp41::Cadence`), so a dead part stops competing for the bus with the ones that
+still work. It goes back to 1 Hz the moment one attempt succeeds.
+
 ---
 
 ## `NODE=terrasse` — the bird scale

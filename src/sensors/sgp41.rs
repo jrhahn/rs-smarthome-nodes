@@ -133,6 +133,119 @@ pub const fn descriptors(with_nox: bool) -> &'static [EntityDescriptor] {
     }
 }
 
+/// How often a failing gas sensor is worth talking to.
+///
+/// The index only means anything if the part is sampled at 1 Hz, so that is the
+/// cadence while it works. A part that has stopped answering is a different
+/// matter: talking to it every second for ever achieves nothing, and it is not
+/// free either -- each attempt is two failed transactions on a bus shared with
+/// the sensors that *do* answer, which is a poor way to treat the neighbours
+/// while someone works out what happened.
+///
+/// So: full rate until the failures pile up, then one attempt a minute until
+/// one of them works. Kept here, away from the bus, because a decision this
+/// small should be testable without one.
+#[derive(Debug)]
+pub struct Cadence {
+    failures: u8,
+    skip: u16,
+}
+
+/// Consecutive failures before backing off. Ten seconds of trying is long
+/// enough to ride out a sensor that is merely slow to wake.
+pub const FAILURES_BEFORE_BACKOFF: u8 = 10;
+
+/// Ticks skipped once backed off: at 1 Hz, one attempt a minute.
+pub const BACKOFF_TICKS: u16 = 59;
+
+impl Default for Cadence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Cadence {
+    pub const fn new() -> Self {
+        Self {
+            failures: 0,
+            skip: 0,
+        }
+    }
+
+    /// Whether this tick should reach the sensor. Consumes one skipped tick if
+    /// it should not.
+    pub fn due(&mut self) -> bool {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return false;
+        }
+        true
+    }
+
+    /// Fold in what the attempt did. One success restores the full rate --
+    /// whatever was wrong is over, and the index needs its second back.
+    pub fn record(&mut self, ok: bool) {
+        if ok {
+            self.failures = 0;
+            self.skip = 0;
+            return;
+        }
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= FAILURES_BEFORE_BACKOFF {
+            self.skip = BACKOFF_TICKS;
+        }
+    }
+
+    /// Whether the sensor is currently being left alone, for the log.
+    pub const fn backed_off(&self) -> bool {
+        self.failures >= FAILURES_BEFORE_BACKOFF
+    }
+}
+
+/// How far one identification attempt got before it failed.
+///
+/// The driver used to report every failure as "no SGP4x answered at 0x59",
+/// which is three different faults wearing one sentence -- and the wrong one of
+/// them sent us looking for a missing sensor on 2026-09-13 while the part was
+/// on the bus, powered, and acknowledging its address the whole time. They have
+/// different causes and different fixes, so they are told apart and said apart.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Attempt {
+    Answered,
+    /// The command itself was not acknowledged. The sensor may still ACK its
+    /// address -- a bus scan would find it -- while refusing to be spoken to.
+    CommandRefused,
+    /// The command was taken and the read that followed was not answered.
+    SilentAfterCommand,
+    /// Bytes came back and their checksum says they are wrong.
+    CorruptAnswer,
+}
+
+/// What to say when neither identification attempt succeeded.
+///
+/// Both attempts are weighed rather than only the first, because they differ in
+/// how far they got and the further one is the more informative: a refused
+/// command says nothing about the wiring, a corrupt answer says the bytes are
+/// arriving and being spoiled on the way.
+const fn fault_for(as_sgp41: Attempt, as_sgp40: Attempt) -> &'static str {
+    match (as_sgp41, as_sgp40) {
+        (Attempt::CorruptAnswer, _) | (_, Attempt::CorruptAnswer) => {
+            "answers at 0x59 with a failed checksum -- the bytes arrive and are spoiled on the \
+             way, so look at the contacts and the bus rather than at the part"
+        }
+        (Attempt::SilentAfterCommand, _) | (_, Attempt::SilentAfterCommand) => {
+            "takes a measure command at 0x59 and then returns nothing -- it is on the bus and \
+             listening, so suspect the part or its supply rather than SDA/SCL"
+        }
+        // Whatever is left is a write that was not acknowledged.
+        _ => {
+            "refuses every measure command at 0x59. If a bus scan still finds 0x59 the part is \
+             powered and addressable and has stopped answering -- a power cycle clears that if \
+             it is a stuck state, and does not if the part is done"
+        }
+    }
+}
+
 /// Which part answered on [`ADDR`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -305,31 +418,45 @@ impl<I2C: I2cBus> Sgp41<I2C> {
         if let Some(part) = self.part {
             return Some(part);
         }
-        if self.write_measure_cmd(CMD_MEASURE_RAW_SIGNALS).await.is_some() {
-            Timer::after(Duration::from_millis(MEASURE_MS)).await;
-            let mut buf = [0u8; 6];
-            if self.i2c.read(ADDR, &mut buf).await.is_ok()
-                && crc_word(&buf[0..3]).is_some()
-                && crc_word(&buf[3..6]).is_some()
-            {
-                self.part = Some(Part::Sgp41);
-                self.fault = None;
-                return self.part;
-            }
+
+        let as_sgp41 = self.try_part(CMD_MEASURE_RAW_SIGNALS, MEASURE_MS, 6).await;
+        if as_sgp41 == Attempt::Answered {
+            self.part = Some(Part::Sgp41);
+            self.fault = None;
+            return self.part;
         }
-        if self.write_measure_cmd(CMD_MEASURE_RAW).await.is_some() {
-            Timer::after(Duration::from_millis(MEASURE_SGP40_MS)).await;
-            let mut buf = [0u8; 3];
-            if self.i2c.read(ADDR, &mut buf).await.is_ok() && crc_word(&buf).is_some() {
-                self.part = Some(Part::Sgp40);
-                // An SGP40 has nothing to condition, so do not wait for it.
-                self.conditioning_left = 0;
-                self.fault = None;
-                return self.part;
-            }
+
+        let as_sgp40 = self.try_part(CMD_MEASURE_RAW, MEASURE_SGP40_MS, 3).await;
+        if as_sgp40 == Attempt::Answered {
+            self.part = Some(Part::Sgp40);
+            // An SGP40 has nothing to condition, so do not wait for it.
+            self.conditioning_left = 0;
+            self.fault = None;
+            return self.part;
         }
-        self.fault = Some("no SGP4x answered at 0x59; check SDA/SCL and 3V3");
+
+        self.fault = Some(fault_for(as_sgp41, as_sgp40));
         None
+    }
+
+    /// One identification attempt: send a measure command, wait it out, read
+    /// `len` bytes back and check their CRCs. Reports *how far* it got.
+    async fn try_part(&mut self, cmd: u16, delay_ms: u64, len: usize) -> Attempt {
+        if self.write_measure_cmd(cmd).await.is_none() {
+            return Attempt::CommandRefused;
+        }
+        Timer::after(Duration::from_millis(delay_ms)).await;
+
+        let mut buf = [0u8; 6];
+        if self.i2c.read(ADDR, &mut buf[..len]).await.is_err() {
+            return Attempt::SilentAfterCommand;
+        }
+        let words_ok = buf[..len].chunks(3).all(|word| crc_word(word).is_some());
+        if words_ok {
+            Attempt::Answered
+        } else {
+            Attempt::CorruptAnswer
+        }
     }
 
     /// One 1 Hz step: condition if still needed, otherwise measure and feed the
@@ -346,7 +473,11 @@ impl<I2C: I2cBus> Sgp41<I2C> {
         // The conditioning phase runs the hotplate without trusting what comes
         // back, so its reading is read and dropped rather than fed to the index.
         if self.conditioning_left > 0 {
-            if self.write_measure_cmd(CMD_EXECUTE_CONDITIONING).await.is_some() {
+            if self
+                .write_measure_cmd(CMD_EXECUTE_CONDITIONING)
+                .await
+                .is_some()
+            {
                 Timer::after(Duration::from_millis(MEASURE_MS)).await;
                 let mut buf = [0u8; 3];
                 let _ = self.i2c.read(ADDR, &mut buf).await;
@@ -439,6 +570,111 @@ mod tests {
     use super::*;
     use crate::sensors::mock::{block_on, FakeI2c};
 
+    /// The three ways an attempt can fail have three different fixes, so the
+    /// driver has to tell them apart. These are the cases we could not
+    /// distinguish on 2026-09-13, when one sentence covered all of them.
+    #[test]
+    fn a_part_that_never_acknowledges_is_reported_as_refusing() {
+        let mut sensor = Sgp41::new(FakeI2c::empty());
+        assert!(block_on(sensor.detect()).is_none());
+        let fault = sensor.fault().expect("a failed detect explains itself");
+        assert!(fault.contains("refuses every measure command"), "{fault}");
+    }
+
+    #[test]
+    fn a_part_that_takes_the_command_and_says_nothing_is_reported_as_such() {
+        // Present on the bus -- writes are acknowledged -- but with no reply
+        // scripted, so every read fails.
+        let mut sensor = Sgp41::new(FakeI2c::with_devices([ADDR]));
+        assert!(block_on(sensor.detect()).is_none());
+        let fault = sensor.fault().unwrap();
+        assert!(fault.contains("returns nothing"), "{fault}");
+        assert!(fault.contains("rather than SDA/SCL"), "{fault}");
+    }
+
+    #[test]
+    fn a_corrupt_answer_points_at_the_contacts_and_not_at_the_part() {
+        // Six bytes back, both checksums wrong.
+        let mut sensor = Sgp41::new(FakeI2c::new(
+            ADDR,
+            [vec![0x12, 0x34, 0x00, 0x56, 0x78, 0x00]],
+        ));
+        assert!(block_on(sensor.detect()).is_none());
+        let fault = sensor.fault().unwrap();
+        assert!(fault.contains("failed checksum"), "{fault}");
+    }
+
+    #[test]
+    fn the_further_attempt_is_the_one_reported() {
+        // The SGP41 attempt is corrupted; the SGP40 fallback gets no reply at
+        // all. Corruption is the more informative of the two, so it wins.
+        assert_eq!(
+            fault_for(Attempt::CorruptAnswer, Attempt::SilentAfterCommand),
+            fault_for(Attempt::CorruptAnswer, Attempt::CommandRefused)
+        );
+        assert!(
+            fault_for(Attempt::CommandRefused, Attempt::SilentAfterCommand)
+                .contains("returns nothing")
+        );
+        assert!(fault_for(Attempt::CommandRefused, Attempt::CommandRefused)
+            .contains("refuses every measure command"));
+    }
+
+    #[test]
+    fn a_working_sensor_is_asked_every_tick() {
+        let mut c = Cadence::new();
+        for _ in 0..120 {
+            assert!(c.due());
+            c.record(true);
+        }
+        assert!(!c.backed_off());
+    }
+
+    #[test]
+    fn a_failing_sensor_is_left_alone_after_ten_tries() {
+        let mut c = Cadence::new();
+        for _ in 0..FAILURES_BEFORE_BACKOFF {
+            assert!(c.due(), "the first failures still get the full rate");
+            c.record(false);
+        }
+        assert!(c.backed_off());
+
+        // A minute of silence, then exactly one attempt.
+        for _ in 0..BACKOFF_TICKS {
+            assert!(!c.due());
+        }
+        assert!(c.due());
+    }
+
+    #[test]
+    fn one_success_buys_the_full_rate_back() {
+        let mut c = Cadence::new();
+        for _ in 0..FAILURES_BEFORE_BACKOFF {
+            c.due();
+            c.record(false);
+        }
+        assert!(c.backed_off());
+
+        c.record(true);
+        assert!(!c.backed_off());
+        for _ in 0..10 {
+            assert!(c.due(), "the index needs its second back immediately");
+            c.record(true);
+        }
+    }
+
+    #[test]
+    fn a_long_outage_does_not_wrap_the_counter() {
+        // u8 counts to 255; a sensor can be dead for days.
+        let mut c = Cadence::new();
+        for _ in 0..5_000 {
+            if c.due() {
+                c.record(false);
+            }
+        }
+        assert!(c.backed_off(), "still backed off after a long outage");
+    }
+
     /// Sensirion's own worked examples for the compensation encoding.
     #[test]
     fn compensation_matches_the_datasheet_defaults() {
@@ -501,10 +737,7 @@ mod tests {
         let mut sensor = Sgp41::new(bus);
         assert_eq!(block_on(sensor.detect()), Some(Part::Sgp40));
         assert_eq!(sensor.descriptors().len(), 1);
-        assert!(sensor
-            .descriptors()
-            .iter()
-            .all(|d| d.key != "nox_index"));
+        assert!(sensor.descriptors().iter().all(|d| d.key != "nox_index"));
     }
 
     #[test]

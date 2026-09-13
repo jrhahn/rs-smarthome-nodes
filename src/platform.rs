@@ -144,6 +144,9 @@ pub struct Sensors {
     /// [`Sensors::step_gas`] drives it between rounds and `measure_all`
     /// merely collects whatever index those steps produced.
     sgp41: Option<Sgp41<SharedI2c>>,
+    /// How often the gas sensor is worth talking to, which is not a constant:
+    /// see [`sgp41::Cadence`].
+    gas_cadence: sgp41::Cadence,
     /// Whether the I²C bring-up probe has already run this boot.
     probed: bool,
     /// Consecutive rounds the SCD41 produced nothing, and whether its self test
@@ -221,6 +224,7 @@ impl Sensors {
             scd41,
             sds011,
             sgp41,
+            gas_cadence: sgp41::Cadence::new(),
             probed: false,
             scd41_empty_rounds: 0,
             scd41_self_tested: false,
@@ -255,8 +259,27 @@ impl Sensors {
     /// ticks this every second between publishes and `measure_all` only reports
     /// what the ticks computed.
     pub async fn step_gas(&mut self) {
-        if let Some(s) = self.sgp41.as_mut() {
-            s.sample_once().await;
+        let Some(s) = self.sgp41.as_mut() else { return };
+        if !self.gas_cadence.due() {
+            return;
+        }
+
+        let was_backed_off = self.gas_cadence.backed_off();
+        s.sample_once().await;
+        let fault = s.fault();
+        self.gas_cadence.record(fault.is_none());
+
+        // Said once at each edge rather than on every attempt: a sensor that
+        // has stopped answering would otherwise fill the log with the same
+        // line every second, which is the habit that makes logs unreadable
+        // exactly when someone is reading them.
+        match (was_backed_off, self.gas_cadence.backed_off()) {
+            (false, true) => warn!(
+                "SGP4x {}; trying once a minute from here",
+                fault.unwrap_or("is not answering")
+            ),
+            (true, false) => info!("SGP4x answered again; back to one sample a second"),
+            _ => {}
         }
     }
 
