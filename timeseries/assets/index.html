@@ -1,25 +1,25 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Smarthome — Verlauf</title>
+    <title>Smarthome — History</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body class="viz-root">
     <header>
       <div class="brand">
-        <h1>Verlauf</h1>
-        <p class="sub" id="brand-sub">das Archiv der Sensoren</p>
+        <h1>History</h1>
+        <p class="sub" id="brand-sub">the sensor archive</p>
       </div>
-      <div class="ranges" id="ranges" role="group" aria-label="Zeitraum"></div>
+      <div class="ranges" id="ranges" role="group" aria-label="Time range"></div>
       <div class="health" id="health" aria-live="polite">…</div>
     </header>
 
     <main>
       <!-- Overview: one tile per channel, grouped by node. -->
       <section id="overview">
-        <p class="hint" id="overview-hint">Lade Kanäle …</p>
+        <p class="hint" id="overview-hint">Loading channels …</p>
         <div id="nodes"></div>
       </section>
 
@@ -27,13 +27,14 @@
       <section id="detail" hidden>
         <div class="detail-head">
           <div>
-            <button class="back" id="back" type="button">← Übersicht</button>
+            <button class="back" id="back" type="button">← Overview</button>
             <h2 id="chart-title">—</h2>
             <p class="sub" id="chart-sub"></p>
           </div>
           <div class="detail-actions">
-            <button id="toggle-table" type="button" aria-pressed="false">Werte</button>
-            <button id="add-note" type="button">Notiz …</button>
+            <button id="toggle-table" type="button" aria-pressed="false">Values</button>
+            <button id="export-csv" type="button" title="Download what is plotted, as CSV">CSV</button>
+            <button id="add-note" type="button">Note …</button>
           </div>
         </div>
 
@@ -48,18 +49,18 @@
         <div id="table-wrap" hidden>
           <table id="value-table">
             <caption>
-              Dieselben Werte als Tabelle — für Screenreader, fürs Kopieren, und
-              für alles, was sich an einer Kurve schlecht ablesen lässt.
+              The same values as a table — for screen readers, for copying, and
+              for everything a curve reads badly.
             </caption>
             <thead>
-              <tr><th scope="col">Zeit</th><th scope="col">min</th><th scope="col">Mittel</th><th scope="col">max</th></tr>
+              <tr><th scope="col">Time</th><th scope="col">min</th><th scope="col">mean</th><th scope="col">max</th></tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
 
         <section id="notes">
-          <h3>Notizen in diesem Zeitraum</h3>
+          <h3>Notes in this range</h3>
           <ul id="note-list"></ul>
         </section>
       </section>
@@ -67,17 +68,17 @@
 
     <dialog id="note-dialog">
       <form method="dialog">
-        <h3>Notiz anlegen</h3>
+        <h3>New note</h3>
         <p class="sub">
-          Was die Zahlen nicht sagen: ein getauschter Sensor, eine Kalibrierung,
-          ein Kabel. Erscheint als Marke im Diagramm.
+          What the numbers do not say: a sensor swapped, a calibration, a
+          cable. Appears as a mark on the chart.
         </p>
-        <label>Zeitpunkt <input type="datetime-local" id="note-at" /></label>
-        <label>Knoten <input type="text" id="note-node" placeholder="leer = die ganze Flotte" /></label>
-        <label>Notiz <input type="text" id="note-text" maxlength="500" required /></label>
+        <label>When <input type="datetime-local" id="note-at" /></label>
+        <label>Node <input type="text" id="note-node" placeholder="empty = the whole fleet" /></label>
+        <label>Note <input type="text" id="note-text" maxlength="500" required /></label>
         <menu>
-          <button value="cancel">Abbrechen</button>
-          <button value="save" id="note-save" class="primary">Speichern</button>
+          <button value="cancel">Cancel</button>
+          <button value="save" id="note-save" class="primary">Save</button>
         </menu>
       </form>
     </dialog>

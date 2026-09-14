@@ -156,6 +156,28 @@ month rather than on the span divided by eight — evenly spaced ticks put
 Both views live in the URL: `#c/<node>/<sensor>/<range>` is a chart worth
 sending to someone, and reloading keeps it.
 
+**The page is in English and formats in `en-GB`**, pinned rather than taken from
+the browser. A dashboard whose decimal separator depends on who opens it makes
+two screenshots of the same reading disagree, which is a bad property for a
+thing whose whole job is to be looked at later.
+
+### CSV
+
+The detail view's **CSV** button downloads what is plotted: the buckets behind
+the chart and the table, not the raw readings — a three-year range is millions
+of rows, and the page never had them.
+
+The file formats for whatever opens it next rather than for a reader, and the
+two are not the same thing. Timestamps are ISO 8601 in UTC, numbers carry full
+precision with a dot, the separator is a comma and the line ending is CRLF, per
+RFC 4180. Column headings name the unit (`mean (°C)`), and the file begins with
+a byte-order mark for one reason: without it Excel reads the degree sign as two
+characters of noise.
+
+The bucket width is in the filename —
+`kueche_temperature_2026-09-13_2026-09-14_5m.csv` — so a spreadsheet found again
+in three months still says what one row covers.
+
 ## Annotations
 
 A series outlives the memory of the hardware that produced it. The terrace's

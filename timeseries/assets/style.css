@@ -226,11 +226,10 @@ thead th { color: var(--text-secondary); font-weight: 600; }
 
 #notes { margin-top: 1.4rem; border-top: 1px solid var(--border); padding-top: 0.9rem; }
 #note-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
-/* Auf Lesebreite begrenzt, und das aus zwei Gründen: eine Zeile über die volle
-   Breite eines 1400-px-Schirms ist schwer zu lesen, und der Zurücknehmen-Knopf
-   steht sonst zentimeterweit von der Notiz entfernt, zu der er gehört -- bei
-   untereinander liegenden Zeilen ist das eine Einladung, die falsche zu
-   treffen. */
+/* Capped at a readable measure, for two reasons: a line spanning the full width
+   of a 1400 px screen is hard to read, and the retract button would otherwise
+   sit inches from the note it belongs to -- with rows stacked directly above
+   one another, that is an invitation to hit the wrong one. */
 #note-list li {
   font-size: 0.85rem;
   color: var(--text-secondary);
@@ -240,10 +239,9 @@ thead th { color: var(--text-secondary); font-weight: 600; }
 }
 #note-list time { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 #note-list .none { color: var(--text-muted); }
-/* Rechtsbündig und ruhig: eine Notiz zurückzunehmen ist die Ausnahme, also darf
-   der Knopf nicht mit dem Text konkurrieren -- aber er ist immer sichtbar und
-   nicht erst beim Hovern, weil ein Bedienelement, das man nicht sieht, auf
-   einem Touchscreen keines ist. */
+/* Right-aligned and quiet: retracting a note is the exception, so the button
+   must not compete with the text -- but it is always visible rather than only
+   on hover, because a control you cannot see is not a control on a touchscreen. */
 #note-list .void {
   margin-left: auto;
   flex: none;

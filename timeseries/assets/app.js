@@ -14,15 +14,19 @@
 const RANGES = [
   { key: "6h", label: "6 h", ms: 6 * 3600e3 },
   { key: "24h", label: "24 h", ms: 24 * 3600e3 },
-  { key: "7d", label: "7 T", ms: 7 * 24 * 3600e3 },
-  { key: "30d", label: "30 T", ms: 30 * 24 * 3600e3 },
-  { key: "1y", label: "1 J", ms: 365 * 24 * 3600e3 },
-  { key: "3y", label: "3 J", ms: 3 * 365 * 24 * 3600e3 },
+  { key: "7d", label: "7 d", ms: 7 * 24 * 3600e3 },
+  { key: "30d", label: "30 d", ms: 30 * 24 * 3600e3 },
+  { key: "1y", label: "1 y", ms: 365 * 24 * 3600e3 },
+  { key: "3y", label: "3 y", ms: 3 * 365 * 24 * 3600e3 },
 ];
 
 const REFRESH_MS = 30000;
-const num = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
-const num1 = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+// `en-GB` rather than the browser's locale: a dashboard whose decimal point
+// moves depending on who opens it makes two screenshots of the same reading
+// disagree. Day before month, which is what everyone reading this expects.
+const LOCALE = "en-GB";
+const num = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 2 });
+const num1 = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 1 });
 
 const state = {
   range: "24h",
@@ -51,6 +55,7 @@ const dom = {
   tableWrap: el("table-wrap"),
   table: el("value-table").querySelector("tbody"),
   toggleTable: el("toggle-table"),
+  exportCsv: el("export-csv"),
   noteList: el("note-list"),
   dialog: el("note-dialog"),
 };
@@ -90,7 +95,7 @@ function withUnit(value, unit, fmt = num) {
 /// What the sparkline covers, in numbers: a line without a scale is a shape,
 /// and a shape is not a reading.
 function span(c) {
-  if (!c.points || !c.points.length) return "keine Daten";
+  if (!c.points || !c.points.length) return "no data";
   let lo = Infinity;
   let hi = -Infinity;
   for (const [, v] of c.points) {
@@ -101,22 +106,22 @@ function span(c) {
 }
 
 function ago(ms) {
-  if (!ms) return "nie";
+  if (!ms) return "never";
   const mins = Math.round((Date.now() - ms) / 60000);
-  if (mins < 1) return "gerade eben";
-  if (mins < 60) return `vor ${mins} Min.`;
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
   const hours = Math.round(mins / 60);
-  if (hours < 48) return `vor ${hours} Std.`;
-  return `vor ${Math.round(hours / 24)} Tagen`;
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
 }
 
 function formatTime(ms, spanMs) {
   const d = new Date(ms);
   if (spanMs <= 2 * 24 * 3600e3)
-    return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" });
   if (spanMs <= 120 * 24 * 3600e3)
-    return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-  return d.toLocaleDateString("de-DE", { month: "2-digit", year: "2-digit" });
+    return d.toLocaleDateString(LOCALE, { day: "2-digit", month: "2-digit" });
+  return d.toLocaleDateString(LOCALE, { month: "2-digit", year: "2-digit" });
 }
 
 // --- routing ----------------------------------------------------------------
@@ -159,7 +164,7 @@ async function loadDetail() {
   const { from, to } = window_();
   const { node, sensor } = state.selected;
   const points = Math.max(200, Math.floor(dom.chart.clientWidth || 800));
-  dom.foot.textContent = "Lade …";
+  dom.foot.textContent = "Loading …";
   try {
     const query = new URLSearchParams({ node, sensor, from, to, points });
     const [series, notes] = await Promise.all([
@@ -179,14 +184,14 @@ async function loadHealth() {
   try {
     const h = await getJSON("/api/health");
     const pill = (ok, name) =>
-      `<span><span class="dot ${ok ? "up" : "down"}"></span>${name} ${ok ? "verbunden" : "getrennt"}</span>`;
+      `<span><span class="dot ${ok ? "up" : "down"}"></span>${name} ${ok ? "connected" : "disconnected"}</span>`;
     dom.health.innerHTML =
       pill(h.broker_connected, "Broker") +
       pill(h.database_reachable, "QuestDB") +
-      `<span><b>${num.format(h.rows_written)}</b> Zeilen geschrieben</span>`;
+      `<span><b>${num.format(h.rows_written)}</b> rows written</span>`;
     el("brand-sub").textContent = h.retention
-      ? `Rohdaten ${h.retention.toLowerCase()}, ${h.views.length} Rollups`
-      : "ohne Verfall";
+      ? `raw data ${h.retention.toLowerCase()}, ${h.views.length} rollups`
+      : "kept indefinitely";
   } catch (e) {
     dom.health.innerHTML = `<span class="error">${esc(e.message)}</span>`;
   }
@@ -302,9 +307,11 @@ function renderDetail() {
   dom.title.textContent = label(c);
   dom.sub.textContent = `${c.node_name || c.node} · ${c.sensor}${c.unit ? ` · ${c.unit}` : ""}`;
 
+  dom.exportCsv.disabled = !s || !s.points.length;
+
   if (!s || !s.points.length) {
     dom.stats.innerHTML = "";
-    dom.foot.textContent = s ? "Keine Daten in diesem Zeitraum." : "";
+    dom.foot.textContent = s ? "No data in this range." : "";
     drawChart();
     renderNotes();
     return;
@@ -322,17 +329,17 @@ function renderDetail() {
     `<div><dt>${name}</dt><dd>${esc(value)}</dd></div>`;
   dom.stats.innerHTML =
     stat("min", withUnit(lo, c.unit)) +
-    stat("Mittel", withUnit(sum / s.points.length, c.unit)) +
+    stat("mean", withUnit(sum / s.points.length, c.unit)) +
     stat("max", withUnit(hi, c.unit)) +
-    stat("zuletzt", withUnit(s.points[s.points.length - 1].av, c.unit)) +
-    stat("Punkte", `${s.points.length} à ${s.bucket}`);
+    stat("latest", withUnit(s.points[s.points.length - 1].av, c.unit)) +
+    stat("points", `${s.points.length} of ${s.bucket}`);
 
-  dom.foot.textContent = `aus ${s.source}, Zeitraum ${new Date(s.from).toLocaleString("de-DE")} – ${new Date(s.to).toLocaleString("de-DE")}`;
+  dom.foot.textContent = `from ${s.source}, ${new Date(s.from).toLocaleString(LOCALE)} – ${new Date(s.to).toLocaleString(LOCALE)}`;
 
   dom.table.innerHTML = s.points
     .map(
       (p) =>
-        `<tr><td>${esc(new Date(p.t).toLocaleString("de-DE"))}</td><td>${esc(num1.format(p.lo))}</td>` +
+        `<tr><td>${esc(new Date(p.t).toLocaleString(LOCALE))}</td><td>${esc(num1.format(p.lo))}</td>` +
         `<td>${esc(num1.format(p.av))}</td><td>${esc(num1.format(p.hi))}</td></tr>`,
     )
     .join("");
@@ -343,32 +350,31 @@ function renderDetail() {
 
 function renderNotes() {
   if (!state.notes.length) {
-    dom.noteList.innerHTML = `<li class="none">Keine — was in diesem Zeitraum passiert ist, steht nirgends.</li>`;
+    dom.noteList.innerHTML = `<li class="none">None — whatever happened in this range is written down nowhere.</li>`;
     return;
   }
   dom.noteList.innerHTML = state.notes
     .map(
       (n, i) =>
-        `<li><time>${esc(new Date(n.at_ms).toLocaleString("de-DE"))}</time>` +
-        `<span>${esc(n.note)}${n.node && n.node !== "fleet" ? "" : " <em>(Flotte)</em>"}</span>` +
+        `<li><time>${esc(new Date(n.at_ms).toLocaleString(LOCALE))}</time>` +
+        `<span>${esc(n.note)}${n.node && n.node !== "fleet" ? "" : " <em>(fleet)</em>"}</span>` +
         `<button class="void" type="button" data-note="${i}" ` +
-        `title="Diese Notiz zurücknehmen">zurücknehmen</button></li>`,
+        `title="Take this note back">retract</button></li>`,
     )
     .join("");
 }
 
-// Zurücknehmen statt Löschen: der Zeitstempel einer Notiz ist die designierte
-// Spalte der Tabelle und lässt sich nicht ändern, Zeilen löschen kann QuestDB
-// gar nicht. Eine auf die falsche Minute gesetzte Notiz kann also nur als
-// ungültig markiert und daneben neu geschrieben werden. Sie bleibt in der
-// Datenbank stehen -- bei einem Protokoll darüber, was passiert ist, ist eine
-// sichtbare Korrektur mehr wert als eine spurlose.
+// Retracted, not deleted: a note's timestamp is the table's designated column
+// and cannot be changed, and QuestDB deletes no rows at all. A note filed at the
+// wrong minute can therefore only be marked as not counting, with the corrected
+// one written beside it. It stays in the database -- in a log of what happened,
+// a visible correction is worth more than one that leaves no trace.
 dom.noteList.addEventListener("click", async (ev) => {
   const button = ev.target.closest("button.void");
   if (!button) return;
   const note = state.notes[Number(button.dataset.note)];
   if (!note) return;
-  if (!window.confirm(`Diese Notiz zurücknehmen?\n\n${note.note}`)) return;
+  if (!window.confirm(`Take this note back?\n\n${note.note}`)) return;
   button.disabled = true;
   try {
     await getJSON("/api/annotations/void", {
@@ -379,7 +385,7 @@ dom.noteList.addEventListener("click", async (ev) => {
     loadDetail();
   } catch (e) {
     button.disabled = false;
-    dom.foot.innerHTML = `<span class="error">Notiz nicht zurückgenommen: ${esc(e.message)}</span>`;
+    dom.foot.innerHTML = `<span class="error">Note not retracted: ${esc(e.message)}</span>`;
   }
 });
 
@@ -581,7 +587,7 @@ dom.chart.addEventListener("mousemove", (event) => {
   dom.tooltip.innerHTML =
     `<strong>${esc(withUnit(nearest.av, c.unit))}</strong><br />` +
     `min ${esc(num1.format(nearest.lo))} · max ${esc(num1.format(nearest.hi))}<br />` +
-    `<span style="color:var(--text-muted)">${esc(new Date(nearest.t).toLocaleString("de-DE"))}</span>` +
+    `<span style="color:var(--text-muted)">${esc(new Date(nearest.t).toLocaleString(LOCALE))}</span>` +
     (note ? `<br /><span style="color:var(--text-secondary)">${esc(note.note)}</span>` : "");
   const left = Math.min(scale.sx(nearest.t) + 14, rect.width - dom.tooltip.offsetWidth - 8);
   dom.tooltip.style.left = `${Math.max(0, left)}px`;
@@ -604,6 +610,51 @@ dom.toggleTable.addEventListener("click", () => {
   state.showTable = !state.showTable;
   dom.toggleTable.setAttribute("aria-pressed", String(state.showTable));
   dom.tableWrap.hidden = !state.showTable;
+});
+
+// What is plotted, as a file. Exactly the rows behind the chart and the table --
+// the buckets the server returned, not the raw readings, which for a three-year
+// range would be millions. The bucket width is in the filename so a spreadsheet
+// three months from now still says what a row covers.
+//
+// Deliberately not `toLocaleString` anywhere in here. The display formats for
+// people; a file formats for whatever opens it next, and that wants ISO 8601 in
+// UTC and a full-precision number with a dot in it. A CSV that rounds to one
+// decimal and writes 23,7 has thrown away both the precision and the ability to
+// be parsed without knowing where it came from.
+function csvFilename(c, s) {
+  const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const safe = (x) => String(x).replace(/[^A-Za-z0-9._-]/g, "-");
+  return `${safe(c.node)}_${safe(c.sensor)}_${day(s.from)}_${day(s.to)}_${safe(s.bucket)}.csv`;
+}
+
+function toCsv(c, s) {
+  const unit = c.unit ? ` (${c.unit})` : "";
+  const head = ["timestamp", `min${unit}`, `mean${unit}`, `max${unit}`]
+    .map((h) => (/[",\n]/.test(h) ? `"${h.replace(/"/g, '""')}"` : h))
+    .join(",");
+  const rows = s.points.map(
+    (p) => `${new Date(p.t).toISOString()},${p.lo},${p.av},${p.hi}`,
+  );
+  // CRLF, because that is what RFC 4180 says and what Excel is happiest with.
+  return [head, ...rows].join("\r\n") + "\r\n";
+}
+
+dom.exportCsv.addEventListener("click", () => {
+  const s = state.series;
+  if (!s || !s.points.length) return;
+  const c = channel();
+  // A byte-order mark, for one reason only: without it Excel reads the degree
+  // sign in the header as two characters of noise. Every other tool ignores it.
+  const blob = new Blob(["\ufeff" + toCsv(c, s)], {
+    type: "text/csv;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = csvFilename(c, s);
+  a.click();
+  URL.revokeObjectURL(url);
 });
 
 el("add-note").addEventListener("click", () => {
@@ -631,7 +682,7 @@ dom.dialog.addEventListener("close", async () => {
     });
     loadDetail();
   } catch (e) {
-    dom.foot.innerHTML = `<span class="error">Notiz nicht gespeichert: ${esc(e.message)}</span>`;
+    dom.foot.innerHTML = `<span class="error">Note not saved: ${esc(e.message)}</span>`;
   }
 });
 
