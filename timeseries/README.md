@@ -156,6 +156,26 @@ month rather than on the span divided by eight — evenly spaced ticks put
 Both views live in the URL: `#c/<node>/<sensor>/<range>` is a chart worth
 sending to someone, and reloading keeps it.
 
+### Zooming
+
+Drag a span on the chart, scroll to zoom around the pointer, double-click to go
+back — the same three gestures as the gateway's plots, because a chart you have
+to learn twice is a chart nobody drags.
+
+Two things make it behave rather than merely respond. A zoom pins an **absolute**
+window, so the 30 s refresh stops sliding it: a window that moves while you are
+measuring something against it is worse than no zoom at all. And a double-click
+returns to the view that was active *before* zooming in, not to the widest range
+there is — it is an undo, not a reset.
+
+The window goes into the URL as `#c/<node>/<sensor>/<from>-<to>` in epoch
+seconds, so a zoomed chart is as shareable as a preset one. While a zoom is
+active no preset button is lit, because none of them is what is on screen, and
+the footer says so along with the way out.
+
+Nothing is vendored for this. The chart is a few hundred lines of canvas, and
+three mouse handlers is a smaller thing to own than a plotting library.
+
 **The page is in English and formats in `en-GB`**, pinned rather than taken from
 the browser. A dashboard whose decimal separator depends on who opens it makes
 two screenshots of the same reading disagree, which is a bad property for a

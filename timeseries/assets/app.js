@@ -30,6 +30,17 @@ const num1 = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 1 });
 
 const state = {
   range: "24h",
+  // An absolute window, set by a zoom gesture, that overrides the preset. Null
+  // means "the preset, relative to now", which is what keeps the page live: a
+  // zoomed chart deliberately stops following the clock, because a window that
+  // slides while you are reading it is not a window you can compare anything
+  // against.
+  zoom: null, // { from, to } in ms
+  // Where a double-click goes back to: the view that was active before zooming
+  // in, not the widest range there is. Set by choosing a preset, left alone by
+  // the gestures themselves.
+  zoomHome: null, // { range, zoom }
+  drag: null, // { fromX, toX } while a selection is being dragged
   channels: [],
   selected: null, // { node, sensor }
   series: null,
@@ -37,6 +48,11 @@ const state = {
   hover: null,
   showTable: false,
 };
+
+/// Smallest window a gesture may produce. Below a minute the buckets are wider
+/// than the window and the chart shows one point, which looks broken rather
+/// than zoomed.
+const MIN_SPAN_MS = 60e3;
 
 const el = (id) => document.getElementById(id);
 const dom = {
@@ -72,8 +88,32 @@ const css = (name) => getComputedStyle(document.body).getPropertyValue(name).tri
 const range = () => RANGES.find((r) => r.key === state.range) || RANGES[1];
 
 function window_() {
+  if (state.zoom) return { ...state.zoom };
   const to = Date.now();
   return { from: to - range().ms, to };
+}
+
+/// Move to an absolute window, remembering where to go back to.
+function zoomTo(from, to) {
+  if (!(to - from >= MIN_SPAN_MS)) return;
+  if (!state.zoomHome) state.zoomHome = { range: state.range, zoom: state.zoom };
+  state.zoom = { from: Math.round(from), to: Math.round(to) };
+  // The strip has to let go of its pressed button: none of the presets is what
+  // is on screen any more, and a lit "24 h" over a six-hour window is a lie
+  // told by the only control that claims to say what the window is.
+  renderRanges();
+  writeHash();
+  loadDetail();
+}
+
+function zoomReset() {
+  if (!state.zoomHome) return;
+  state.range = state.zoomHome.range;
+  state.zoom = state.zoomHome.zoom;
+  state.zoomHome = null;
+  renderRanges();
+  writeHash();
+  loadDetail();
 }
 
 async function getJSON(url, options) {
@@ -133,14 +173,26 @@ function readHash() {
   } else {
     state.selected = null;
   }
-  if (RANGES.some((r) => r.key === parts[3])) state.range = parts[3];
-  else if (RANGES.some((r) => r.key === parts[1]) && parts[0] !== "c") state.range = parts[1];
+  const slot = parts[0] === "c" ? parts[3] : parts[1];
+  // A zoomed window is `<from>-<to>` in epoch seconds. Seconds rather than
+  // milliseconds only because three zeroes per number in a link people paste to
+  // each other buy nothing; a second is far finer than any bucket here.
+  const span = /^(\d{9,11})-(\d{9,11})$/.exec(slot || "");
+  if (span) {
+    state.zoom = { from: Number(span[1]) * 1000, to: Number(span[2]) * 1000 };
+  } else if (RANGES.some((r) => r.key === slot)) {
+    state.range = slot;
+    state.zoom = null;
+  }
 }
 
 function writeHash() {
+  const slot = state.zoom
+    ? `${Math.round(state.zoom.from / 1000)}-${Math.round(state.zoom.to / 1000)}`
+    : state.range;
   const next = state.selected
-    ? `#c/${encodeURIComponent(state.selected.node)}/${encodeURIComponent(state.selected.sensor)}/${state.range}`
-    : `#all/${state.range}`;
+    ? `#c/${encodeURIComponent(state.selected.node)}/${encodeURIComponent(state.selected.sensor)}/${slot}`
+    : `#all/${slot}`;
   if (location.hash !== next) history.replaceState(null, "", next);
 }
 
@@ -334,7 +386,11 @@ function renderDetail() {
     stat("latest", withUnit(s.points[s.points.length - 1].av, c.unit)) +
     stat("points", `${s.points.length} of ${s.bucket}`);
 
-  dom.foot.textContent = `from ${s.source}, ${new Date(s.from).toLocaleString(LOCALE)} – ${new Date(s.to).toLocaleString(LOCALE)}`;
+  // The range strip shows no pressed button while a zoom is active, which is
+  // correct and also mysterious on its own. Say so, and say the way out.
+  dom.foot.textContent =
+    `from ${s.source}, ${new Date(s.from).toLocaleString(LOCALE)} – ${new Date(s.to).toLocaleString(LOCALE)}` +
+    (state.zoom ? " · zoomed, double-click the chart to go back" : "");
 
   dom.table.innerHTML = s.points
     .map(
@@ -497,6 +553,22 @@ function drawChart() {
   }
   ctx.setLineDash([]);
 
+  // The drag selection, over everything else: it is the thing being aimed.
+  if (state.drag) {
+    const a = Math.min(state.drag.fromX, state.drag.toX);
+    const b = Math.max(state.drag.fromX, state.drag.toX);
+    ctx.fillStyle = css("--series-band");
+    ctx.fillRect(a, plot.y, b - a, plot.h);
+    ctx.strokeStyle = css("--series");
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(a) + 0.5, plot.y);
+    ctx.lineTo(Math.round(a) + 0.5, plot.y + plot.h);
+    ctx.moveTo(Math.round(b) + 0.5, plot.y);
+    ctx.lineTo(Math.round(b) + 0.5, plot.y + plot.h);
+    ctx.stroke();
+  }
+
   if (state.hover) {
     const p = state.hover;
     ctx.strokeStyle = css("--text-muted");
@@ -600,8 +672,91 @@ dom.chart.addEventListener("mouseleave", () => {
   drawChart();
 });
 
+// --- zoom -------------------------------------------------------------------
+// Drag a span, scroll to zoom around the pointer, double-click to go back. The
+// same three gestures as the gateway's plots, because a chart you have to learn
+// twice is a chart nobody drags.
+//
+// A zoom pins an absolute window, which also stops the 30 s refresh from
+// sliding it: a window that moves while you are measuring something against it
+// is worse than no zoom at all.
+
+/// Time under a pointer, clamped to the plot so a drag that leaves the canvas
+/// still ends somewhere sensible.
+function timeAt(event) {
+  const scale = dom.chart._scale;
+  const s = state.series;
+  if (!scale || !s) return null;
+  const rect = dom.chart.getBoundingClientRect();
+  const x = Math.min(Math.max(event.clientX - rect.left, scale.plot.x), scale.plot.x + scale.plot.w);
+  return { x, t: s.from + ((x - scale.plot.x) / scale.plot.w) * (s.to - s.from) };
+}
+
+dom.chart.addEventListener("mousedown", (event) => {
+  if (event.button !== 0) return;
+  const at = timeAt(event);
+  if (!at) return;
+  event.preventDefault(); // or the browser starts a text selection instead
+  state.drag = { fromX: at.x, toX: at.x, fromT: at.t, toT: at.t };
+});
+
+window.addEventListener("mousemove", (event) => {
+  if (!state.drag) return;
+  const at = timeAt(event);
+  if (!at) return;
+  state.drag.toX = at.x;
+  state.drag.toT = at.t;
+  drawChart();
+});
+
+window.addEventListener("mouseup", () => {
+  const drag = state.drag;
+  state.drag = null;
+  if (!drag) return;
+  drawChart();
+  // Below a few pixels this was a click, not a gesture. Zooming on a stray
+  // click would make the chart impossible to simply look at.
+  if (Math.abs(drag.toX - drag.fromX) < 6) return;
+  zoomTo(Math.min(drag.fromT, drag.toT), Math.max(drag.fromT, drag.toT));
+});
+
+dom.chart.addEventListener(
+  "wheel",
+  (event) => {
+    const at = timeAt(event);
+    const s = state.series;
+    if (!at || !s) return;
+    event.preventDefault();
+    // Around the pointer, not around the centre: zooming towards what you are
+    // looking at is the whole reason to use the wheel rather than a drag.
+    const factor = event.deltaY < 0 ? 0.8 : 1.25;
+    const from = at.t - (at.t - s.from) * factor;
+    const to = at.t + (s.to - at.t) * factor;
+    if (to - from < MIN_SPAN_MS) return;
+    // Zooming out past the widest preset is pointless -- there is no data there
+    // and the buckets stop getting coarser.
+    const widest = RANGES[RANGES.length - 1].ms;
+    zoomTo(Math.max(from, Date.now() - widest), Math.min(to, Date.now()));
+  },
+  { passive: false },
+);
+
+dom.chart.addEventListener("dblclick", () => zoomReset());
+
 el("back").addEventListener("click", () => {
   state.selected = null;
+  writeHash();
+  show();
+});
+
+el("home").addEventListener("click", () => {
+  // Back to the overview, and out of any zoom: the title is "show me
+  // everything", and an absolute window left over from one channel is not
+  // everything.
+  state.selected = null;
+  state.zoom = null;
+  state.zoomHome = null;
+  renderRanges();
   writeHash();
   show();
 });
@@ -701,11 +856,17 @@ window.addEventListener("hashchange", () => {
 
 function renderRanges() {
   dom.ranges.innerHTML = RANGES.map(
-    (r) => `<button data-range="${r.key}" aria-pressed="${r.key === state.range}">${r.label}</button>`,
+    (r) =>
+      `<button data-range="${r.key}" aria-pressed="${!state.zoom && r.key === state.range}">${r.label}</button>`,
   ).join("");
   for (const button of dom.ranges.querySelectorAll("button")) {
     button.addEventListener("click", () => {
       state.range = button.dataset.range;
+      // A preset is a deliberate choice of window, so it ends the zoom rather
+      // than nesting inside it -- and it becomes the place a later
+      // double-click returns to.
+      state.zoom = null;
+      state.zoomHome = null;
       writeHash();
       renderRanges();
       show();

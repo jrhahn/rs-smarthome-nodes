@@ -78,6 +78,20 @@ body {
 
 h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 h1 { font-size: 1.15rem; }
+/* The title is the way back to the overview. It is a real button underneath, so
+   it has to give up everything a button brings and keep only the pointer and a
+   focus ring -- a heading that suddenly had a border would read as a control
+   nobody asked for. */
+h1 button {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+h1 button:hover { color: var(--series); }
 h2 { font-size: 1.4rem; }
 h3 { font-size: 0.95rem; }
 

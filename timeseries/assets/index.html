@@ -9,7 +9,10 @@
   <body class="viz-root">
     <header>
       <div class="brand">
-        <h1>History</h1>
+        <!-- A real button, not a styled div: this is the way back to the
+             overview from anywhere, and the top-left title is where everyone
+             looks for it. -->
+        <h1><button id="home" type="button">History</button></h1>
         <p class="sub" id="brand-sub">the sensor archive</p>
       </div>
       <div class="ranges" id="ranges" role="group" aria-label="Time range"></div>
@@ -41,7 +44,10 @@
         <dl class="stats" id="stats"></dl>
 
         <div class="chart-wrap">
-          <canvas id="chart"></canvas>
+          <canvas
+            id="chart"
+            title="Drag to zoom, scroll to zoom around the pointer, double-click to go back"
+          ></canvas>
           <div id="tooltip" class="tooltip" hidden></div>
         </div>
         <p id="chart-foot" class="foot"></p>
