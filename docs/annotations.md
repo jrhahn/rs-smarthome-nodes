@@ -223,3 +223,39 @@ deep sleep does not dim it. **Dark means the supply went away** — this story
 again. **Lit and silent means the board itself hung**, which is a different
 investigation entirely and one nothing here has yet had to open.
 
+## 2026-09-14 20:46 — kueche — deep sleep switched off
+
+`kueche` stops sleeping between rounds. It still samples every 120 s and still
+publishes the same three channels; what changes is that the board stays powered
+and associated in between instead of cold-booting into each round.
+
+**Why, and it is not about the node.** This one has now lost its supply twice on
+the kitchen's socket strip — once on the USB-A port within minutes, once on the
+USB-C port after six hours (see the two entries above). A board that draws tens
+of microamps while asleep is below what such a port keeps itself alive for. A
+board that never sleeps draws continuously, so the port has no reason to switch
+off. That is a workaround for the supply, not a fix: with a plain wall adapter
+this node could go straight back to duty-cycling, and should.
+
+**Two consequences for the data.** The cadence moves from 125 s to 120 s — the
+five seconds were the boot the node no longer does, and the timestamps tighten
+accordingly from 18:46:25Z. And the board now warms the air its own SHT31 is
+measuring again, which is the exact effect duty-cycling was introduced to remove
+on 2026-09-13: **expect this node to read warmer from here, and do not read that
+step as a warmer kitchen.**
+
+How much warmer is worth measuring rather than assuming. The 24 hours before
+this line sit at 23.4–23.5 °C duty-cycled, which is a clean baseline, and `bad`
+runs the same box, the same firmware and the same profile as the control. The
+2.5 °C measured in September was before this box had its chimney and its lid
+grille; the honest guess is closer to the 0.9 °C measured on `schlafzimmer`, and
+the data will say.
+
+Done over the air, not by reflashing: `switch.kueche_deep_sleep` in Home
+Assistant, which publishes a retained `smarthome/kueche/config/deep_sleep`. The
+node reads it while publishing, writes it to its config sector, sleeps one last
+time, and comes up awake on the next boot — so it takes two rounds, and the
+first of them still looks unchanged. Verified in the flash blob (`magic BIRD`,
+version 5, CRC ok, `deep_sleep = 0`) before it was visible anywhere else. It
+survives power cycles, which is the point.
+
