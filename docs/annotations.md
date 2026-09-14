@@ -187,3 +187,39 @@ created the idle it switches off in. Nothing was broken — the firmware is righ
 and the strip is right, they just cannot be combined. **`bad` runs the same
 profile; check what it is plugged into before this happens there too.**
 
+## 2026-09-14 04:19–19:46 — kueche — dead again, and the USB-C port was not the fix
+
+Fifteen and a half hours with nothing from this node. Not a sensor fault this
+time and not a gap with readings hiding in it: `temperature`, `humidity` and
+`rssi` stop together at 02:19:10Z and resume together at 17:45:56Z.
+
+It was in perfect health right up to the last round — twelve rounds at 125 s
+without a stumble, RSSI flat at −57/−58 dBm, temperature flat at 23.4 °C. No
+drift, no retries, no warning. It went to sleep at 04:19:1x and nothing woke it
+up, which is what losing the supply mid-sleep looks like from the outside.
+
+**It is the node, not the house.** `bad` runs the same firmware, the same
+`MainsDutyCycled` profile and the same 120 s sleep, and it sailed through that
+minute — ten rounds between 04:16 and 04:33 — as did `schlafzimmer`,
+`wohnzimmer` and `terrasse`. Over the whole day: `wohnzimmer` 8270 readings,
+`schlafzimmer` 6420, `bad` 1647, `kueche` 339 and then silence. A broker, a
+Wi-Fi or an archiver problem would not have picked one node out of five.
+
+**So moving it to the socket strip's USB-C port did not fix it — it delayed it
+by six hours.** The entry for 2026-09-13 explains why a USB-A charging port cuts
+a sleeping node off, and that much was right; the conclusion drawn from it was
+too narrow. A strip that switches itself off below a total standby draw takes
+the C port with it, CC resistor or no CC resistor, and 04:19 is about when
+everything else plugged into it would have gone quiet for the night. The node
+did not come back on its own; it came back when somebody touched it.
+
+**The supply has to be a plain wall adapter in a wall socket.** No strip with a
+standby cut-off, no power bank, nothing that decides for itself whether anything
+is still attached.
+
+And next time it is silent, the first thing to look at is the red LED on the
+board, before any query: it hangs on 3V3, the firmware never touches it, and
+deep sleep does not dim it. **Dark means the supply went away** — this story
+again. **Lit and silent means the board itself hung**, which is a different
+investigation entirely and one nothing here has yet had to open.
+
