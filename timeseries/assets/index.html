@@ -36,6 +36,14 @@
           </div>
           <div class="detail-actions">
             <button id="toggle-table" type="button" aria-pressed="false">Values</button>
+            <button
+              id="compare"
+              type="button"
+              aria-pressed="false"
+              title="Lay the six preceding windows of the same length behind this one"
+            >
+              Compare
+            </button>
             <button id="export-csv" type="button" title="Download what is plotted, as CSV">CSV</button>
             <button id="add-note" type="button">Note …</button>
           </div>
@@ -50,6 +58,7 @@
           ></canvas>
           <div id="tooltip" class="tooltip" hidden></div>
         </div>
+        <ul id="legend" class="legend" hidden></ul>
         <p id="chart-foot" class="foot"></p>
 
         <div id="table-wrap" hidden>

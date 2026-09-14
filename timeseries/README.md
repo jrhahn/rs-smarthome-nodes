@@ -176,6 +176,38 @@ the footer says so along with the way out.
 Nothing is vendored for this. The chart is a few hundred lines of canvas, and
 three mouse handlers is a smaller thing to own than a plotting library.
 
+### Comparing with the windows before it
+
+**Compare** lays the six preceding windows of the same length behind the current
+one. With the 24 h range that is today against the same hours of the last six
+days — which is the question a house actually raises: *is this normal for a
+Tuesday, or is something different?* With 7 d it is this week against the last
+six weeks.
+
+Each overlay is shifted forward by exactly one window length, so the clock lines
+up: an hour on the axis is the same hour in every line, and with a 7 d window
+the same weekday too. That alignment is the whole feature.
+
+They are drawn as six steps of **one** hue at falling opacity, not six colours.
+These are the same measurement at different times, which is an *order*, and an
+order wants a ramp — six hues would claim they are six different things. The
+current window keeps the solid 2 px line; the rest are thinner and quieter,
+because one of them is the subject and six are the backdrop.
+
+Two details that make it readable rather than merely correct. The min/max band
+is dropped while comparing: it is the spread *within* one window laid over six
+other windows' lines, and it is the one element wide enough to hide exactly what
+the mode was turned on to show. And the tooltip lists all seven values at the
+crosshair — the eye can see the lines differ, and this is what says by how much.
+
+The earlier windows count towards the y-axis by their mean only, so one old
+outlier's envelope cannot squash the window being looked at.
+
+**Where the alignment is approximate:** a shift is a fixed number of
+milliseconds. For 6 h, 24 h and 7 d that is exact. For 30 d it is not a calendar
+month, and for 1 y it is 365 days, so leap years and month lengths drift. Read
+those two as "roughly a month/year back", not as the same date.
+
 **The page is in English and formats in `en-GB`**, pinned rather than taken from
 the browser. A dashboard whose decimal separator depends on who opens it makes
 two screenshots of the same reading disagree, which is a bad property for a

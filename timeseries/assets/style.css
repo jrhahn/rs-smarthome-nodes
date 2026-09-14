@@ -309,3 +309,27 @@ dialog button {
   cursor: pointer;
 }
 dialog button.primary { background: var(--series); border-color: var(--series); color: #fff; }
+
+/* --- legend -------------------------------------------------------------- */
+
+/* Only ever shown with the overlays on, which is the only time this chart has
+   more than one line. A swatch plus a word, because the six overlays are steps
+   of one hue and a step is not something anyone can name out loud. */
+.legend {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.9rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.legend li { display: flex; align-items: center; gap: 0.35rem; }
+.legend .swatch {
+  display: inline-block;
+  width: 18px;
+  border-radius: 1px;
+  background: var(--series);
+}
+

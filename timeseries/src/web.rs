@@ -72,23 +72,40 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
+/// The assets are baked into the binary at a URL that never changes, so a
+/// browser's own heuristics decide how long a redeployed page stays the old one
+/// -- and they decide generously. The result is a new `app.js` talking to an old
+/// `index.html`, or neither, with nothing in any log to say so; it cost an
+/// evening here before it was understood. `no-cache` means "ask me first", not
+/// "never store", so a reload is still a 304 on unchanged bytes.
+const REVALIDATE: (header::HeaderName, &str) = (header::CACHE_CONTROL, "no-cache");
+
 async fn index() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            REVALIDATE,
+        ],
         include_str!("../assets/index.html"),
     )
 }
 
 async fn script() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            REVALIDATE,
+        ],
         include_str!("../assets/app.js"),
     )
 }
 
 async fn stylesheet() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            REVALIDATE,
+        ],
         include_str!("../assets/style.css"),
     )
 }

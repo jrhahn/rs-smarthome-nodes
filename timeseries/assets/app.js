@@ -41,6 +41,12 @@ const state = {
   // the gestures themselves.
   zoomHome: null, // { range, zoom }
   drag: null, // { fromX, toX } while a selection is being dragged
+  // Compare the window against the ones before it, same length, laid on top of
+  // each other. Off by default: it is a second question ("is this normal for a
+  // Tuesday?"), and asking it by default would make the ordinary one ("what is
+  // it doing?") harder to read.
+  compare: false,
+  compareSeries: [], // [{ shift, series }], newest first, current excluded
   channels: [],
   selected: null, // { node, sensor }
   series: null,
@@ -48,6 +54,14 @@ const state = {
   hover: null,
   showTable: false,
 };
+
+/// How many earlier windows `compare` draws behind the current one.
+///
+/// Six, so a 24 h window becomes a week of days -- which is the comparison
+/// anyone actually wants from a house: today against the same hours of the last
+/// six days. It is also about as many lines of one hue as stay apart on a
+/// screen; the seventh would be a shade nobody can name.
+const COMPARE_PERIODS = 6;
 
 /// Smallest window a gesture may produce. Below a minute the buckets are wider
 /// than the window and the chart shows one point, which looks broken rather
@@ -71,6 +85,8 @@ const dom = {
   tableWrap: el("table-wrap"),
   table: el("value-table").querySelector("tbody"),
   toggleTable: el("toggle-table"),
+  compare: el("compare"),
+  legend: el("legend"),
   exportCsv: el("export-csv"),
   noteList: el("note-list"),
   dialog: el("note-dialog"),
@@ -219,15 +235,39 @@ async function loadDetail() {
   dom.foot.textContent = "Loading …";
   try {
     const query = new URLSearchParams({ node, sensor, from, to, points });
-    const [series, notes] = await Promise.all([
+    // The earlier windows are asked for in the same breath as the current one.
+    // Shifted by exactly the window length, so the clock lines up: with a 24 h
+    // window each earlier line covers the same hours of an earlier day, and
+    // with a 7 d window the same weekdays. That alignment is the entire point --
+    // see `COMPARE_PERIODS` and the caveat about months in the README.
+    const span = to - from;
+    const shifts = state.compare
+      ? Array.from({ length: COMPARE_PERIODS }, (_, i) => (i + 1) * span)
+      : [];
+    const [series, notes, ...earlier] = await Promise.all([
       getJSON(`/api/series?${query}`),
       getJSON(`/api/annotations?from=${from}&to=${to}`),
+      ...shifts.map((shift) =>
+        getJSON(
+          `/api/series?${new URLSearchParams({
+            node,
+            sensor,
+            from: from - shift,
+            to: to - shift,
+            points,
+          })}`,
+        ),
+      ),
     ]);
     state.series = series;
+    state.compareSeries = earlier
+      .map((s, i) => ({ shift: shifts[i], series: s }))
+      .filter((e) => e.series.points.length);
     state.notes = notes.filter((n) => !n.node || n.node === node || n.node === "fleet");
     renderDetail();
   } catch (e) {
     state.series = null;
+    state.compareSeries = [];
     dom.foot.innerHTML = `<span class="error">${esc(e.message)}</span>`;
   }
 }
@@ -365,6 +405,7 @@ function renderDetail() {
     dom.stats.innerHTML = "";
     dom.foot.textContent = s ? "No data in this range." : "";
     drawChart();
+    renderLegend();
     renderNotes();
     return;
   }
@@ -401,7 +442,46 @@ function renderDetail() {
     .join("");
 
   drawChart();
+  renderLegend();
   renderNotes();
+}
+
+/// How far back one overlay reaches, said the way a person would say it.
+function shiftLabel(ms) {
+  const days = ms / 86400e3;
+  const weeks = days / 7;
+  if (days >= 6.9 && Math.abs(weeks - Math.round(weeks)) < 0.02) {
+    return `−${Math.round(weeks)} w`;
+  }
+  if (days >= 0.95) return `−${Math.round(days)} d`;
+  return `−${Math.round(ms / 3600e3)} h`;
+}
+
+/// A legend, because from two lines upwards colour is not identity on its own --
+/// and here the "colour" is six steps of one hue, which is less nameable still.
+/// Each entry carries the window it stands for as a title, so "−3 d" can be
+/// checked rather than trusted.
+function renderLegend() {
+  if (!state.compare || !state.compareSeries.length || !state.series) {
+    dom.legend.hidden = true;
+    dom.legend.innerHTML = "";
+    return;
+  }
+  const swatch = (alpha, thickness) =>
+    `<span class="swatch" style="opacity:${alpha};height:${thickness}px"></span>`;
+  const when = (from, to) =>
+    `${new Date(from).toLocaleString(LOCALE)} – ${new Date(to).toLocaleString(LOCALE)}`;
+  const s = state.series;
+  dom.legend.innerHTML =
+    `<li title="${esc(when(s.from, s.to))}">${swatch(1, 2)}now</li>` +
+    state.compareSeries
+      .map(
+        (e, i) =>
+          `<li title="${esc(when(e.series.from, e.series.to))}">` +
+          `${swatch(Math.max(0.12, 0.5 - i * 0.07), 1.5)}${esc(shiftLabel(e.shift))}</li>`,
+      )
+      .join("");
+  dom.legend.hidden = false;
 }
 
 function renderNotes() {
@@ -473,6 +553,15 @@ function drawChart() {
     lo = Math.min(lo, p.lo);
     hi = Math.max(hi, p.hi);
   }
+  // Earlier windows count towards the scale by their mean only, not their band.
+  // They are drawn as a line, and letting one old outlier's envelope set the
+  // axis would squash the window actually being looked at.
+  for (const e of state.compareSeries) {
+    for (const p of e.series.points) {
+      lo = Math.min(lo, p.av);
+      hi = Math.max(hi, p.av);
+    }
+  }
   if (lo === hi) {
     lo -= 1;
     hi += 1;
@@ -510,16 +599,45 @@ function drawChart() {
     ctx.fillText(formatTime(t, s.to - s.from), x, plot.y + plot.h + 7);
   });
 
-  // The band first, the mean over it: the envelope is context for the line.
-  ctx.beginPath();
-  s.points.forEach((p, i) => {
-    const x = sx(p.t);
-    i === 0 ? ctx.moveTo(x, sy(p.hi)) : ctx.lineTo(x, sy(p.hi));
+  // Earlier windows first and thinner, so the current one is read as the
+  // subject and these as the backdrop. One hue at falling opacity rather than
+  // six colours: they are the same measurement at different times, which is an
+  // order, and an order wants a ramp -- six hues would say they are six
+  // different things.
+  ctx.strokeStyle = css("--series");
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = "round";
+  state.compareSeries.forEach((e, i) => {
+    ctx.globalAlpha = Math.max(0.12, 0.5 - i * 0.07);
+    ctx.beginPath();
+    e.series.points.forEach((p, j) => {
+      // Shifted forward onto the current window's axis: the whole comparison is
+      // "same hours, earlier day".
+      const x = sx(p.t + e.shift);
+      const y = sy(p.av);
+      j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
   });
-  for (let i = s.points.length - 1; i >= 0; i--) ctx.lineTo(sx(s.points[i].t), sy(s.points[i].lo));
-  ctx.closePath();
-  ctx.fillStyle = css("--series-band");
-  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // The band first, the mean over it: the envelope is context for the line.
+  //
+  // Dropped entirely while comparing. The band is the spread *within* this
+  // window, and the comparison is between windows -- one series' envelope laid
+  // over six other series' lines hides exactly what the mode was turned on to
+  // show, and it is the one element on the chart wide enough to do that.
+  if (!state.compareSeries.length) {
+    ctx.beginPath();
+    s.points.forEach((p, i) => {
+      const x = sx(p.t);
+      i === 0 ? ctx.moveTo(x, sy(p.hi)) : ctx.lineTo(x, sy(p.hi));
+    });
+    for (let i = s.points.length - 1; i >= 0; i--) ctx.lineTo(sx(s.points[i].t), sy(s.points[i].lo));
+    ctx.closePath();
+    ctx.fillStyle = css("--series-band");
+    ctx.fill();
+  }
 
   ctx.beginPath();
   s.points.forEach((p, i) => {
@@ -656,10 +774,27 @@ dom.chart.addEventListener("mousemove", (event) => {
   const c = channel();
   const note = state.notes.find((n) => Math.abs(n.at_ms - nearest.t) < (s.to - s.from) / 80);
   dom.tooltip.hidden = false;
+  // With the overlays on, the tooltip is where the comparison actually gets
+  // read: the eye can see the lines differ, and this says by how much.
+  const earlier = state.compareSeries
+    .map((e) => {
+      let best = null;
+      for (const p of e.series.points) {
+        if (!best || Math.abs(p.t + e.shift - nearest.t) < Math.abs(best.t + e.shift - nearest.t)) {
+          best = p;
+        }
+      }
+      if (!best) return "";
+      return `<br /><span style="color:var(--text-muted)">${esc(shiftLabel(e.shift))} ${esc(
+        withUnit(best.av, c.unit, num1),
+      )}</span>`;
+    })
+    .join("");
   dom.tooltip.innerHTML =
     `<strong>${esc(withUnit(nearest.av, c.unit))}</strong><br />` +
     `min ${esc(num1.format(nearest.lo))} · max ${esc(num1.format(nearest.hi))}<br />` +
     `<span style="color:var(--text-muted)">${esc(new Date(nearest.t).toLocaleString(LOCALE))}</span>` +
+    earlier +
     (note ? `<br /><span style="color:var(--text-secondary)">${esc(note.note)}</span>` : "");
   const left = Math.min(scale.sx(nearest.t) + 14, rect.width - dom.tooltip.offsetWidth - 8);
   dom.tooltip.style.left = `${Math.max(0, left)}px`;
@@ -794,6 +929,13 @@ function toCsv(c, s) {
   // CRLF, because that is what RFC 4180 says and what Excel is happiest with.
   return [head, ...rows].join("\r\n") + "\r\n";
 }
+
+dom.compare.addEventListener("click", () => {
+  state.compare = !state.compare;
+  dom.compare.setAttribute("aria-pressed", String(state.compare));
+  if (!state.compare) state.compareSeries = [];
+  loadDetail();
+});
 
 dom.exportCsv.addEventListener("click", () => {
   const s = state.series;
