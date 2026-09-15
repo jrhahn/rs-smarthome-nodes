@@ -1220,3 +1220,367 @@ _export(sz_lid, "schlafzimmer_lid")
 
 print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
     sz_tray.val().Volume() / 1000.0, sz_lid.val().Volume() / 1000.0))
+
+
+## ===========================================================================
+## Wasserzähler — camera tube for the two water meters
+## ===========================================================================
+##
+## Four printed parts, one design, printed twice -- once for the cold meter and
+## once for the hot one, the way climate_tray serves both kueche and bad:
+##
+##   wasserzaehler_tube    saddle that cradles the meter, and the barrel
+##   wasserzaehler_strap   the other half of the clamp
+##   wasserzaehler_ring    drop-in carrier for the illumination LEDs
+##   wasserzaehler_cap     lens plate, camera pocket, and the board bay
+##
+## Two things about this section are exceptions, and both are deliberate.
+##
+## The name points at no node. Every other part in this file is named for a
+## `NODE=` slug in node.rs; `wasserzaehler` is not one and never will be, since
+## these meters are read by an ESP32-CAM running jomjol's AI-on-the-edge-device
+## and not by this crate at all. It is here because this is where the CAD
+## toolchain is, and a second copy of that toolchain would cost more than one
+## stretched convention. The meters themselves are documented in
+## `nixos-private/docs/zaehler.md`.
+##
+## And this is the first part in this file that is not a box with a board in
+## it. It is an optical fixture, and every dimension below follows from four
+## measurements and one lens.
+##
+## What is being looked at. Two ZENNER Minomess A B.One, cold and hot, in the
+## riser shaft behind the bathroom mirror cabinet. They are capsule meters: a
+## white cylinder 64 mm across, held in a wall fitting by a union ring that
+## carries the calibration seal, dial facing straight out at the mirror. That
+## cylinder is the whole reason this part is simple -- a long, smooth,
+## concentric-by-construction clamping surface, so the tube goes on like a lens
+## hood and needs no alignment feature at all.
+##
+##   capsule outer diameter       64.0   caliper
+##   mirror frame to dial face    90.0   folding rule
+##   reading window (bezel)       37 x 23
+##   digit row                    32 x 4.7
+##
+## The last two are not caliper figures. They are ratios read off a square-on
+## photograph and scaled by the 64 mm. Honest enough for framing -- nothing
+## here touches the window -- but they do not get to become tolerances, and
+## nothing below depends on them except the check that the LED ring does not
+## shade the window.
+##
+## The optics, which set the length. The OV2640 with the stock ~66 deg lens
+## sees 55 deg horizontally, so the frame is 1.04 x the working distance. At 62
+## mm the frame is 64.4 mm wide, near enough the capsule's own 64 -- which is
+## the framing jomjol's alignment wants: it locks onto the bezel and the printed
+## text, not onto the digits, then crops the digit ROIs itself. Resolution is
+## not the constraint anywhere near here -- at 62 mm and UXGA the digit row
+## gets ~750 px, about 95 px per digit, against the 32 x 20 px the digit net
+## actually consumes.
+##
+## The barrel bore is 62 and not 65 because the step at z = 0 doubles as the
+## axial stop -- it sits on the meter's face and sets that 62 mm, instead of
+## leaving it to wherever the clamp happened to be tightened.
+##
+## 62 mm is also the most the depth allows, and that is the tight dimension in
+## this design:
+##
+##   dial face to lens front      62
+##   lens plate                    3
+##   board bay                    20
+##   ----------------------------------
+##   forward of the dial face     85   of 90 available
+##
+## Five millimetres, and they are five to the *frame*; the mirror door swings
+## in front of that. Check it against a closed door before printing the second.
+##
+## Why the clamp is two parts. The first draft had a slit sleeve with an ear
+## and one screw, like a shaft collar, and it would not have worked: the slit
+## ran 20 mm and then the barrel closed over it, so pulling the ear together
+## would have had to ovalise 60 mm of stiff tube. A collar can be a spring only
+## if it is a spring all the way along. Splitting it properly costs one part
+## and removes the question -- and it costs nothing in light, because the whole
+## clamp sits *behind* the dial face where there is no light path to spoil.
+##
+## The two halves stop 0.4 mm short of the split plane each, so the screws have
+## somewhere to travel; they close onto 64.0 and not onto each other.
+##
+## Why the bay has no back. Two requirements before they were conveniences.
+## `zaehler.md` needs the microSD reachable, because the firmware serves its
+## web UI and its whole configuration off the card. And the shaft is a
+## bathroom: a sealed tube against a cold-water capsule is a condensation trap,
+## and a fogged lens is a reading lost every time somebody showers. An open
+## back is the vent and the card slot at once -- which is why there are no vent
+## slots in the barrel, since those would only be a second way for light in
+## when the mirror is open.
+##
+## Lighting, and why it is not the flash LED. The board's own LED sits ~15 mm
+## off the lens axis. Its reflection in the dial glass lands half that off the
+## frame centre, ~7 mm, and the digit row is 32 mm wide: the highlight falls
+## inside the text. So the light comes from a ring at z = 8..16 pointing *back*
+## at the dial from 30 mm out -- 60 deg off axis, which throws the specular
+## lobe 60 deg to the other side and nowhere near the lens. The ring is its own
+## part on purpose: it is the one thing here that will want a second try, and
+## reprinting a 6 mm annulus is cheaper than reprinting the barrel.
+##
+## Its 52 mm bore is a sight line, not a fit, and it is also why the ring sits
+## at 14 and not at 8 where it started. The narrowest thing in the tube is meant
+## to be the 62 mm barrel bore and nothing else; the cone from the lens is 54 mm
+## across at z = 8 and a 52 mm ring clipped it -- 0.17 cm3 of ring inside the
+## view, found by intersecting the two rather than by trusting the arithmetic.
+## At z = 14 that cone is 48 mm and the same ring clears it by 2 mm all round.
+##
+## Print the tube and the cap standing on their LENS ENDS, saddle and bay
+## upward. That orientation matters on the tube: the barrel is a full annulus
+## and the saddle only half of one, so printed the other way up the missing
+## half would start 180 degrees of 3 mm ledge in mid-air. This way material
+## only ever disappears going up. The strap and the ring print flat.
+##
+## PETG, not PLA. The clamp is under sustained load in a warm damp room and PLA
+## creeps; the rest of this file is PLA because nothing in it is a spring.
+
+WU_CAP_D = 64.0                  # measured, caliper, 2026-09-15
+WU_CLAMP_BORE = WU_CAP_D         # the two halves close ONTO this, not past it
+WU_BORE = 62.0                   # barrel, and the reason is the shoulder below
+WU_OD = 71.0
+
+WU_WORK = 62.0                   # dial face to lens front; see the optics note
+WU_CLAMP_L = 24.0
+WU_Z0 = -WU_CLAMP_L              # -24, back end of the saddle
+WU_SPLIT = 0.4                   # each half stops this far short of y = 0
+
+# Its own clearance and pilot rather than the climate box's, deliberately: that
+# comment is three boxes up and it is the same trap. 3.5 is right here for the
+# same reason it is right there -- a heat-set M3 displaces plastic rather than
+# cutting it -- but it holds because it is restated, not because it is imported.
+WU_CLEAR, WU_PILOT = 3.4, 3.5
+
+WU_EAR_X = 40.0                  # centre; the 10 mm ear overlaps the barrel by
+WU_EAR_W = 10.0                  # 0.5 mm so it unions instead of touching
+WU_EAR_Y = 9.0
+WU_EAR_Z0, WU_EAR_H = -22.0, 20.0
+WU_SCREW_Z = -12.0
+
+# Illumination band. The seat is bored 4 mm into a 3 mm wall, so the wall has
+# to come from somewhere -- hence the band. 77 outside against a 69 bore leaves
+# 4 mm, which is what the wire holes pass through.
+WU_BAND_OD = 77.0
+WU_BAND_Z0, WU_BAND_Z1 = 11.0, 25.0
+WU_SEAT_D = 69.0
+WU_SEAT_Z0, WU_SEAT_Z1 = 14.0, 22.0
+WU_SEAT_LEAD = 3.5               # 45 deg lead-in; see the seat cut
+WU_WIRE_D = 3.2
+WU_WIRE_Z = 18.0
+
+WU_RING_OD = 68.6                # 0.4 into the 69 seat
+WU_RING_ID = 52.0                # sight line, not a fit -- see above
+WU_RING_T = 6.0
+WU_LED_D = 5.2                   # 5 mm LEDs, pointing back at the dial.
+                                 # Diffused wide-angle ones: a clear narrow-beam
+                                 # LED 12 mm from the glass paints a spot, not a
+                                 # wash, and six spots is six new highlights.
+WU_LED_R = 30.0
+WU_LED_N = 6
+
+# Cap. Slips over the barrel until it bottoms on the barrel's end face -- that
+# face is what sets the working distance, not the screw -- and one M3 grub in a
+# boss stops it walking off. No slit here either: this socket hangs off a solid
+# plate and would have had even less give than the collar did.
+WU_CAP_FIT = 0.4
+WU_CAP_BORE = WU_OD + WU_CAP_FIT             # 71.4
+WU_CAP_WALL = 2.5
+WU_CAP_OD = WU_CAP_BORE + 2 * WU_CAP_WALL    # 76.4
+WU_SOCKET_L = 12.0
+WU_PLATE = 3.0
+WU_BAY = 20.0
+WU_CAP_Z0 = WU_WORK - WU_SOCKET_L            # 50
+WU_LENS_D = 14.0                             # clears the cone with room to spare
+WU_GRUB_Z = WU_CAP_Z0 + 6.0
+
+# The camera module rides on a ribbon, so it is located by the cap and not by
+# the board. Nominal, from the OV2640 module that ships with these boards --
+# 8.5 mm square lens holder on a PCB about the same. NOT measured: the module
+# was still in its bag when this was drawn, and this pocket is the one feature
+# most likely to want a second print.
+WU_MOD_SQ = 8.8
+WU_MOD_L = 5.5
+WU_MOD_PCB = 11.0
+WU_BOSS = 16.0
+
+# Board retention, v1: a cable tie, not a screw pattern. The ESP32-CAM clones
+# do not agree on where their mounting holes are, and a tie takes any of them
+# while leaving the card edge clear.
+WU_TIE_W, WU_TIE_T = 4.2, 2.2
+WU_TIE_Z = 79.0
+
+# Flat USB cable in. A slot, not a gland: the cable is ~1.5 mm thick, and a
+# round gland would have wanted a bend radius the shaft has not got.
+WU_SLOT_W, WU_SLOT_H = 12.0, 3.0
+WU_SLOT_Z = 67.0
+
+
+def _along_y(d, length, at):
+    """Cylinder lying along +Y from at[1], centred on at[0]/at[2].
+
+    The two helpers at the top of this file both build along Z, and every box
+    in this file only ever needed that. A clamp screw runs across the axis, so
+    rather than guess at Workplane("XZ")'s extrusion direction, rotate a known
+    thing: about +X by -90 takes +Z to +Y.
+    """
+    return (
+        _cyl(d, length)
+        .rotate((0, 0, 0), (1, 0, 0), -90)
+        .translate(at)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tube
+# ---------------------------------------------------------------------------
+wu_tube = _cyl(WU_OD, WU_WORK, (0, 0, 0))
+wu_tube = wu_tube.union(
+    _cyl(WU_BAND_OD, WU_BAND_Z1 - WU_BAND_Z0, (0, 0, WU_BAND_Z0))
+)
+
+# Saddle: the same annulus, then everything on the +Y side of the split taken
+# away. The cut box is deliberately larger than the part in every direction;
+# only its -Y face does any work.
+wu_saddle = _cyl(WU_OD, WU_CLAMP_L, (0, 0, WU_Z0))
+wu_saddle = wu_saddle.cut(
+    _box(WU_OD + 4, WU_OD + 4, WU_CLAMP_L + 2,
+         (0, (WU_OD + 4) / 2 - WU_SPLIT, WU_Z0 - 1))
+)
+for sx in (-1, 1):
+    wu_saddle = wu_saddle.union(
+        _box(WU_EAR_W, WU_EAR_Y, WU_EAR_H,
+             (sx * WU_EAR_X, -WU_EAR_Y / 2 - WU_SPLIT, WU_EAR_Z0))
+    )
+wu_tube = wu_tube.union(wu_saddle)
+
+# Bores last, so the saddle's ears cannot fill them back in.
+# Two bores, and the 1.0 mm step between them at z = 0 is the whole point: it
+# lands flat on the meter's face, around the bezel, and that is what fixes the
+# working distance and squares the tube up. Without it the clamp holds the tube
+# wherever it happened to be pushed, and 62 mm becomes a hope.
+#
+# It costs field. The barrel bore is the narrowest aperture in the tube, so the
+# camera sees a 62 mm circle of a 64 mm capsule -- 1 mm of rim off each side.
+# The window is 37 mm and sits well inside that, and jomjol's alignment wants
+# the bezel and the printed text, both of which are inside it too.
+wu_tube = wu_tube.cut(_cyl(WU_BORE, WU_WORK + 1, (0, 0, 0)))
+wu_tube = wu_tube.cut(_cyl(WU_CLAMP_BORE, WU_CLAMP_L + 1, (0, 0, WU_Z0 - 1)))
+# LED seat, and the lead-in is not decoration. Printed lens-end-down, the
+# layers run from z = 62 towards the meter, so the seat's far face at z = 22 is
+# the last solid layer over a cavity and prints itself. Its near face would have
+# been 3.5 mm of annular cantilever starting in mid-air, and that is the face
+# the ring seats against. A 45 deg lead-in instead: going that way the bore
+# closes gradually and holds itself up.
+wu_tube = wu_tube.cut(
+    _cyl(WU_SEAT_D, WU_SEAT_Z1 - WU_SEAT_Z0, (0, 0, WU_SEAT_Z0))
+)
+wu_tube = wu_tube.cut(
+    cq.Workplane("XY").circle(WU_BORE / 2)
+    .workplane(offset=WU_SEAT_LEAD).circle(WU_SEAT_D / 2)
+    .loft().translate((0, 0, WU_SEAT_Z0 - WU_SEAT_LEAD))
+)
+
+# Clamp screws: the insert lives in the saddle, so taking the strap off does
+# not take the thread with it.
+for sx in (-1, 1):
+    wu_tube = wu_tube.cut(
+        _along_y(WU_PILOT, WU_EAR_Y + 2,
+                 (sx * WU_EAR_X, -WU_EAR_Y - WU_SPLIT - 1, WU_SCREW_Z))
+    )
+
+# LED wiring, out through the band on the side away from the ears.
+for sx in (-1, 1):
+    wu_tube = wu_tube.cut(
+        _along_y(WU_WIRE_D, WU_BAND_OD,
+                 (sx * 14.0, -WU_BAND_OD / 2 - 1, WU_WIRE_Z))
+    )
+
+display(wu_tube)
+_export(wu_tube, "wasserzaehler_tube")
+
+# ---------------------------------------------------------------------------
+# Strap
+# ---------------------------------------------------------------------------
+wu_strap = _cyl(WU_OD, WU_CLAMP_L, (0, 0, WU_Z0))
+wu_strap = wu_strap.cut(
+    _box(WU_OD + 4, WU_OD + 4, WU_CLAMP_L + 2,
+         (0, -(WU_OD + 4) / 2 + WU_SPLIT, WU_Z0 - 1))
+)
+for sx in (-1, 1):
+    wu_strap = wu_strap.union(
+        _box(WU_EAR_W, WU_EAR_Y, WU_EAR_H,
+             (sx * WU_EAR_X, WU_EAR_Y / 2 + WU_SPLIT, WU_EAR_Z0))
+    )
+wu_strap = wu_strap.cut(_cyl(WU_CLAMP_BORE, WU_CLAMP_L + 2, (0, 0, WU_Z0 - 1)))
+for sx in (-1, 1):
+    wu_strap = wu_strap.cut(
+        _along_y(WU_CLEAR, WU_EAR_Y + 2,
+                 (sx * WU_EAR_X, WU_SPLIT - 1, WU_SCREW_Z))
+    )
+
+display(wu_strap)
+_export(wu_strap, "wasserzaehler_strap")
+
+# ---------------------------------------------------------------------------
+# LED ring
+# ---------------------------------------------------------------------------
+wu_ring = _cyl(WU_RING_OD, WU_RING_T)
+wu_ring = wu_ring.cut(_cyl(WU_RING_ID, WU_RING_T + 2, (0, 0, -1)))
+for i in range(WU_LED_N):
+    a = math.radians(360.0 * i / WU_LED_N)
+    wu_ring = wu_ring.cut(
+        _cyl(WU_LED_D, WU_RING_T + 2,
+             (WU_LED_R * math.cos(a), WU_LED_R * math.sin(a), -1))
+    )
+
+display(wu_ring)
+_export(wu_ring, "wasserzaehler_ring")
+
+# ---------------------------------------------------------------------------
+# Cap
+# ---------------------------------------------------------------------------
+wu_cap = _cyl(WU_CAP_OD, WU_SOCKET_L + WU_PLATE + WU_BAY, (0, 0, WU_CAP_Z0))
+wu_cap = wu_cap.cut(_cyl(WU_CAP_BORE, WU_SOCKET_L + 1, (0, 0, WU_CAP_Z0 - 1)))
+wu_cap = wu_cap.cut(_cyl(WU_CAP_BORE, WU_BAY + 1, (0, 0, WU_WORK + WU_PLATE)))
+wu_cap = wu_cap.cut(_cyl(WU_LENS_D, WU_PLATE + 2, (0, 0, WU_WORK - 1)))
+
+# Camera boss, standing off the back of the lens plate: a square pocket for the
+# lens holder, then a wider relief so the module's own PCB has somewhere to sit.
+wu_cap = wu_cap.union(
+    _box(WU_BOSS, WU_BOSS, WU_MOD_L + 3.0, (0, 0, WU_WORK + WU_PLATE))
+)
+wu_cap = wu_cap.cut(
+    _box(WU_MOD_SQ, WU_MOD_SQ, WU_MOD_L, (0, 0, WU_WORK + WU_PLATE))
+)
+wu_cap = wu_cap.cut(
+    _box(WU_MOD_PCB, WU_MOD_PCB, 4.0, (0, 0, WU_WORK + WU_PLATE + WU_MOD_L))
+)
+
+for sy in (-1, 1):
+    wu_cap = wu_cap.cut(
+        _box(WU_TIE_W, 3 * WU_CAP_WALL, WU_TIE_T,
+             (0, sy * WU_CAP_BORE / 2, WU_TIE_Z))
+    )
+wu_cap = wu_cap.cut(
+    _box(3 * WU_CAP_WALL, WU_SLOT_W, WU_SLOT_H,
+         (WU_CAP_BORE / 2, 0, WU_SLOT_Z))
+)
+
+# Grub screw boss.
+wu_cap = wu_cap.union(
+    _box(12.0, 6.0, 10.0, (0, WU_CAP_OD / 2 + 1.0, WU_CAP_Z0 + 1.0))
+)
+wu_cap = wu_cap.cut(
+    _along_y(WU_PILOT, 12.0, (0, WU_CAP_BORE / 2 - 1.0, WU_GRUB_Z))
+)
+
+display(wu_cap)
+_export(wu_cap, "wasserzaehler_cap")
+
+print("wasserzaehler tube %.1f cm3  strap %.1f cm3  ring %.1f cm3  cap %.1f cm3" % (
+    wu_tube.val().Volume() / 1000.0,
+    wu_strap.val().Volume() / 1000.0,
+    wu_ring.val().Volume() / 1000.0,
+    wu_cap.val().Volume() / 1000.0))

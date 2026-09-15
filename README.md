@@ -221,6 +221,15 @@ from. The clamps the file *started* as were retired in `f858d60` and are not
 these — `git show d0df819:models.py` still has the originals, which put the wire
 hole where the bar puts it rather than on the box's centre line.
 
+The `wasserzaehler_*` parts are the one exception to the naming rule. Every
+other part here is named after a `NODE=` slug from [`src/node.rs`](src/node.rs),
+and `wasserzaehler` is not one and never will be: it is a camera tube for the
+flat's two water meters, which are read by an ESP32-CAM running jomjol's
+AI-on-the-edge-device, not by this crate. It lives here because this is where
+the CAD toolchain lives, and a second copy of it elsewhere would be worse than
+one stretched convention. The meters, the board criteria and the reasoning
+behind the camera route are in `nixos-private/docs/zaehler.md`.
+
 ```bash
 nix develop .#cad        # separate shell: OpenCASCADE is ~500 MB, cargo has no use for it
 python models.py         # writes cad-models/*.stl and *.step
