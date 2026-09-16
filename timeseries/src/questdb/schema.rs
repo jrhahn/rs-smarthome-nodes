@@ -50,6 +50,31 @@ pub fn create_status_ddl(table: &str, retention: &Retention) -> String {
     )
 }
 
+/// Make writing the same reading twice a no-op.
+///
+/// `(timestamp, node, sensor)` is the natural key of a reading: one channel
+/// cannot hold two values at the same instant. With deduplication on, a write
+/// of a row that is already there replaces it instead of adding a second copy,
+/// so the `_1m` view keeps averaging the distinct readings rather than however
+/// many times each one happened to arrive.
+///
+/// Nothing sends a duplicate today: the timestamp is `now_micros()` at the
+/// moment of receipt, so two deliveries of one reading are two different rows
+/// and this never fires. It is here for the shape that makes it fire -- a
+/// reading carrying its own timestamp from the node, which is what would let
+/// the retained value on a state topic be stored on reconnect instead of
+/// discarded (see `mqtt::handle`). That is only safe if re-reading the same
+/// retained value is idempotent, and this is what makes it so.
+///
+/// An `ALTER` rather than a clause on the `CREATE`, for the same reason
+/// `alter_ttl_ddl` is one: the table on the home server already exists, and
+/// `IF NOT EXISTS` leaves it exactly as it is. Re-issuing it is not an error --
+/// QuestDB treats the key list as an override -- so it can go out on every
+/// start like the TTL does.
+pub fn alter_dedup_ddl(table: &str) -> String {
+    format!("ALTER TABLE '{table}' DEDUP ENABLE UPSERT KEYS(timestamp, node, sensor)")
+}
+
 /// Re-apply the retention to a table that already exists.
 pub fn alter_ttl_ddl(table: &str, retention: &Retention) -> Option<String> {
     retention
@@ -132,6 +157,19 @@ pub async fn ensure(
     client
         .exec(&super::annotations::add_voided_ddl(annotations_table))
         .await?;
+
+    // Not fatal either: deduplication needs a WAL table, and a database that
+    // refuses it should keep ingesting rather than fail to start. Losing it
+    // costs nothing until a reading brings its own timestamp -- see
+    // `alter_dedup_ddl` -- but it is the one thing that has to be in place
+    // *before* that, so it goes out on every start.
+    if let Err(e) = client.exec(&alter_dedup_ddl(table)).await {
+        warn!(
+            table,
+            error = %e,
+            "could not enable deduplication; a reading ingested twice would be stored twice"
+        );
+    }
 
     for t in [table, status_table] {
         if let Some(ddl) = alter_ttl_ddl(t, retention) {
@@ -345,6 +383,36 @@ mod tests {
                 other => panic!("unknown bucket {other}"),
             };
             assert!(rank(tier.partition) >= bucket_rank, "{}", tier.suffix);
+        }
+    }
+
+    #[test]
+    fn a_reading_is_keyed_by_its_channel_and_its_instant() {
+        assert_eq!(
+            alter_dedup_ddl("readings"),
+            "ALTER TABLE 'readings' DEDUP ENABLE UPSERT KEYS(timestamp, node, sensor)"
+        );
+    }
+
+    #[test]
+    fn the_dedup_key_is_the_designated_timestamp_plus_real_columns() {
+        // QuestDB refuses an UPSERT KEYS list that omits the designated
+        // timestamp, and a key of (node, sensor) alone would collapse each
+        // channel's whole history into a single row -- every reading upserting
+        // over the last one. Naming a column the table does not have is the
+        // other way to get this wrong, so both are checked against the DDL that
+        // creates it rather than against a literal.
+        let ddl = alter_dedup_ddl("readings");
+        let keys = ddl
+            .split("UPSERT KEYS(")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(')');
+        assert!(keys.split(", ").any(|k| k == "timestamp"), "{ddl}");
+
+        let create = create_table_ddl("readings", &ttl());
+        for key in keys.split(", ") {
+            assert!(create.contains(key), "{key} is not a column: {create}");
         }
     }
 
