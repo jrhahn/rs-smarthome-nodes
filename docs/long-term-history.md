@@ -7,17 +7,21 @@ problem. The service that does the keeping is
 
 ## What the fleet produces
 
-Thirty-one channels, at the cadences `node.rs` configures:
+Forty-one channels, at the cadences `node.rs` configures — every node also
+carries `reset_reason` and `reset_count`, two per node on top of its sensors:
 
 | Node | Channels | Every | Per day |
 | --- | --- | --- | --- |
-| `schlafzimmer` | temperature, humidity, co2, scd41_temperature, scd41_humidity, rssi | 60 s | 8,640 |
-| `wohnzimmer` | the same six minus co2's siblings, plus voc_index, nox_index | 60 s | 11,520 |
+| `schlafzimmer` | temperature, humidity, co2, scd41_temperature, scd41_humidity, rssi, reset ×2 | 60 s | 11,520 |
+| `wohnzimmer` | the same six minus co2's siblings, plus voc_index, nox_index, reset ×2 | 60 s | 14,400 |
 | `wohnzimmer` | pm25, pm10, pm25_raw, pm10_raw | 900 s | 384 |
-| `kueche`, `bad` | temperature, humidity, rssi | 120 s | 2,160 each |
-| `terrasse` | weight, visits, temperature, humidity, battery ×2, rssi | ~600 s | ~1,000 |
+| `kueche`, `bad` | temperature, humidity, rssi, reset ×2 | 120 s | 3,600 each |
+| `terrasse` | weight, visits, temperature, humidity, battery ×2, rssi, reset ×2 | ~600 s | ~1,300 |
 
-**≈ 25,900 readings a day.**
+**≈ 34,400 readings a day**, up from ~25,900 before the reset diagnostics.
+The two extra channels per node are constant almost all the time, which
+compresses to nearly nothing — see the disk figures below, which were measured
+on the earlier shape and are not invalidated by a column that repeats.
 
 ## What that costs on disk
 

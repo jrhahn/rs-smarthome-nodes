@@ -329,6 +329,52 @@ page.
 
 ## Open across the fleet
 
+- **The whole fleet reports why it last restarted.** Added 2026-09-16, after
+  the outdoor node twice went silent mid-cadence with a healthy cell and came
+  back only once power was removed entirely. Two entities per node:
+
+  | Topic | Meaning |
+  | --- | --- |
+  | `<node>/reset_reason` | code of the last boot that was **not** a deep-sleep wake |
+  | `<node>/reset_count` | how many such boots since power was last removed |
+
+  The codes are the hardware's own `SocResetReason` discriminants, published as
+  numbers because the QuestDB archiver stores values as doubles and a string
+  would not survive the trip. Decimal is what lands in the archive; hex is what
+  the boot banner prints:
+
+  | dec | hex | Meaning |
+  | --- | --- | --- |
+  | 0 | — | nothing but deep sleep since power-on — **the healthy reading** |
+  | 1 | 0x01 | power on: the cell was disconnected, or the protection board cut |
+  | 3 | 0x03 | software reset of the digital core |
+  | 5 | 0x05 | deep-sleep wake — routine, never latched, so it never appears |
+  | 7 | 0x07 | **main watchdog 0** — the app hung and was rebooted |
+  | 8 | 0x08 | main watchdog 1 |
+  | 9 | 0x09 | RTC watchdog |
+  | 15 | 0x0F | **brownout** — the supply collapsed |
+  | 16 | 0x10 | RTC watchdog, core and RTC together |
+  | 18 | 0x12 | super watchdog |
+  | 21 | 0x15 | USB UART reset — a host attached, e.g. `espflash` |
+  | 22 | 0x16 | USB JTAG reset |
+
+  **How to read it when a node goes quiet**, which is the whole point:
+
+  - **7, 9, 16 or 18 appearing regularly** — it hangs often and usually recovers
+    by itself; the silences are the times it did not.
+  - **15** — the supply collapses under radio load. On a cell reading 3.7 V that
+    means an aged cell with high internal resistance, not a flat one.
+  - **21 or 22** — someone attached a cable. Expected after flashing, and worth
+    recognising so it is not mistaken for a fault.
+  - **still 0 across a silence** — a true hang: the core stopped and the
+    watchdog did not fire either. That is the 2026-09-16 case, and it is the one
+    with no explanation yet. Only removing power recovered it — pulling USB does
+    nothing while the cell is connected, because the board is never unpowered.
+
+  `reset_count` is what turns a single event into a trend: one is ambiguous, a
+  count climbing over days is a node rebooting in a loop nobody has noticed.
+  Both come out of RTC RAM, which survives a watchdog reset, a brownout and a
+  software reset — so the evidence outlives the event it describes.
 - **The whole fleet reports `rssi`.** The four indoor nodes were flashed
   2026-09-10 (`bad` −58, `kueche` −49, `schlafzimmer` −49, `wohnzimmer` −58 dBm)
   and `terrasse` followed on 2026-09-13 at −51. All five sit in the top bar, so
