@@ -197,6 +197,34 @@ There is a third answer that does not touch the budget at all: stop discharging
 the cell on a schedule and let a panel carry it. That is [solar.md](solar.md),
 and it is the only one of the three that also stops the box being opened.
 
+### The measurement happened, and the estimate was 3× optimistic
+
+Measured 2026-09-16, and it settles the paragraphs above: the node draws
+**~10 mA**, not 3.3 mA. Runtime on the 2000 mAh cell is 8–9 days, not 25.
+
+It needed no bench meter. The QuestDB archiver on the family server records
+`battery_voltage`, and the discharge curve *is* the measurement — 4.14 V →
+3.70 V over 3.5 days, roughly 840 mAh, i.e. ~10 mA averaged over everything the
+node actually does, at the real duty cycle and the real temperature. That is
+strictly better than a shunt reading of the standing states, which is what this
+page asked for: no extrapolation from datasheet currents, no assumption about
+how long a connect takes.
+
+**It also answers the second question, and the answer is no.** The connect rate
+over those days was 143/day ≈ 6/h — exactly what the estimate assumed, so joins
+are not slow or failing. The radio is therefore 6 × 3 s × 110 mA ≈ 0.55 mA,
+which was the right figure all along; only the denominator changed. So the radio
+is **~5 %** of the budget, not 17 %, and the two options below cap out near
+1.05× runtime rather than 1.2×. **Neither is worth building.**
+
+Where the other ~9.5 mA goes is now the open question. The candidates are the
+ones this page already names as unknown: the light-sleep floor with this chip's
+`RtcSleepConfig` default, and the amplifier's on-time, which at ~500 ms of every
+2 s idle cycle is a 25 % duty on ~4.5 mA. The cheap experiment is the runtime
+knob rather than a meter — `idle_interval` went 2 s → 5 s on 2026-09-16, and if
+the poll cycle is the dominant term the discharge curve will visibly flatten
+within a week.
+
 ### Measuring it with what you have
 
 The measurement above does not need a lab supply or a current probe, which is

@@ -409,6 +409,14 @@ page.
   15 ms under a 15.5 ms maximum is wrong whether or not it bit last night.
   Proving it needs a capture over days, long enough for the rare case to appear
   and show that it only hits the unfixed nodes.
+- **Two runtime knobs were changed on 2026-09-16**, both retained on the broker
+  and so surviving a reflash: `idle_interval` 2 s → **5 s** and `threshold`
+  10 g → **25 g**. The first is the only cheap lever on the dominant energy
+  term (see [`base-platform.md`](base-platform.md)); the price is that visits
+  shorter than ~5 s are missed and the published duration is now known only to
+  ±5 s. The second is against wind: 78 "visits" were logged on 2026-09-13 with
+  the feeder mounted outdoors, and every false one costs a Wi-Fi connect plus up
+  to 60 s awake watching it. Judge both from the discharge curve in a week.
 - **Mains nodes self-heat.** Measured 2026-09-04 on `schlafzimmer`: about 0.9 °C
   at the board, separated from room warming by using the unmoved SCD41 as a
   control. Mount temperature sensors away from the board on any node that

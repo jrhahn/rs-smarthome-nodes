@@ -9,16 +9,26 @@
 
 ## Why bother
 
-The node's estimated average draw is **~3.3 mA** ([base-platform.md](base-platform.md#where-the-battery-actually-goes)),
-which is:
+The node's average draw is **~10 mA**, measured 2026-09-16 and three times the
+3.3 mA this page used to assume:
 
-| | |
-| --- | --- |
-| per day | ~79 mAh ≈ **0.3 Wh** |
-| on the 2000 mAh cell | **~25 days** |
+| | measured | previously assumed |
+| --- | --- | --- |
+| average current | **~10 mA** | 3.3 mA |
+| per day | **~240 mAh ≈ 0.96 Wh** | 79 mAh ≈ 0.3 Wh |
+| on the 2000 mAh cell | **~8–9 days** | ~25 days |
 
-Twenty-five days is not a crisis, so the case for solar is not runtime. It is
-that **the box never has to be opened again**. The outdoor board has already
+**How it was measured**, since `base-platform.md` has parked every energy
+question behind exactly this number: the QuestDB archiver on the family server
+has been recording `battery_voltage` since 2026-09-13, and the discharge curve
+is the measurement. 4.14 V → 3.70 V over 3.5 days is roughly 840 mAh of a
+2000 mAh cell, i.e. ~10 mA. No bench meter, no shunt — and better than either,
+because it integrates every radio burst and every visit at the real duty cycle
+and the real temperature. The connect rate over those days was 143/day ≈ 6/h,
+exactly what the old estimate assumed, so the radio is not where the extra went.
+
+Eight days still is not a crisis, and the case for solar is not runtime anyway.
+It is that **the box never has to be opened again**. The outdoor board has already
 lost its USB port once, and every recharge is another cycle on a connector that
 lives in the rain inside an enclosure whose whole shape is an argument about
 keeping water out. A node that tops itself up is a node whose lid stays shut.
@@ -28,20 +38,28 @@ keeping water out. A node that tops itself up is a node whose lid stays shut.
 [Waveshare 18 V / 10 W polysilicon](https://www.berrybase.de/waveshare-polysilizium-solarpanel-18v-10w-36-zellen-340x232x17-mm-20-umwandlungseffizienz-ip67),
 €11.50:
 
+Figures below are **off the panel's own label**, which differs slightly from the
+shop listing (that said Vmp 17.6 V, Voc 21.6 V) — the label wins:
+
 | | |
 | --- | --- |
-| Vmp / Imp | 17.6 V / 0.57 A |
-| Voc / Isc | 21.6 V / 0.61 A |
+| Pm | 10 W (18 V × 0.55 A = 9.9 W — a self-consistent label) |
+| Vmp / Imp | 18 V / 0.55 A |
+| Voc / Isc | **22.3 V** / 0.6 A |
 | Size, weight | 340 × 232 × 17 mm, 935 g |
 | Sealing, lead | IP67, 90 cm to a 3.5 × 1.35 mm DC plug |
+| Test condition | AM1.5, 1000 W/m², 25 °C |
 
-10 W is roughly thirty times what the node needs, and that is the point. The
-sizing case for a solar node in Germany is not the annual average, it is the
-worst week in December. At ~1 peak-sun-hour a day and 70 % system efficiency
-this panel returns ~7 Wh/day against a 0.3 Wh/day demand — a margin of about
-23×, which means the buffer never gets drawn down and the question stops being
-interesting. A 2 W panel would also work, carried by the cell through the dark
-weeks; this one removes the need to think about it.
+**Voc is a winter number, not a summer one.** Silicon's voltage coefficient is
+about −0.3 %/K, so cold raises it: ~24.0 V at 0 °C, ~25.3 V at −20 °C. That is
+the figure every part on the charger has to survive, and it is 3 V higher than
+the shop listing implied.
+
+At ~1 peak-sun-hour a day in December and 70 % system efficiency the panel
+returns ~7 Wh/day against the measured 0.96 Wh/day demand — a margin of about
+**7×**. That was 23× while this page believed the 3.3 mA estimate; the real
+consumption ate two thirds of the headroom and the sizing still holds
+comfortably.
 
 Two consequences follow from picking 18 V, and both are load-bearing:
 
@@ -87,8 +105,9 @@ it, because the hardware is open: schematic, BOM and KiCad files are
 which is the only reason any of the following is knowable rather than assumed.
 
 Its listed range is "6–18 V", which describes the **MPPT adjustment range, not
-the voltage rating** — the parts are comfortable well past this panel's 21.6 V
-Voc (~23.5 V on a cold clear day). Read off the V1.2.1 BOM:
+the voltage rating**. That wording is a trap worth naming, because it reads like
+the board cannot take this panel — it can. Read off the V1.2.1 BOM, against the
+label's 22.3 V Voc rising to ~25.3 V at −20 °C:
 
 | Ref | Part | Rating |
 | --- | --- | --- |
@@ -97,9 +116,20 @@ Voc (~23.5 V on a cold clear day). Read off the V1.2.1 BOM:
 | D4 | RBR5LAM30A Schottky | 30 V / 5 A |
 | U1 | CN3791 | 28 V operating, 30 V absolute |
 
-Nothing on the board is marginal against this panel. On a no-name module none
-of that is documented, and the input capacitor is the part most likely to have
-been chosen at 25 V.
+Only `D4` is anywhere near its limit — 25.3 V on a 30 V part is 84 % of rating,
+in an application where it carries 100 mA and stays cold. Everything else has
+room. On a no-name module none of this is documented, and the input capacitor is
+the part most likely to have been chosen at 25 V.
+
+**The alternative, and why not:** the **Youmile SD30CRMA** is the same CN3791 on
+a smaller board (45 × 20 × 15 mm), sold in 9 V / 12 V / 18 V MPPT variants —
+marked by hand on a printed field, not a solder bridge — and rated 18–28 V in,
+which covers this panel by the vendor's own spec. `RCS` works identically. It
+was rejected for one reason: **its charge voltage is a continuously adjustable
+trimpot, 1.2–21 V, shipped at an arbitrary setting.** Its own documentation says
+to set the output before connecting a battery. On a sealed outdoor node that is
+a step that can be forgotten once and burn a cell; the Soldered board's 4.2 V is
+fixed by the chip and cannot be got wrong. Smaller board, worse failure mode.
 
 ### The one change that is not optional
 
@@ -210,6 +240,46 @@ enclosure answers below and not an electrical one.
 
 Nothing about the cell, the protection board or the divider changes.
 
+### The output side is one node, so the connectors are a convenience
+
+`K3` (JST-PH) and the `OUT±` screw terminals sit on the same `BAT` net, in
+parallel with `C7` — the schematic shows them joined. So which of the two the
+cell uses and which the XIAO uses is a packaging decision, not an electrical
+one. The obvious split is the cell on `K3`, since a 1S pack already carries a
+PH pigtail, and the XIAO on the terminals.
+
+What is *not* free is the topology: **charger output, XIAO and the protection
+board's `P` side all meet on that one node, and the cell hangs off the board's
+`B+`/`B−` behind it.** Check that the pack's pigtail really comes from `P+`/`P−`
+and not from the cell tabs — on a pack with the protection board taped to the
+cell that is automatic, on a separately fitted board it is a wiring choice you
+can get wrong.
+
+### Input polarity is not recoverable
+
+**There is no reverse-polarity protection on the input.** The BOM's only power
+diode is `D4`, the buck's freewheel; `D1`/`D2`/`D5` are the LEDs. The input
+sits on the chip. Worse, `C3` is a **polarised 220 µF electrolytic** — reverse
+it and it vents.
+
+So measure, do not infer from wire colour: panel in daylight, meter on DC volts,
+red probe on the plug's **inner pin**, black on the outer sleeve. A positive
+reading means the inner pin is positive, which is the usual case but not a
+guarantee. Then put a piece of red tape on the positive lead before it goes into
+the terminal — the measurement happens once, in daylight, with a meter in hand;
+the reassembly happens later, in the dark, from memory.
+
+### Do not cut the panel lead
+
+The panel ships with its own IP67-moulded 90 cm lead and a DC plug. Cutting it
+opens the one joint that is already properly sealed. Use the mating **DC coupler**
+(part 3) and land its thin pigtail in the screw terminals.
+
+That also buys a safety property worth having deliberately: **the panel and the
+cell then end in different connectors** and cannot be swapped. Both on JST-PH
+would eventually put 22 V across a 3.7 V cell, and "eventually" is a spring
+evening with the box open for the third time.
+
 ## Parts
 
 | # | Part | Spec | Source | ~Price |
@@ -280,12 +350,19 @@ will be wrong from the day this is fitted.
 
 ## Before you build any of this
 
-- **The 3.3 mA is an estimate, not a measurement.** The whole sizing rests on
-  it, and the only measured number underneath it is a 269 ms boot time. The two
-  terms that would move it most are the load cell's bridge resistance (a 350 Ω
-  cell triples that term) and the light-sleep floor. It settles the panel sizing
-  and the radio question at once, and it does not need a bench meter — see
-  [Measuring it with what you have](base-platform.md#measuring-it-with-what-you-have).
-- **The battery divider has never been flashed to hardware.** `src/battery.rs`
-  is committed and untested on the board. It is also the only instrument that
-  can tell you whether any of this works, so it wants to be working *first*.
+- **The consumption figure is now measured, and the old estimate was wrong by
+  3×.** See [Why bother](#why-bother). What has *not* been measured is where the
+  extra 7 mA goes: the connect rate matched the old assumption exactly, so it is
+  not the radio. The light-sleep floor and the amplifier's on-time are the
+  candidates, and they are what to attack if eight days is not enough — not the
+  publishes, which are ~5 % of the budget.
+- **The divider works.** `src/battery.rs` is flashed and reporting; it is what
+  produced the measurement above. It still wants trimming: the firmware read
+  4.09–4.12 V against a multimeter's 4.05 V behind the BMS, which is what
+  `R_TOP_KOHM` / `R_BOTTOM_KOHM` are for. Do it on battery, not on the charger
+  rail, or you are calibrating against the charger.
+- **Runtime knobs were changed on 2026-09-16** and the sizing above predates
+  them: `idle_interval` 2 s → 5 s and `threshold` 10 g → 25 g, both retained on
+  the broker. The first attacks the dominant term directly, the second stops
+  wind from buying a Wi-Fi connect. Re-read the discharge curve in a few days
+  before trusting the 8–9 day figure; it should improve.
