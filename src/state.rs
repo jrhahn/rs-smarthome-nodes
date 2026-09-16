@@ -212,3 +212,54 @@ pub fn is_cold_boot() -> bool {
 pub fn mark_booted() {
     set_flag(FLAG_BOOTED, true);
 }
+
+// --- Reset diagnostics -------------------------------------------------------
+
+/// Reset cause of the most recent boot that was **not** an ordinary deep-sleep
+/// wake, as the raw `SocResetReason` discriminant. Zero until one happens.
+///
+/// Latched rather than read live because the two do not line up in time: a
+/// battery node wakes some hundreds of times between publishes, so the boot
+/// that carries the interesting cause is almost never the boot that gets to
+/// talk to the broker. Holding it here means the next publish carries it.
+///
+/// RTC RAM is exactly the right store for this. A watchdog reset, a brownout
+/// and a software reset all leave it intact, so the evidence survives the event
+/// it describes; only removing power clears it, and that is a power-on reset —
+/// which this then records as itself.
+#[ram(rtc_fast, persistent)]
+static mut RESET_REASON: u32 = 0;
+
+/// How many such resets since power was last removed. One alone is ambiguous;
+/// a count climbing over days is a node rebooting in a loop nobody has noticed,
+/// which is the failure this whole pair exists to make visible.
+#[ram(rtc_fast, persistent)]
+static mut RESET_COUNT: u32 = 0;
+
+/// Deep-sleep wake (`SocResetReason::CoreDeepSleep`). The expected cause on
+/// this node and the one worth filtering out; everything else is a report.
+pub const RESET_DEEP_SLEEP: u32 = 0x05;
+
+/// Record this boot's reset cause. Call once, early. A deep-sleep wake is the
+/// steady state and is ignored, so what stays latched is the last thing that
+/// was not routine.
+pub fn note_reset(code: u32) {
+    if code == RESET_DEEP_SLEEP {
+        return;
+    }
+    unsafe {
+        core::ptr::addr_of_mut!(RESET_REASON).write(code);
+        let n = core::ptr::addr_of!(RESET_COUNT).read();
+        core::ptr::addr_of_mut!(RESET_COUNT).write(n.saturating_add(1));
+    }
+}
+
+/// The latched cause, or zero if nothing but deep sleep has happened.
+pub fn last_reset() -> u32 {
+    unsafe { core::ptr::addr_of!(RESET_REASON).read() }
+}
+
+/// How many non-routine resets since power-on.
+pub fn reset_count() -> u32 {
+    unsafe { core::ptr::addr_of!(RESET_COUNT).read() }
+}

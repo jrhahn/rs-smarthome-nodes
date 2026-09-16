@@ -38,6 +38,7 @@ pub mod discovery;
 pub mod ds18b20;
 pub mod node;
 pub mod presence;
+pub mod reset_reason;
 pub mod rssi;
 pub mod sensors;
 pub mod wifi;

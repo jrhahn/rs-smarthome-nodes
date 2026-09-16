@@ -66,7 +66,7 @@ use rust_mqtt::{
 
 use node::{NodeConfig, Provision};
 use rs_smarthome_nodes::{
-    battery, config, discovery, ds18b20, hx711, node, platform, presence, rssi, sensors::scale,
+    battery, config, discovery, ds18b20, hx711, node, platform, presence, reset_reason, rssi, sensors::scale,
     state, wifi,
 };
 
@@ -307,6 +307,19 @@ async fn main(spawner: Spawner) {
     // Which network? Credentials stored over the serial console win over the
     // ones compiled in. Resolved before the radio comes up, and before the
     // console window below, so provisioning can report what it is replacing.
+    // Before anything can overwrite it: why this boot happened. A deep-sleep
+    // wake is the steady state and is dropped; anything else is latched in RTC
+    // RAM so the next publish can carry it. See `reset_reason` for why this is
+    // worth the two numbers.
+    state::note_reset(reset_reason::code());
+    if state::last_reset() != 0 {
+        warn!(
+            "last non-routine reset: code 0x{:02X}, {} since power-on",
+            state::last_reset(),
+            state::reset_count()
+        );
+    }
+
     let source = wifi::init(built_in_credentials());
     match wifi::active() {
         Some(credentials) => info!(
@@ -1008,6 +1021,21 @@ async fn collect_samples(
             }
             None => warn!("DS18B20 not responding; skipping temperature"),
         }
+    }
+
+    // Diagnostics, on every node: what the last non-routine reset was, and how
+    // many there have been since power-on. Both come straight out of RTC RAM,
+    // so this costs no hardware access and works on the cycles where the radio
+    // never comes up. Zero means nothing but deep sleep has happened, which is
+    // the healthy reading.
+    {
+        let mut value = heapless::String::new();
+        reset_reason::write_code(&mut value, state::last_reset());
+        platform::push_sample(&mut samples, node::Slot::on(), "reset_reason", value);
+
+        let mut value = heapless::String::new();
+        reset_reason::write_code(&mut value, state::reset_count());
+        platform::push_sample(&mut samples, node::Slot::on(), "reset_count", value);
     }
 
     if let Some(sense) = board.battery.as_mut() {
