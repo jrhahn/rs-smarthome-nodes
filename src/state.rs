@@ -261,7 +261,11 @@ pub fn note_reset(code: u32) {
 /// Whether the words hold a history of ours. False before [`note_reset`] has
 /// run on a region that was never ours.
 fn reset_state_is_ours() -> bool {
-    unsafe { core::ptr::addr_of!(RESET_TAG).read() == crate::reset_reason::EPOCH_TAG }
+    unsafe {
+        core::ptr::addr_of!(RESET_TAG).read() == crate::reset_reason::EPOCH_TAG
+            && core::ptr::addr_of!(RESET_COUNT).read()
+                <= crate::reset_reason::MAX_PLAUSIBLE_COUNT
+    }
 }
 
 /// The latched cause, or zero if nothing but deep sleep has happened.

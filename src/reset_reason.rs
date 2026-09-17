@@ -89,13 +89,29 @@ pub const DEEP_SLEEP: u32 = 0x05;
 /// is not.
 pub const EPOCH_TAG: u32 = 0x5245_5354;
 
+/// Above this, a stored count is garbage rather than history.
+///
+/// The tag alone turned out not to be enough. After the first attempt shipped,
+/// the node published `reset_count 3319124736` — the previous nonsense plus
+/// one, which means `latch` took the *increment* branch and therefore read the
+/// tag as already matching, on the first boot of firmware that had only just
+/// introduced the constant. That is not explained. What is certain is that a
+/// count in the billions is not a history, whatever the tag says.
+///
+/// A node resetting every five seconds for a year reaches about 6.3 million, so
+/// anything past a million is already beyond a story anyone would tell — and
+/// reaching it legitimately would itself be the finding. Bounding is crude next
+/// to a tag, but it cannot be defeated by one word comparing equal by accident,
+/// and the failure it prevents is a dashboard reading nobody can interpret.
+pub const MAX_PLAUSIBLE_COUNT: u32 = 1_000_000;
+
 /// Fold this boot's reset cause into what RTC RAM already holds, returning the
 /// `(tag, count, latched)` to store back.
 ///
 /// Pure so it can be tested on the host: `state.rs` needs the HAL for the
 /// memory it lives in, but the decision does not.
 pub const fn latch(tag: u32, count: u32, latched: u32, code: u32) -> (u32, u32, u32) {
-    if tag != EPOCH_TAG {
+    if tag != EPOCH_TAG || count > MAX_PLAUSIBLE_COUNT {
         // Not ours. Whatever the words held is not a history, and this boot is
         // the first one that can be counted.
         return match code {
@@ -126,6 +142,21 @@ pub fn write_code(out: &mut String<16>, code: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_implausible_count_is_discarded_even_when_the_tag_matches() {
+        // The case the tag alone did not catch: the node published
+        // `reset_count 3319124736`, i.e. garbage that had been incremented, so
+        // the tag had compared equal on a boot that could not have written it.
+        let (tag, count, latched) = latch(EPOCH_TAG, 3_319_124_735, 21, 0x07);
+        assert_eq!((tag, count, latched), (EPOCH_TAG, 1, 0x07));
+    }
+
+    #[test]
+    fn a_plausible_count_still_climbs() {
+        let (_, count, _) = latch(EPOCH_TAG, MAX_PLAUSIBLE_COUNT - 1, 0, 0x07);
+        assert_eq!(count, MAX_PLAUSIBLE_COUNT, "the bound must not clamp real history");
+    }
 
     #[test]
     fn an_untagged_region_is_treated_as_empty_rather_than_counted_on() {
