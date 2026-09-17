@@ -259,3 +259,45 @@ first of them still looks unchanged. Verified in the flash blob (`magic BIRD`,
 version 5, CRC ok, `deep_sleep = 0`) before it was visible anywhere else. It
 survives power cycles, which is the point.
 
+
+## 2026-09-17 10:39:41–21:49:28 — wohnzimmer, terrasse — two boards published under one name
+
+The `terrasse` board was flashed with a `wohnzimmer` image and spent eleven
+hours as a second living room. Both boards published to `smarthome/wohnzimmer/…`
+the whole time, alternating roughly once a minute. The full account is in
+[`commissioning.md`](commissioning.md#2026-09-17--flashed-with-a-wohnzimmer-image-and-eleven-hours-as-a-second-living-room);
+this is what it does to the numbers.
+
+**`terrasse` has a hole**, 10:39:41 to 21:51:12, in every channel it has. No
+readings were lost to a fault — the node was publishing that whole time, just
+under the wrong name. Anything attributed to the terrace in that window is
+missing, not wrong.
+
+**`wohnzimmer` is mixed, on four channels only.** `temperature`, `humidity`,
+`rssi` and the two `reset_*` channels carry rows from both boards. The intruder
+ran about 1.5 K cooler and 5 dB weaker — 23.7 °C at −52 dBm against the living
+room's 25.2 °C at −47 — so the window shows as a series that alternates between
+two levels rather than as a step. `readings_1m` averages the two together, which
+is the form most charts will show it in.
+
+**The other channels are clean.** `co2`, `scd41_temperature`, `scd41_humidity`,
+`voc_index`, `nox_index` and all four `pm*` channels only ever came from the
+real living-room board: the terrace board has none of those sensors, and a
+sensor that does not answer is omitted rather than published as a zero. Anything
+that needs a trustworthy wohnzimmer series across that window should use `co2`.
+
+**The rows cannot be separated after the fact.** A reading carries a node and a
+sensor, not a board, so nothing in QuestDB says which of the two wrote it. The
+bimodality above is the only trace. Dedup is on `(timestamp, node, sensor)` and
+the two boards stamped different instants, so no row overwrote another — the
+window has roughly twice the expected row count, not half the values.
+
+**Availability flapped for the whole window.** Both boards used the same MQTT
+client id, so each connect evicted the other and fired its last will:
+`smarthome/wohnzimmer/status` toggled `offline`/`online` about once a minute.
+Home Assistant's wohnzimmer entities drop to *unavailable* across that window
+in the recorder, and the archiver's status table records the same flapping.
+None of that is a Wi-Fi or broker problem, which is what it will look like.
+
+**Not affected:** `bad`, `kueche` and `schlafzimmer`, which published normally
+throughout. And nothing before 10:39:41 or after 21:49:28 on either node.

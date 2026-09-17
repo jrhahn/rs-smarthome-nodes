@@ -26,7 +26,7 @@ second.
 | `ac:27:6e:80:51:f8` | `wohnzimmer` | mains | — |
 | `ac:27:6e:82:43:94` | `kueche` | mains, duty-cycled | 192.168.1.30 |
 | `ac:27:6e:7e:10:a0` | `schlafzimmer` | mains | — |
-| `ac:27:6e:7f:a6:b4` | `bad` | mains, duty-cycled | — |
+| `ac:27:6e:7f:a6:b4` | `bad` | mains, duty-cycled | 192.168.1.143 |
 
 Complete as of 2026-09-10: the last two were read off `espflash board-info`
 during the RSSI rollout, so every board in the fleet is now identifiable
@@ -282,6 +282,49 @@ RTC baseline is from the previous mounting and no remount reproduces the beam's
 preload exactly. The button publishes retained, so a sleeping node collects it
 on its next round — up to ten minutes away. Press it once and wait.
 
+### 2026-09-17 — flashed with a `wohnzimmer` image, and eleven hours as a second living room
+
+At **10:39:41** this node published its last round under its own name, with
+`reset_reason 21` — a USB reset, so a cable was attached at that moment. It did
+not then go quiet. It came back as a **second `wohnzimmer`** and stayed one
+until 21:49, so `terrasse` shows an eleven-hour hole while the living room's
+series carried two boards at once.
+
+**How it was spotted**, because the shape is worth recognising: `reset_count` on
+`smarthome/wohnzimmer` read 2, then 1, then 2 on consecutive rounds. A counter
+that only a power-on clears cannot go down, so the rounds had to be coming from
+two boards. The confirmation was on the same topics — `status offline`
+immediately followed by `status online`, about once a minute, which is two
+clients sharing one MQTT client id and kicking each other off the broker. The
+values alternated with them: 23.7 °C at −52 dBm against 25.2 °C at −47.
+
+**It was a wrong image, not provisioning.** Those are worth telling apart,
+because the fix differs: an identity in the flash sector (`smarthome/provision/
+<mac>`, see [`FLASHING.md`](../FLASHING.md#7-provisioning-a-board-without-reflashing))
+survives a reflash and the board would have come back wrong a second time.
+There was no retained provision message on the broker, and flashing
+`NODE=terrasse` fixed it on the first attempt — so the identity was only ever
+in the image.
+
+**Recovered 21:49:28**, first round at 21:51:12: `weight 35.4`, `visits 1`,
+`reset_count 3`, `battery_voltage 4.09` / `battery_percent 87`.
+
+Two things that survived, and one that did not:
+
+- **The cell is fine.** The board was on USB the whole time, so the eleven hours
+  of a mains profile — no deep sleep, ~28 mAh an hour — were paid by the supply
+  and not by the pack. Had it been on the mast, that is roughly 300 mAh out of a
+  2000 mAh cell.
+- **The stored configuration is fine.** `espflash` skipped `0x0` and `0x8000`
+  again, so the `nvs` sector kept the calibration through both wrong and right
+  flash.
+- **The tare baseline is not.** `weight` came back at 35.4 g against a 25 g
+  threshold, i.e. the node believes it is being visited while it sits on a
+  desk, and the retained value before the fix was −467.2 g. Eleven hours of an
+  image with no scale in it will have left the persistent RTC words holding
+  something else. **Press Tarieren once after remounting**, as above — this time
+  it is not optional.
+
 ---
 
 ## `wohnzimmer` — mains
@@ -294,10 +337,16 @@ on its next round — up to ten minutes away. Press it once and wait.
   figures sit below the raw ones, which is what the κ term should do at that
   humidity. It needs the SHT31 on the same board, which is the whole reason the
   particulate sensor lives here rather than in the kitchen.
-- **SCD41** at `0x62` — verified with a unit **borrowed from
-  `schlafzimmer`, which has since gone back**. The slot stays on: the fleet
-  plan says this node has one, there simply is no second unit yet. Its three
-  entities read unavailable in Home Assistant until one arrives.
+- **SCD41** at `0x62` — originally verified with a unit **borrowed from
+  `schlafzimmer`**, and for a while this node had none of its own. **It has one
+  now**: on 2026-09-17 at 21:38 this board published `co2 = 1871` while
+  `schlafzimmer` published `co2 = 931` nine minutes later, so there are two
+  units and neither entity reads unavailable any more.
+- **SGP41**, which the 2026-09-05 list above predates: the same round logged
+  `SGP4x: voc_index = 129` and `nox_index = 1`. The NOx channel feeding at all
+  is what says it is an SGP41 rather than an SGP40 — `sgp41: Slot::on()
+  .with_nox()` announces the second channel, and an SGP40 in the socket is
+  detected at boot and never feeds it.
 
 **When assembling:** keep the SHT31-D away from the board. On this node that
 matters twice over, because the particulate humidity correction reads *its*
@@ -306,6 +355,17 @@ correction then subtracts too little, and the error lands in the PM figures.
 
 The SDS011's fan needs a clear air path. Its 15-minute cadence protects the fan
 and the optics; a sealed enclosure would have it measuring the enclosure.
+
+**Reflashed 2026-09-17**, from `develop` at `425e2c4`, for the timestamped
+readings. Unremarkable in itself — mains, always awake, so the port was up and a
+single `espflash flash --port` did it — except that the board came up on
+`/dev/ttyACM1` while another board held `ttyACM0`, which is the case the MAC
+check exists for.
+
+Its first rounds were then unreadable for a quarter of an hour, because
+`terrasse` was publishing to the same topics at the same time. That story is in
+the `terrasse` section below and in [`annotations.md`](annotations.md); what
+matters here is that nothing was wrong with *this* node or its flash.
 
 ---
 
@@ -325,14 +385,115 @@ not have one before. Leave it on; `0` holds the node awake for bench testing and
 is exactly the state that sat retained on the broker for days further up this
 page.
 
+**Reflashed 2026-09-17**, from `develop` at `425e2c4`, for the timestamped
+readings — straight after `bad`, and the contrast between the two is worth
+keeping:
+
+- **It flashed on the first attempt, with no poll loop.** This node is held
+  awake by `deep_sleep = 0` (the socket-strip workaround of 2026-09-14), so its
+  port comes up and *stays*, and a plain `espflash flash --port` was enough.
+  The workaround that exists for the supply happens to make this the easiest
+  board in the fleet to reflash.
+- **`deep_sleep = 0` survived it**, as it had to: the setting lives in the
+  config sector at `0x9000`, `espflash` skipped `0x0` and `0x8000` as unchanged,
+  and `config::VERSION` is still 5 — the same blob version verified in flash on
+  2026-09-14, so nothing reverted to the built-in default. The port has stayed
+  up continuously since, which is the observable form of the same fact. **If it
+  ever does start sleeping again, the kitchen's supply is the thing that kills
+  it** — see the two 2026-09-14 entries in [`annotations.md`](annotations.md).
+- **No walk-back here, and that is correct.** Samples and `rssi` go out 136 ms
+  apart (`…347564` against `…347700`), where `bad` showed fourteen seconds. A
+  node that never sleeps is already associated when it samples, so there is
+  almost no age to subtract; the gap on `bad` is the radio coming up. Two rounds
+  measured 120.697 s apart, i.e. the 120 s cadence the node no longer pays a
+  boot for.
+
+---
+
+## `bad` — mains, duty-cycled
+
+SHT31-D only. The same build and the same profile as [`kueche`](#kueche--mains-duty-cycled),
+which is why it is the control that node gets read against — see the
+2026-09-14 entry in [`annotations.md`](annotations.md).
+
+**Reflashed 2026-09-17**, from `develop` at `425e2c4`, and the first node in the
+fleet that dates its own readings.
+
+- **A duty-cycled node has to be caught, not flashed.** The port is up for
+  about seven seconds a round and then goes with the node into deep sleep: it
+  appeared at 21:24:43 and was gone at 21:24:50, so a plain `espflash flash`
+  typed after `ls /dev/ttyACM*` lost the race and reported `Serial port not
+  found`. The poll loop from [`FLASHING.md`](../FLASHING.md), keyed on the MAC
+  rather than on `head -1`, took it on the next wake 120 s later. The
+  BOOT/RESET dance was never needed, even with the board in hand.
+- **Nothing else on the board was touched.** `espflash` reported `Segment at
+  address '0x0' has not changed` and the same for `0x8000`, so the config
+  sector at `0x9000` — identity, calibration, `deep_sleep` — came through the
+  flash intact, as it does for every node here.
+- **The clock works, and the walk-back is visible in the numbers.** The boot
+  log reads `time synced: 1789673159857`, while temperature and humidity went
+  out stamped `…145666` and `…145667` — fourteen seconds *earlier*, because the
+  samples are taken before the radio comes up and `clock::stamp` walks the
+  fresh wall clock back by each sample's age. A node that merely stamped "now"
+  would have published all three with the same number.
+- **The archiver stores the node's time, not the arrival time.** `/api/overview`
+  gives the humidity `last_at_ms: 1789673145667`, which is the node's own `t`
+  and not the ~`…160000` the reading landed at. `/api/health` reported
+  `skipped: 0`, `rows_dropped: 0`, `write_errors: 0` across the round, so no
+  payload was refused as unparseable.
+
+`reset_reason 21` / `reset_count 1` on this node were the flash itself — a USB
+UART reset — and not a fault. Both were replaced the same evening, when the node
+went back on the wall: `reset_reason 1`, power-on, with the count restarting at
+1 because removing power is the one thing that clears it. `rssi` moved with it,
+from −40 dBm on the desk to −61 in the bathroom, against the −58 measured there
+on 2026-09-10.
+
 ---
 
 ## Open across the fleet
 
-- **The reset diagnostics are live on `terrasse` only**, verified 2026-09-17:
-  `reset_reason 21` (the USB reset espflash itself causes) and `reset_count 1`,
-  unchanged across two heartbeats, so deep-sleep wakes correctly do not count.
-  The other four still run without them.
+- **The whole fleet dates its own readings.** All five were reflashed on the
+  evening of 2026-09-17 — `bad` 21:25, `kueche` 21:28, `wohnzimmer` 21:34,
+  `schlafzimmer` 21:45, `terrasse` 21:49 — and every node now publishes
+  `{"v":…,"t":…}` on retained state topics, so an archiver restart recovers the
+  head of every series instead of dropping it. The archiver still accepts a bare
+  decimal permanently (`mqtt::parse_measurement`), which is what makes a
+  node-by-node rollout safe; nothing in the fleet sends one any more.
+
+  The server side had been in place since that morning: chrony answering on
+  UDP/123 (`home-server` `4ac34d4`) and the timestamp-aware archiver
+  (`a9be97f`), both live before the first node was touched. **Check the deployed
+  pin, not a local `flake.lock`** — the laptop's checkout was days stale and
+  reading it produced a confident wrong answer about what the server was
+  running.
+- **`terrasse` is the only board with OTA partitions.** Migrated 2026-09-17 at
+  22:49, from `develop`, with `--partition-table partitions.csv`: two 1 984 KB
+  application slots and an `otadata` selector where the other four still have a
+  single `factory` partition. `nvs` did not move, so nothing stored was lost,
+  and the node came back publishing `slot 0`, `seq 1` — i.e. `espflash` wrote a
+  valid selector along with the table. The other four are migrated the next time
+  each is in reach; until then **a flash of those boards without
+  `--partition-table` is correct, and one *with* it is the migration**. See
+  [`ota.md`](ota.md).
+- **The whole fleet says what it is, but only `terrasse` says it yet.** The same
+  flash added two retained topics — `<node>/ota/version` carrying
+  `<node>-<commit>`, and `<node>/meta/board` carrying the MAC, the address, the
+  running slot and whether the identity is provisioned or built in — plus the
+  MAC and firmware version in the Home Assistant device block (`cns` and `sw`).
+  `mosquitto_sub -t 'smarthome/+/meta/board' -v` is meant to become the answer
+  to "which board is publishing as what", which on 2026-09-17 took two hours to
+  work out from a `reset_count` that went backwards.
+- **The reset diagnostics are live on all five**, as of the 2026-09-17 evening
+  rollout, and the first hour of them is a fair sample of what the codes are
+  for. Most nodes read `reset_reason 21` with `reset_count 1` — the USB reset
+  espflash itself causes, and the expected reading straight after a flash.
+  `bad` then moved to **`reset_reason 1`, power-on**, when it was carried back
+  to the bathroom and replugged. `terrasse` came back at **`reset_count 3`**,
+  which is the reflash on top of the resets its wrong image had already
+  collected. And it was `reset_count` disagreeing with itself across rounds
+  that exposed two boards publishing under one name at all — see the `terrasse`
+  section above.
 
   It took three attempts, and the middle one is worth knowing about. The counter
   first published **3319124736** — RTC fast RAM is not zeroed on power-up, so
