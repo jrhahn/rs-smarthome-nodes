@@ -483,6 +483,12 @@ on 2026-09-10.
   needs `--partition-table`**; without it `espflash` silently restores its own
   single-app default and the board loses the ability to update itself while
   still looking perfectly healthy. See [`ota.md`](ota.md).
+- **`wohnzimmer` was updated over the air on 2026-09-17 at 23:36**, the first
+  node in the fleet to be. It therefore runs `wohnzimmer-a958878-dirty` from
+  **slot 1** while the other four run their cabled image from slot 0 — the
+  `-dirty` is honest rather than alarming: the image was built from a tree
+  carrying the documentation of this very trial. The account is in
+  [`ota.md`](ota.md).
 - **Every node says what it is.** Two retained topics per node —
   `<node>/ota/version` carrying `<node>-<commit>`, and `<node>/meta/board`
   carrying the MAC, the address, the running slot and whether the identity is

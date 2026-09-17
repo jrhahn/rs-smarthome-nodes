@@ -259,10 +259,8 @@ looks:
 
 ## What is built, and what is not
 
-Written 2026-09-17, in the evening after the cabled rollout. Everything below
-compiles for all five nodes and is covered by host tests; **none of it has run
-on hardware**, because the first step needs a cable and the boards were back on
-their walls by then.
+Written 2026-09-17, in the evening after the cabled rollout, and updated the
+same night: it has since **run on hardware** — see *The first trial* below.
 
 Built:
 
@@ -309,3 +307,63 @@ Not built, and deliberately:
    allowed to do this.
 4. **Then `terrasse`**, which is the node this whole thing is for, and only
    after the switch has been watched to work and to roll back.
+
+## The first trial
+
+`wohnzimmer`, 2026-09-17, 23:36. The whole path, on hardware, from an offer on
+the broker to a node running the image it named.
+
+The image was served from a laptop by `python3 -m http.server`, with no
+server-side change at all: the offer's URL only has to be a LAN address, which
+is exactly why the downloader refuses hostnames instead of carrying DNS. The
+node is on mains and stays associated, its USB port is therefore stable, and the
+serial log below is a passive read — no `espflash monitor`, which would have
+reset the chip to attach.
+
+```
+update offered: wohnzimmer-a958878-dirty (768272 bytes) -> slot 1
+768272 bytes written to slot 1, digest matches
+image written and selected (seq 2); restarting into it
+node 'wohnzimmer' (Wohnzimmer) booted, mains profile
+running an unconfirmed image (attempt 1 of 3); it is confirmed by reaching the broker
+update confirmed: this image has published a round
+```
+
+The board reported `slot 1`, `seq 2` afterwards, and the archiver shows it back
+on the air within about one round — a minute, for a 60-second cadence.
+
+**The open question is answered, for a mains node.** Writing 768 KB with the
+radio up — 188 sectors, each an erase and a write with the cache disabled — did
+not disturb the association or the executor. It is still unanswered for a
+battery node, which is a different power budget and a different supply.
+
+**Four things went right that are worth keeping:**
+
+- The first four attempts *failed*, because the laptop's firewall trusts only
+  the tailnet and the node is on the LAN. Each failure cost one log line and
+  nothing else — no partial state, no reboot — and because the offer is
+  retained, the node retried on its own once the port was opened. Nothing had to
+  be republished.
+- The image was written to **slot 1** while slot 0 was running, so every failed
+  attempt was a write to a slot nothing would boot.
+- After the reboot the still-retained offer was refused with *"offer names the
+  version already running"*. Without that check the node would have installed
+  the same image on every round, for ever. It is the difference between a
+  retained offer and a reboot loop.
+- The image was confirmed only after a completed publish round, not on boot.
+
+**What the trial did not cover**, and therefore what is still only as good as
+its host tests:
+
+- **Resume.** `python3 -m http.server` ignores `Range` and answers `200`, which
+  the node correctly refuses on a resumed request — so the resume path was never
+  exercised end to end. A real server, nginx included, would answer `206`.
+- **Rollback.** Nothing failed, so nothing rolled back. The attempt counter and
+  the selector rewrite have only ever run in tests.
+- **A battery node.** `terrasse` is the node this exists for and the one that
+  has not done it yet.
+
+Afterwards the retained offer was withdrawn (`-r -n`) and the firewall hole
+closed. Both matter: an offer left on the broker is re-delivered on every
+connect for ever, and it is the one piece of this mechanism that outlives the
+session that created it.
