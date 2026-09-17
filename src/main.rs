@@ -870,10 +870,19 @@ async fn run_awake(
         // publish budget: it is best-effort, and a slow time server should cost
         // this round its timestamps, not its readings.
         let now_ms = sync_time(stack).await;
+        // Same bookkeeping as the deep-sleep path: count this round against an
+        // image that has not proved itself, and confirm it only once the broker
+        // has actually been reached.
+        let on_trial = ota_begin_attempt();
         let drained =
             match with_timeout(WIFI_BUDGET, publish_samples(stack, &mut samples, cfg, now_ms)).await
             {
-                Ok(Ok(d)) => d,
+                Ok(Ok(d)) => {
+                    if on_trial {
+                        ota_confirm();
+                    }
+                    d
+                }
                 Ok(Err(e)) => {
                     warn!("publish failed: {}", e);
                     Drained {
@@ -891,6 +900,8 @@ async fn run_awake(
             }
                 }
             };
+        install_if_offered(stack, &drained).await;
+
         let updated = if drained.tare {
             retare(board, drained.cfg).await
         } else {
@@ -1175,23 +1186,10 @@ async fn publish(
     cfg: Config,
     board: &mut Board<'_>,
 ) -> Config {
-    let drained = match with_timeout(
-        WIFI_BUDGET,
-        connect_and_publish(spawner, radio, samples, cfg),
-    )
-    .await
-    {
-        Ok(Ok(d)) => d,
-        Ok(Err(e)) => {
+    let drained = match connect_and_publish(spawner, radio, samples, cfg).await {
+        Ok(d) => d,
+        Err(e) => {
             warn!("publish failed: {}", e);
-            Drained {
-                cfg,
-                tare: false,
-                offer: None,
-            }
-        }
-        Err(_) => {
-            warn!("Wi-Fi/publish exceeded {:?}, giving up", WIFI_BUDGET);
             Drained {
                 cfg,
                 tare: false,
@@ -1329,15 +1327,25 @@ async fn connect_and_publish(
     samples: &mut Samples,
     cfg: Config,
 ) -> Result<Drained, &'static str> {
-    let stack = bring_up_wifi(spawner, radio).await?;
+    // The budget covers the join and the publish, and deliberately stops there.
+    // It used to wrap this whole function from the caller, which quietly made
+    // an over-the-air update impossible: a download is allowed minutes and a
+    // publish twenty seconds, so the outer timeout won every time and every
+    // update would have been abandoned mid-write, identically, for ever.
+    let (stack, updated, on_trial) = with_timeout(WIFI_BUDGET, async {
+        let stack = bring_up_wifi(spawner, radio).await?;
 
-    // Count this round against an image that has not proved itself yet, before
-    // the round rather than after it: an image that panics halfway through a
-    // publish is exactly what the rollback exists for, and it would never get
-    // as far as recording its own attempt.
-    let on_trial = ota_begin_attempt();
+        // Count this round against an image that has not proved itself yet,
+        // before the round rather than after it: an image that panics halfway
+        // through a publish is exactly what the rollback exists for, and it
+        // would never get as far as recording its own attempt.
+        let on_trial = ota_begin_attempt();
 
-    let updated = publish_samples(stack, samples, cfg, sync_time(stack).await).await?;
+        let updated = publish_samples(stack, samples, cfg, sync_time(stack).await).await?;
+        Ok::<_, &'static str>((stack, updated, on_trial))
+    })
+    .await
+    .map_err(|_| "wifi/publish exceeded its budget")??;
 
     // Reaching the broker is the proof, and nothing weaker will do. An image
     // with a wrong SSID, a moved broker or a panic after association boots
@@ -1346,22 +1354,33 @@ async fn connect_and_publish(
         ota_confirm();
     }
 
-    // An offer picked up in the round just now. Installed here, where the stack
-    // is up and the MQTT socket has been handed back.
-    if let Some(offer) = updated.offer.as_deref() {
-        match run_update(stack, offer).await {
-            Ok(seq) => {
-                info!("image written and selected (seq {}); restarting into it", seq);
-                Timer::after(Duration::from_millis(200)).await;
-                software_reset();
-            }
-            Err(e) => warn!("update not installed: {}", e),
-        }
-    }
+    // An offer picked up in the round just now, installed where the stack is up
+    // and the MQTT socket has been handed back.
+    install_if_offered(stack, &updated).await;
 
     // Give the TCP stack a moment to flush the FIN before we cut power.
     Timer::after(Duration::from_millis(200)).await;
     Ok(updated)
+}
+
+/// Install an offer if the round brought one back, and restart into it.
+///
+/// Shared by both publish paths, and that sharing is the point: a node that
+/// stays associated never goes through `connect_and_publish`, so an update that
+/// lived only there would have worked on exactly the nodes that are hardest to
+/// reach and on none of the ones worth trying it on first.
+async fn install_if_offered(stack: &'static WifiStack, drained: &Drained) {
+    let Some(offer) = drained.offer.as_deref() else {
+        return;
+    };
+    match run_update(stack, offer).await {
+        Ok(seq) => {
+            info!("image written and selected (seq {}); restarting into it", seq);
+            Timer::after(Duration::from_millis(200)).await;
+            software_reset();
+        }
+        Err(e) => warn!("update not installed: {}", e),
+    }
 }
 
 /// What this board is, as opposed to what it measures.
