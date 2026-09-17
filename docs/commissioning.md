@@ -422,62 +422,26 @@ page.
   [`solar.md`](solar.md). It depends on the same missing measurement as the
   radio options, and on the battery divider actually having been flashed —
   that divider is the only instrument that can say whether the panel works.
-- **The stored-credential fallback cannot fire on a battery node.**
-  `wifi::FALLBACK_AFTER` is meant to set aside stored credentials after three
-  consecutive refusals and fall back to the built-in pair, so a typo at the
-  console cannot strand a board. But `refusals` in `main.rs` is a task-local,
-  and its comment says it is deliberately *not* in RTC RAM: *"a power cycle
-  should give them another try"*. That reasoning holds for a mains node. A
-  battery node cold-boots every couple of seconds, so every wake is a new run
-  with `refusals = 0` and the threshold of three is never reached. The
-  protection is inert for precisely the node that hangs outdoors and cannot be
-  reflashed casually. Not the cause of anything so far — nothing is stored on
-  `terrasse` — but it is a trap set for later.
-- **Bad and kueche drop temperature occasionally, and it is not Wi-Fi.**
-  Reported from the field 2026-09-09, previously blamed on the network. Those
-  nodes lose a reading now and then while staying connected, which points at
-  `sample()` rather than the boot-time probe: `CONVERSION_MS` was 15 ms against
-  a datasheet maximum of **15.5 ms** for high repeatability, so an occasional
-  read lands before the conversion finishes, is NAKed, and reports a working
-  sensor as absent. Raised to 17 ms.
+- **The stored-credential fallback could not fire on a battery node.** Fixed
+  2026-09-17. `wifi::FALLBACK_AFTER` sets aside stored credentials after three
+  consecutive refusals and falls back to the built-in pair, so a typo at the
+  console cannot strand a board. But `refusals` was a task local in `main.rs`,
+  and its comment said that was deliberate — *"a power cycle should give them
+  another try"*. True for a mains node; a battery node cold-boots every few
+  seconds, so every wake was a new run with `refusals = 0` and three was never
+  reached. The protection was inert for precisely the node that hangs outdoors
+  and cannot be reflashed casually.
 
-  **The overnight A/B test that was meant to confirm this did not.** Only
-  `terrasse` carried the fix; the four mains nodes ran the old image. Over
-  8.3 hours (2026-09-09 23:00 → 2026-09-10 07:20) the count of missed readings
-  was:
+  The counter now lives in RTC RAM beside the reset diagnostics, sharing their
+  epoch tag, so it accumulates across sleeps. A **power-on** still clears it,
+  which is what the original comment meant; a watchdog reset or a brownout does
+  not, because those are the node failing rather than someone asking for another
+  try. Three host tests cover the distinction.
 
-  | node | cadence | missed |
-  | --- | --- | --- |
-  | bad | 120 s | 0 |
-  | kueche | 121 s | 0 |
-  | schlafzimmer | 61 s | 0 |
-  | wohnzimmer | 61 s | 1 |
-  | terrasse (fixed) | — | 0 |
-
-  Every apparent dropout was **one event at 03:10**, hitting all five nodes
-  within 40 seconds — schlafzimmer 03:10:05, kueche 03:10:32, terrasse
-  03:10:39, bad 03:10:43, wohnzimmer 03:10:45. Independent sensors do not fail
-  synchronously, so that was the network, the broker, or the capturing client,
-  not the driver.
-
-  So the test is **inconclusive rather than negative**: the control group stayed
-  healthy all night, and a fault that does not occur cannot be measured. That is
-  consistent with the report, which said *sometimes*. If it is conversion time,
-  temperature is a plausible trigger — the SHT31's conversion drifts with it,
-  and a cool quiet night is the friendly case, unlike a bathroom after a shower.
-
-  **Flash the other four on the datasheet argument, not on this evidence.**
-  15 ms under a 15.5 ms maximum is wrong whether or not it bit last night.
-  Proving it needs a capture over days, long enough for the rare case to appear
-  and show that it only hits the unfixed nodes.
-- **Two runtime knobs were changed on 2026-09-16**, both retained on the broker
-  and so surviving a reflash: `idle_interval` 2 s → **5 s** and `threshold`
-  10 g → **25 g**. The first is the only cheap lever on the dominant energy
-  term (see [`base-platform.md`](base-platform.md)); the price is that visits
-  shorter than ~5 s are missed and the published duration is now known only to
-  ±5 s. The second is against wind: 78 "visits" were logged on 2026-09-13 with
-  the feeder mounted outdoors, and every false one costs a Wi-Fi connect plus up
-  to 60 s awake watching it. Judge both from the discharge curve in a week.
+  Never bit anyone: `terrasse` has nothing stored, so the boot banner reads
+  `wifi: 'wifi_42_ext' (built in)` and there was nothing to fall back *from*. It
+  was a trap set for the first time someone provisions the outdoor node over the
+  console and mistypes.
 - **Mains nodes self-heat.** Measured 2026-09-04 on `schlafzimmer`: about 0.9 °C
   at the board, separated from room warming by using the unmoved SCD41 as a
   control. Mount temperature sensors away from the board on any node that

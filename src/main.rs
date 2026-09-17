@@ -1818,11 +1818,14 @@ async fn console_provisioning(usb: esp_hal::peripherals::USB_DEVICE) {
 #[embassy_executor::task]
 async fn connection(mut controller: WifiController<'static>) {
     info!("Wi-Fi connection task started");
-    // Consecutive refusals of the *stored* credentials. Kept here rather than in
-    // RTC RAM on purpose: a power cycle should give them another try, since the
-    // likeliest reason for a run of failures is an access point that was down,
-    // not a passphrase that changed under us.
-    let mut refusals = 0u32;
+    // Consecutive refusals of the *stored* credentials, read from RTC RAM rather
+    // than started at zero here. A task local looked right and was not: this
+    // node cold-boots every few seconds, so the count reset before
+    // `FALLBACK_AFTER` could ever be reached and the protection against a
+    // mistyped passphrase never fired on the only node that cannot be reflashed
+    // casually. `reset_reason::latch` still clears it on a power-on, which is
+    // the "give them another try" the original comment meant.
+    let mut refusals = state::join_refusals();
     let mut configured: Option<heapless::String<{ config::SSID_MAX }>> = None;
 
     loop {
@@ -1897,9 +1900,11 @@ async fn connection(mut controller: WifiController<'static>) {
             Ok(_) => {
                 info!("Connected to Wi-Fi '{}'", credentials.ssid);
                 refusals = 0;
+                state::set_join_refusals(0);
             }
             Err(e) => {
                 refusals = refusals.saturating_add(1);
+                state::set_join_refusals(refusals);
                 warn!(
                     "Wi-Fi connect to '{}' failed: {:?} (attempt {}), retrying",
                     credentials.ssid, e, refusals

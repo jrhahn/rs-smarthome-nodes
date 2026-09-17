@@ -236,26 +236,53 @@ static mut RESET_REASON: u32 = 0;
 #[ram(rtc_fast, persistent)]
 static mut RESET_COUNT: u32 = 0;
 
-/// Says the two words above are ours rather than whatever the region held
+/// Says the words around it are ours rather than whatever the region held
 /// before. See [`crate::reset_reason::EPOCH_TAG`] for why this is not optional.
 #[ram(rtc_fast, persistent)]
 static mut RESET_TAG: u32 = 0;
+
+/// Consecutive joins the *stored* Wi-Fi credentials have been refused; see
+/// [`crate::wifi::FALLBACK_AFTER`].
+///
+/// Here rather than in the connection task because a battery node cold-boots
+/// every few seconds: a task local was reset before the threshold could ever be
+/// reached, so the fallback never fired on the one node that hangs outdoors.
+/// [`crate::reset_reason::latch`] clears it on a power-on, which is the
+/// "another try" the original comment intended.
+#[ram(rtc_fast, persistent)]
+static mut JOIN_REFUSALS: u32 = 0;
 
 /// Record this boot's reset cause. Call once, early. A deep-sleep wake is the
 /// steady state and is ignored, so what stays latched is the last thing that
 /// was not routine.
 pub fn note_reset(code: u32) {
     unsafe {
-        let (tag, count, latched) = crate::reset_reason::latch(
+        let (tag, count, latched, refusals) = crate::reset_reason::latch(
             core::ptr::addr_of!(RESET_TAG).read(),
             core::ptr::addr_of!(RESET_COUNT).read(),
             core::ptr::addr_of!(RESET_REASON).read(),
+            core::ptr::addr_of!(JOIN_REFUSALS).read(),
             code,
         );
         core::ptr::addr_of_mut!(RESET_TAG).write(tag);
         core::ptr::addr_of_mut!(RESET_COUNT).write(count);
         core::ptr::addr_of_mut!(RESET_REASON).write(latched);
+        core::ptr::addr_of_mut!(JOIN_REFUSALS).write(refusals);
     }
+}
+
+/// Consecutive refusals of the stored credentials, across sleeps. Zero if the
+/// region is not ours, so a garbage read cannot fake a run of failures.
+pub fn join_refusals() -> u32 {
+    if !reset_state_is_ours() {
+        return 0;
+    }
+    unsafe { core::ptr::addr_of!(JOIN_REFUSALS).read() }
+}
+
+/// Record the running total. Called by the connection task on each outcome.
+pub fn set_join_refusals(value: u32) {
+    unsafe { core::ptr::addr_of_mut!(JOIN_REFUSALS).write(value) }
 }
 
 /// Whether the words hold a history of ours. False before [`note_reset`] has

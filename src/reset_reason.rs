@@ -105,23 +105,44 @@ pub const EPOCH_TAG: u32 = 0x5245_5354;
 /// and the failure it prevents is a dashboard reading nobody can interpret.
 pub const MAX_PLAUSIBLE_COUNT: u32 = 1_000_000;
 
-/// Fold this boot's reset cause into what RTC RAM already holds, returning the
-/// `(tag, count, latched)` to store back.
+/// What one boot does to the persistent state: the reset diagnostics, and the
+/// count of consecutive refused joins.
 ///
-/// Pure so it can be tested on the host: `state.rs` needs the HAL for the
-/// memory it lives in, but the decision does not.
-pub const fn latch(tag: u32, count: u32, latched: u32, code: u32) -> (u32, u32, u32) {
+/// Both live in the same RTC-RAM region and both are only meaningful if that
+/// region is ours, so one function decides, and `state.rs` stores what it
+/// returns. Pure so it can be tested on the host — `state.rs` needs the HAL for
+/// the memory, the decision does not.
+///
+/// `refusals` is kept across deep sleep but cleared by a **power-on**, which is
+/// what `wifi.rs` means by "for the rest of the run". Holding it only in a task
+/// local, as this did until 2026-09-17, meant a battery node reset it every
+/// couple of seconds and `FALLBACK_AFTER` could never be reached — the
+/// protection against a mistyped passphrase was inert on the one node that
+/// cannot be reflashed casually. A watchdog reset or a brownout deliberately
+/// does *not* forgive: those are the node failing, not someone power-cycling it
+/// to ask for another try.
+pub const fn latch(
+    tag: u32,
+    count: u32,
+    latched: u32,
+    refusals: u32,
+    code: u32,
+) -> (u32, u32, u32, u32) {
     if tag != EPOCH_TAG || count > MAX_PLAUSIBLE_COUNT {
         // Not ours. Whatever the words held is not a history, and this boot is
         // the first one that can be counted.
         return match code {
-            DEEP_SLEEP => (EPOCH_TAG, 0, 0),
-            _ => (EPOCH_TAG, 1, code),
+            DEEP_SLEEP => (EPOCH_TAG, 0, 0, 0),
+            _ => (EPOCH_TAG, 1, code, 0),
         };
     }
+    let kept = match code {
+        POWER_ON => 0,
+        _ => refusals,
+    };
     match code {
-        DEEP_SLEEP => (tag, count, latched),
-        _ => (tag, count.saturating_add(1), code),
+        DEEP_SLEEP => (tag, count, latched, kept),
+        _ => (tag, count.saturating_add(1), code, kept),
     }
 }
 
@@ -148,13 +169,13 @@ mod tests {
         // The case the tag alone did not catch: the node published
         // `reset_count 3319124736`, i.e. garbage that had been incremented, so
         // the tag had compared equal on a boot that could not have written it.
-        let (tag, count, latched) = latch(EPOCH_TAG, 3_319_124_735, 21, 0x07);
+        let (tag, count, latched, _) = latch(EPOCH_TAG, 3_319_124_735, 21, 9, 0x07);
         assert_eq!((tag, count, latched), (EPOCH_TAG, 1, 0x07));
     }
 
     #[test]
     fn a_plausible_count_still_climbs() {
-        let (_, count, _) = latch(EPOCH_TAG, MAX_PLAUSIBLE_COUNT - 1, 0, 0x07);
+        let (_, count, _, _) = latch(EPOCH_TAG, MAX_PLAUSIBLE_COUNT - 1, 0, 0, 0x07);
         assert_eq!(count, MAX_PLAUSIBLE_COUNT, "the bound must not clamp real history");
     }
 
@@ -163,7 +184,7 @@ mod tests {
         // The bug this guards: RTC RAM is not zeroed on power-up, so the count
         // started from garbage and the first publish read 3319124735.
         let garbage = 0xC5D3_1FFF;
-        let (tag, count, latched) = latch(garbage, garbage, garbage, 0x0F);
+        let (tag, count, latched, _) = latch(garbage, garbage, garbage, garbage, 0x0F);
         assert_eq!(tag, EPOCH_TAG);
         assert_eq!(count, 1, "the first countable boot, not garbage + 1");
         assert_eq!(latched, 0x0F);
@@ -171,21 +192,45 @@ mod tests {
 
     #[test]
     fn an_untagged_region_woken_from_sleep_starts_at_zero() {
-        let (tag, count, latched) = latch(0xDEAD_BEEF, 7, 9, DEEP_SLEEP);
-        assert_eq!((tag, count, latched), (EPOCH_TAG, 0, 0));
+        let (tag, count, latched, refusals) = latch(0xDEAD_BEEF, 7, 9, 5, DEEP_SLEEP);
+        assert_eq!((tag, count, latched, refusals), (EPOCH_TAG, 0, 0, 0));
     }
 
     #[test]
     fn deep_sleep_wakes_are_not_counted() {
-        let before = (EPOCH_TAG, 4, 0x07);
-        let after = latch(before.0, before.1, before.2, DEEP_SLEEP);
+        let before = (EPOCH_TAG, 4, 0x07, 2);
+        let after = latch(before.0, before.1, before.2, before.3, DEEP_SLEEP);
         assert_eq!(after, before, "the steady state must not move the counter");
     }
 
     #[test]
     fn anything_else_counts_and_replaces_the_latched_cause() {
-        let (_, count, latched) = latch(EPOCH_TAG, 4, 0x07, 0x0F);
+        let (_, count, latched, _) = latch(EPOCH_TAG, 4, 0x07, 0, 0x0F);
         assert_eq!((count, latched), (5, 0x0F));
+    }
+
+    #[test]
+    fn refused_joins_survive_deep_sleep() {
+        // The bug: a battery node cold-boots every few seconds, so a task-local
+        // counter reset before FALLBACK_AFTER could ever be reached and the
+        // protection against a mistyped passphrase never fired.
+        let (_, _, _, refusals) = latch(EPOCH_TAG, 1, 21, 2, DEEP_SLEEP);
+        assert_eq!(refusals, 2, "a wake must not forgive the stored credentials");
+    }
+
+    #[test]
+    fn a_power_cycle_forgives_them() {
+        // wifi.rs's stated intent: the likeliest reason for a run of failures is
+        // an access point that was down, so removing power asks for another try.
+        let (_, _, _, refusals) = latch(EPOCH_TAG, 1, 21, 3, POWER_ON);
+        assert_eq!(refusals, 0);
+    }
+
+    #[test]
+    fn a_watchdog_reset_does_not_forgive_them() {
+        // That is the node failing, not someone asking for another try.
+        let (_, _, _, refusals) = latch(EPOCH_TAG, 1, 21, 3, 0x07);
+        assert_eq!(refusals, 3);
     }
 
     #[test]

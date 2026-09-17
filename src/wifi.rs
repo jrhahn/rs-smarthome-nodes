@@ -29,7 +29,10 @@
 //!
 //! Stored credentials are not trusted blindly: after
 //! [`FALLBACK_AFTER`] consecutive failed joins the connection task falls back
-//! to the build-time pair for the rest of the run. That is the net that stops a
+//! to the build-time pair. The count lives in RTC RAM, so it accumulates across
+//! a battery node's deep sleeps and is cleared by a power-on — "the rest of the
+//! run" used to mean one wake, a couple of seconds, which made this net inert
+//! on exactly the node that needs it. That is the net that stops a
 //! mistyped passphrase from taking a board off the network permanently — worth
 //! having, because unlike a wrong node name a wrong PSK cannot be corrected
 //! over the air.
