@@ -363,7 +363,14 @@ its host tests:
 - **A battery node.** `terrasse` is the node this exists for and the one that
   has not done it yet.
 
-Afterwards the retained offer was withdrawn (`-r -n`) and the firewall hole
+**A second update followed at 23:58**, to `wohnzimmer-fa931e5` — a real commit
+this time rather than a `-dirty` tree — and it is the one that proves the part
+the first could not: it went to **slot 0**, back where the cabled image had
+been, with `seq 3`. The slots alternate, the sequence number only climbs, and a
+node that has been updated twice is running from the slot it started in. Nothing
+about the second run needed a cable, a button or a person in the room.
+
+Afterwards each retained offer was withdrawn (`-r -n`) and the firewall hole
 closed. Both matter: an offer left on the broker is re-delivered on every
 connect for ever, and it is the one piece of this mechanism that outlives the
 session that created it.

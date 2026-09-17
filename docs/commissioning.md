@@ -288,6 +288,14 @@ RTC baseline is from the previous mounting and no remount reproduces the beam's
 preload exactly. The button publishes retained, so a sleeping node collects it
 on its next round — up to ten minutes away. Press it once and wait.
 
+**Re-tared on a desk 2026-09-18 at 00:10**, and this is the one to remember:
+the boot after that evening's reflash logged `tared baseline = -194505` with the
+node lying on a table. The stored calibration came through untouched
+(`scale=1862.8`, as it has been since 2026-09-10 — the partition migration left
+`nvs` alone, as intended), but the *baseline* is now the desk. **Press Tarieren
+once after remounting**, with the feeder empty, or every reading is measured
+against a preload that no longer exists.
+
 ### 2026-09-17 — flashed with a `wohnzimmer` image, and eleven hours as a second living room
 
 At **10:39:41** this node published its last round under its own name, with
@@ -483,11 +491,11 @@ on 2026-09-10.
   needs `--partition-table`**; without it `espflash` silently restores its own
   single-app default and the board loses the ability to update itself while
   still looking perfectly healthy. See [`ota.md`](ota.md).
-- **`wohnzimmer` was updated over the air on 2026-09-17 at 23:36**, the first
-  node in the fleet to be. It therefore runs `wohnzimmer-a958878-dirty` from
-  **slot 1** while the other four run their cabled image from slot 0 — the
-  `-dirty` is honest rather than alarming: the image was built from a tree
-  carrying the documentation of this very trial. The account is in
+- **`wohnzimmer` has been updated over the air twice**, on 2026-09-17 at 23:36
+  and again at 23:58, and is the only node in the fleet that has never been
+  reflashed by cable since. It sits at `seq 3` where the other four sit at
+  `seq 1`, and the two updates went to **slot 1 and then back to slot 0**, which
+  is the A/B alternation doing exactly what it is for. The account is in
   [`ota.md`](ota.md).
 - **Every node says what it is.** Two retained topics per node —
   `<node>/ota/version` carrying `<node>-<commit>`, and `<node>/meta/board`
@@ -498,11 +506,11 @@ on 2026-09-10.
   which on the evening it was written took two hours to work out from a
   `reset_count` that went backwards.
 
-  Checked across the fleet on 2026-09-17 at 23:12: all five MACs match the
-  boards table above, four nodes on `…-0fb7d0e`, and **`terrasse` still on
-  `terrasse-425e2c4-dirty`** — it was flashed before the commit and is the one
-  node whose version does not name a commit that exists. Reflash it the next
-  time it is in reach.
+  Checked across the fleet on 2026-09-18 at 00:15: all five MACs match the
+  boards table above and **all five run `…-fa931e5`** — four of them flashed by
+  cable that night, `wohnzimmer` over the air. Every version names a commit that
+  exists, which was not true an hour earlier and is the whole reason the string
+  carries the commit at all.
 - **The reset diagnostics are live on all five**, as of the 2026-09-17 evening
   rollout, and the first hour of them is a fair sample of what the codes are
   for. Most nodes read `reset_reason 21` with `reset_count 1` — the USB reset
