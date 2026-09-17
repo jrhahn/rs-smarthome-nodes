@@ -72,6 +72,53 @@ pub const PAYLOAD_MAX: usize = 448;
 /// A rendered discovery payload.
 pub type Payload = String<PAYLOAD_MAX>;
 
+// --- The state payload ------------------------------------------------------
+//
+// A reading used to go out as a bare decimal string, which is what Home
+// Assistant reads when a config declares no template. It is now a small JSON
+// object, so that a reading can carry *when it was taken* rather than being
+// dated by whoever receives it. See `crate::clock` for why that matters.
+//
+// The template and the builder live next to each other on purpose: they are one
+// format written twice, in two languages, and the only thing that keeps them
+// agreeing is that changing one means seeing the other.
+
+/// The JSON member holding the value.
+pub const VALUE_KEY: &str = "v";
+
+/// The JSON member holding the Unix-millisecond time the reading was taken.
+/// Absent when the node has no clock this round.
+pub const TIME_KEY: &str = "t";
+
+/// What Home Assistant applies to a state payload to get the number back out.
+pub const VALUE_TEMPLATE: &str = "{{value_json.v}}";
+
+/// Room for one state payload: a 16-byte value, a 13-digit millisecond
+/// timestamp, and the dozen bytes of punctuation around them.
+pub const STATE_MAX: usize = 48;
+
+/// A rendered reading.
+pub type StatePayload = String<STATE_MAX>;
+
+/// One reading as Home Assistant and the archiver both read it.
+///
+/// `at` is omitted rather than sent as zero or null when the node does not know
+/// the time: an absent member is the one spelling both readers already treat as
+/// "no timestamp", and a zero would be a *claim* about 1970 that the archiver
+/// would have to special-case.
+///
+/// Always JSON, even unstamped -- the discovery config names a template, and a
+/// bare `21.5` arriving under `{{value_json.v}}` does not render as the number,
+/// it renders as an error and takes the entity with it.
+pub fn state_payload(value: &str, at: Option<u64>) -> Option<StatePayload> {
+    let mut p = StatePayload::new();
+    match at {
+        Some(millis) => write!(p, "{{\"{VALUE_KEY}\":{value},\"{TIME_KEY}\":{millis}}}").ok()?,
+        None => write!(p, "{{\"{VALUE_KEY}\":{value}}}").ok()?,
+    }
+    Some(p)
+}
+
 /// Discovery prefix Home Assistant listens on (its default).
 pub const PREFIX: &str = "homeassistant";
 /// Manufacturer/model reported for the device card in Home Assistant.
@@ -267,9 +314,15 @@ pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) 
          \"name\":\"{label}{sep}{name}\",\
          \"uniq_id\":\"{id}_{prefix}{key}\",\
          \"stat_t\":\"~/{prefix}{key}\",\
+         \"val_tpl\":\"{val_tpl}\",\
          {unit}{dev_cla}\
          \"stat_cla\":\"{stat_cla}\",\
          \"exp_aft\":{expire},{avty}",
+        // Only the sensors get this. A control's `stat_t` points at
+        // `~/config/<key>`, which carries the knob's value as a bare number
+        // written by Home Assistant itself -- a template there would look for a
+        // JSON member in a payload we do not write and never will.
+        val_tpl = VALUE_TEMPLATE,
         expire = avail.expire_for(slot),
         // The availability topic is relative to `~`, and only exists on a node
         // whose last-will keeps it honest.
@@ -593,9 +646,10 @@ mod tests {
     // heapless ones, and the tests want the std types.
     use super::{
         announcement_tag, availability, config_payload, config_topic, control_payload,
-        control_topic, controls, entities, Availability, Config, NodeConfig, Slot,
+        control_topic, controls, entities, state_payload, Availability, Config, NodeConfig, Slot,
         BATTERY_CONTROLS, MAX_ENTITIES, MIN_EXPIRY_SECS, MISSED_ROUNDS, PREFIX, SCALE_CONTROLS,
-        SCD41_CONTROLS, SDS011_CONTROLS, SLEEP_CONTROLS,
+        SCD41_CONTROLS, SDS011_CONTROLS, SLEEP_CONTROLS, STATE_MAX, TIME_KEY, VALUE_KEY,
+        VALUE_TEMPLATE,
     };
     use crate::node::FLEET;
     use serde_json::Value;
@@ -659,6 +713,102 @@ mod tests {
             assert!(!messages.is_empty());
             for (_, payload) in messages {
                 assert!(payload.is_object());
+            }
+        }
+    }
+
+    // --- The state payload and the template that reads it --------------------
+
+    #[test]
+    fn a_reading_is_json_carrying_its_value_and_its_time() {
+        let payload = state_payload("21.5", Some(1_789_675_200_123)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(json[VALUE_KEY], 21.5);
+        assert_eq!(json[TIME_KEY], 1_789_675_200_123u64);
+    }
+
+    #[test]
+    fn the_template_names_the_member_the_payload_actually_writes() {
+        // The one invariant holding this together: `val_tpl` is Jinja that Home
+        // Assistant evaluates, so a renamed key here is not a type error
+        // anywhere -- it is every sensor in the house going `unknown` at once,
+        // on the next reflash. Read the member out of the template and look for
+        // it in a real payload.
+        let member = VALUE_TEMPLATE
+            .trim_start_matches("{{")
+            .trim_end_matches("}}")
+            .trim()
+            .strip_prefix("value_json.")
+            .expect("the template must read a member of the state payload");
+        assert_eq!(member, VALUE_KEY);
+
+        let payload = state_payload("412", Some(1_789_675_200_000)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert!(json.get(member).is_some(), "{payload} has no {member}");
+    }
+
+    #[test]
+    fn a_node_without_a_clock_omits_the_time_rather_than_inventing_one() {
+        let payload = state_payload("412", None).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(json[VALUE_KEY], 412);
+        // Absent, not zero and not null: a zero would be a claim about 1970 that
+        // the archiver would then have to recognise and undo.
+        assert!(json.get(TIME_KEY).is_none(), "{payload}");
+        assert!(!payload.contains("null"), "{payload}");
+    }
+
+    #[test]
+    fn a_reading_stays_json_either_way() {
+        // Because the discovery config names a template unconditionally. A bare
+        // value arriving under `{{value_json.v}}` does not render as the number.
+        for at in [None, Some(1_789_675_200_123)] {
+            let payload = state_payload("-17.25", at).unwrap();
+            assert!(payload.starts_with('{') && payload.ends_with('}'), "{payload}");
+            serde_json::from_str::<serde_json::Value>(&payload).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_widest_reading_still_fits_its_buffer() {
+        // `state_payload` returns None rather than truncating, and truncated
+        // JSON would take the entity down with it. The widest real case is a
+        // full 16-byte value plus a 13-digit millisecond stamp; the year 2100
+        // is where that digit count stops growing within this fleet's life.
+        let widest = "-1234567.8901234";
+        assert_eq!(widest.len(), 16, "the value buffer is String<16>");
+        let payload = state_payload(widest, Some(crate::clock::SANE_UNTIL_MS - 1))
+            .expect("the widest payload must fit STATE_MAX");
+        assert!(payload.len() <= STATE_MAX, "{} bytes: {payload}", payload.len());
+        serde_json::from_str::<serde_json::Value>(&payload).unwrap();
+    }
+
+    #[test]
+    fn every_sensor_carries_the_template_and_no_control_does() {
+        // A control's `stat_t` points at `~/config/<key>`, which carries a bare
+        // number written by Home Assistant itself. A template there would look
+        // for a JSON member in a payload nothing writes, and the knob would
+        // stop showing its own value.
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            for entity in entities(node) {
+                let payload = parse(&config_payload(node, &entity, &avail).unwrap());
+                assert_eq!(
+                    payload["val_tpl"].as_str(),
+                    Some(VALUE_TEMPLATE),
+                    "{} {} has no value template",
+                    node.id,
+                    entity.desc.key
+                );
+            }
+            for control in controls(node) {
+                let payload = parse(&control_payload(node, control, &avail).unwrap());
+                assert!(
+                    payload.get("val_tpl").is_none(),
+                    "{} {} must not template its config topic",
+                    node.id,
+                    control.key
+                );
             }
         }
     }

@@ -77,12 +77,37 @@ leaving the number adjustable.
 The nodes publish at **QoS 0** (`main.rs`). A QoS 0 message is never queued for
 an absent subscriber — not with a persistent session, not with a QoS 1
 subscription, because delivery happens at the lower of the two. Every restart of
-the archiver, every deploy, every crash is therefore a hole in the series, and
-nothing on the broker side can close it.
+the archiver, every deploy, every crash is therefore a hole in the series.
 
-Fixing it properly would mean publishing at QoS 1, which costs a battery node an
-extra round trip per reading — the wrong trade for the node that is hardest to
-keep alive. So the mitigations are ordinary ones: run the archiver on the same
+Publishing at QoS 1 would close it and cost a battery node an extra round trip
+per reading — the wrong trade for the node that is hardest to keep alive. What
+was done instead closes the part of the hole that actually hurts, for free.
+
+**Readings are retained, and they carry their own timestamp.** The broker keeps
+the last value of every topic, so on reconnect the archiver is handed the most
+recent reading of every channel at once. That used to be worthless: the only
+clock available on receipt is "now", so a replayed value would have landed at
+the head of the series carrying the wrong time, and the archiver dropped every
+retained reading for exactly that reason. A reading that can date itself can be
+replayed, so the nodes now ask the home server for the time once per publish
+round (`src/ntp.rs`) and stamp each reading with when its sensor produced it
+(`src/clock.rs`, walking back by the sample's own age — on a node duty-cycling
+an SDS011 fan the gap between measuring and publishing is tens of seconds).
+
+Two things make that safe rather than merely appealing:
+
+- The readings table deduplicates on `(timestamp, node, sensor)`, so ingesting
+  the same retained value again — which happens on every reconnect — is a no-op
+  rather than a second row skewing the `_1m` average.
+- A timestamp is a claim, and it is checked on both sides against the same
+  window (2025–2100). A node whose clock is confused loses its precision, not
+  its readings: it publishes unstamped, and is dated on arrival as before.
+
+What this does **not** do is recover the whole gap. Retain holds one message per
+topic, not a queue, so an outage of ten minutes at a one-minute cadence gives
+back the last reading and not the other nine. For a deploy — seconds — that is
+effectively the whole hole; for an afternoon it is the head of each series and
+nothing more. The ordinary mitigations still apply: run the archiver on the same
 host as the broker, keep restarts short, and remember that Home Assistant's
 recorder is a second subscriber holding the last ~10 days independently.
 

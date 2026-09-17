@@ -24,7 +24,7 @@
 //! the bus is wrapped in a [`SharedI2c`] handle that each driver can own.
 
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::{with_timeout, Duration, TimeoutError};
+use embassy_time::{with_timeout, Duration, Instant, TimeoutError};
 use embedded_hal_async::i2c::{ErrorType, I2c as I2cTrait, Operation};
 use esp_hal::{
     gpio::GpioPin,
@@ -59,6 +59,14 @@ pub const MAX_SAMPLES: usize = 14;
 pub struct Sample {
     pub prefix: &'static str,
     pub reading: Reading,
+    /// When the sensor produced it, on the monotonic clock.
+    ///
+    /// Not a wall-clock time, because there is no wall clock yet: a round
+    /// collects its samples with the radio down and only learns the time once
+    /// it is up (see [`crate::ntp`]). This is what lets the publish path work
+    /// out how long ago that was -- on a node duty-cycling an SDS011 fan the
+    /// gap is tens of seconds, which is a whole rollup bucket to be wrong by.
+    pub at: Instant,
 }
 
 /// The set of readings gathered in one round.
@@ -564,6 +572,7 @@ async fn collect<S: Sensor>(sensor: &mut S, slot: Slot, out: &mut Samples) -> bo
             .push(Sample {
                 prefix: slot.prefix_for(reading.key),
                 reading,
+                at: Instant::now(),
             })
             .is_err()
         {
@@ -581,5 +590,6 @@ pub fn push_sample(out: &mut Samples, slot: Slot, key: &'static str, value: heap
     let _ = out.push(Sample {
         prefix: slot.prefix_for(key),
         reading: Reading { key, value },
+        at: Instant::now(),
     });
 }

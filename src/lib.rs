@@ -33,10 +33,12 @@
 #![allow(dead_code)]
 
 pub mod battery;
+pub mod clock;
 pub mod config;
 pub mod discovery;
 pub mod ds18b20;
 pub mod node;
+pub mod ntp;
 pub mod presence;
 pub mod reset_reason;
 pub mod rssi;

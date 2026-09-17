@@ -522,8 +522,17 @@ Two changes fell out of making that possible, both of which stand on their own:
 The tests worth having are the cross-checks, not the arithmetic: that a
 discovered state topic is exactly the topic the publish path uses, that every
 control key is one `Config::apply` accepts, that no two entities on a node share
-a topic or a unique id, and that `KNOWN_NODES` still lists the fleet. Those are
-the failures that would otherwise show up as an entity stuck at "unknown".
+a topic or a unique id, that the `val_tpl` a sensor announces names the member
+its state payload actually writes, and that `KNOWN_NODES` still lists the fleet.
+Those are the failures that would otherwise show up as an entity stuck at
+"unknown".
+
+That last-but-one is worth naming, because it is the shape all of them share. A
+value template is Jinja, evaluated inside Home Assistant: rename the JSON member
+a reading carries and nothing fails to compile, nothing fails on the node, and
+every sensor in the house goes blank on the next reflash. The test reads the
+member name back out of the template string and looks for it in a real payload —
+the only place those two halves meet before Home Assistant does.
 
 Compile-time assertions stay: they fail the build rather than a test run, and
 they cover invariants a test cannot reach.

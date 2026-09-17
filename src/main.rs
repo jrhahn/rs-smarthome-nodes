@@ -66,8 +66,8 @@ use rust_mqtt::{
 
 use node::{NodeConfig, Provision};
 use rs_smarthome_nodes::{
-    battery, config, discovery, ds18b20, hx711, node, platform, presence, reset_reason, rssi, sensors::scale,
-    state, wifi,
+    battery, clock, config, discovery, ds18b20, hx711, node, ntp, platform, presence, reset_reason,
+    rssi, sensors::scale, state, wifi,
 };
 
 use battery::Battery;
@@ -107,6 +107,21 @@ const MQTT_BROKER: Ipv4Address = parse_ipv4(match option_env!("MQTT_BROKER") {
     None => "192.168.1.67",
 });
 const MQTT_PORT: u16 = 1883;
+
+/// Where to ask for the time, baked in like the broker.
+///
+/// Defaults to the broker's own address: the machine running mosquitto is the
+/// home server, which is also the one thing on this LAN that is always up and
+/// already knows what time it is. Pointing at a public pool instead would make
+/// every reading's timestamp depend on the house having a working uplink, and
+/// add a DNS lookup to a path that currently needs none.
+const NTP_SERVER: Ipv4Address = parse_ipv4(match option_env!("NTP_SERVER") {
+    Some(s) => s,
+    None => match option_env!("MQTT_BROKER") {
+        Some(s) => s,
+        None => "192.168.1.67",
+    },
+});
 
 /// Const-parse a dotted-decimal IPv4 string (e.g. `"192.168.1.67"`) into an
 /// [`Ipv4Address`] at compile time, so `MQTT_BROKER` can come from an env var.
@@ -835,8 +850,13 @@ async fn run_awake(
         let mut samples = collect_samples(raw, None, &cfg, board).await;
 
         // Publish every cycle for a live view; this also drains retained config.
+        // The time sync is its own round trip with its own timeout, outside the
+        // publish budget: it is best-effort, and a slow time server should cost
+        // this round its timestamps, not its readings.
+        let now_ms = sync_time(stack).await;
         let drained =
-            match with_timeout(WIFI_BUDGET, publish_samples(stack, &mut samples, cfg)).await {
+            match with_timeout(WIFI_BUDGET, publish_samples(stack, &mut samples, cfg, now_ms)).await
+            {
                 Ok(Ok(d)) => d,
                 Ok(Err(e)) => {
                     warn!("publish failed: {}", e);
@@ -1244,12 +1264,16 @@ async fn bring_up_wifi(spawner: Spawner, radio: Radio) -> Result<&'static WifiSt
     let net_config = NetConfig::dhcpv4(Default::default());
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
+    // Four sockets, not three: the MQTT connection, DHCP, DNS -- and the UDP
+    // socket `ntp::query` opens for one round trip. smoltcp refuses to add a
+    // socket beyond this, so a stack sized for three would have made every
+    // time sync fail at `bind` rather than on the wire.
     let stack = &*mk_static!(
         WifiStack,
         Stack::new(
             wifi_interface,
             net_config,
-            mk_static!(StackResources<3>, StackResources::<3>::new()),
+            mk_static!(StackResources<4>, StackResources::<4>::new()),
             seed,
         )
     );
@@ -1271,11 +1295,41 @@ async fn connect_and_publish(
 ) -> Result<Drained, &'static str> {
     let stack = bring_up_wifi(spawner, radio).await?;
 
-    let updated = publish_samples(stack, samples, cfg).await?;
+    let updated = publish_samples(stack, samples, cfg, sync_time(stack).await).await?;
 
     // Give the TCP stack a moment to flush the FIN before we cut power.
     Timer::after(Duration::from_millis(200)).await;
     Ok(updated)
+}
+
+/// What time it is, or `None` if this round will go out unstamped.
+///
+/// Asked once per publish round rather than once per boot. On a sleeping node
+/// those are the same thing; on a mains node they are not, and asking every
+/// round is what keeps the timestamps honest — nothing on this board holds a
+/// clock between rounds, deliberately (see [`clock`]).
+///
+/// Never fatal. A node that cannot reach its time server still has readings
+/// worth publishing, and an unstamped one is dated on arrival by the archiver,
+/// exactly as every reading was before any of this existed.
+async fn sync_time(stack: &'static WifiStack) -> Option<u64> {
+    match ntp::query(stack, NTP_SERVER).await {
+        Ok(millis) if clock::is_plausible(millis) => {
+            info!("time synced: {} ms since the epoch", millis);
+            Some(millis)
+        }
+        // A server can answer correctly and still be answering about the wrong
+        // century — an era mistake, or a clock nobody ever set. Refused here so
+        // it costs a timestamp rather than poisoning the history with one.
+        Ok(millis) => {
+            warn!("time server gave an implausible {} ms; publishing unstamped", millis);
+            None
+        }
+        Err(why) => {
+            warn!("no time sync ({}); publishing unstamped", why);
+            None
+        }
+    }
 }
 
 /// Enter RTC-timer deep sleep for `interval`. Never returns — the chip resets
@@ -1314,6 +1368,7 @@ async fn publish_samples(
     stack: &'static WifiStack,
     samples: &mut Samples,
     cfg: Config,
+    now_ms: Option<u64>,
 ) -> Result<Drained, &'static str> {
     let node = node::active();
     let mut rx_buffer = [0u8; 1536];
@@ -1458,21 +1513,42 @@ async fn publish_samples(
         platform::push_sample(samples, node::Slot::on(), "rssi", value);
     }
 
+    // The wall clock reached the node after the samples were taken, so each one
+    // is dated by walking back its own age rather than by "now" -- see
+    // `clock::stamp`. With no clock this round, every payload simply goes out
+    // without a time.
+    let published_at = Instant::now();
     for sample in samples.iter() {
-        let topic = node.state_topic(sample.prefix, sample.reading.key);
-        client
-            .send_message(
-                &topic,
-                sample.reading.value.as_bytes(),
-                QualityOfService::QoS0,
-                false,
+        let taken_at = now_ms.map(|now| {
+            clock::stamp(
+                now,
+                published_at.saturating_duration_since(sample.at).as_millis(),
             )
+        });
+        let topic = node.state_topic(sample.prefix, sample.reading.key);
+        let Some(payload) = discovery::state_payload(&sample.reading.value, taken_at) else {
+            // Unreachable with a 16-byte value and a 13-digit timestamp, but a
+            // truncated payload would be malformed JSON and take the entity
+            // down, so it is dropped rather than sent.
+            warn!("state payload too long for {}; skipping", topic);
+            continue;
+        };
+        client
+            // Retained, which a reading was deliberately not until it could
+            // carry its own timestamp. Now that it can, the broker holding the
+            // last value per topic is what lets the archiver recover the head
+            // of every series after a restart instead of discarding it as
+            // undateable. Home Assistant is unaffected: `exp_aft` invalidates a
+            // retained value it is too old to believe.
+            .send_message(&topic, payload.as_bytes(), QualityOfService::QoS0, true)
             .await
             .map_err(|_| "mqtt publish")?;
-        info!("Published {} to {}", sample.reading.value, topic);
+        info!("Published {} to {}", payload, topic);
 
         // Mirror the weight to the pre-discovery topic while the hand-declared
-        // Home Assistant entity is still around.
+        // Home Assistant entity is still around. Bare and unretained, as it has
+        // always been: that entity is declared in the home-server nix config
+        // with no template, so JSON would read as `unknown` there.
         if let (Some(legacy), "weight") = (node.legacy_weight_topic, sample.reading.key) {
             client
                 .send_message(
