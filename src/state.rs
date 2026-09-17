@@ -236,30 +236,46 @@ static mut RESET_REASON: u32 = 0;
 #[ram(rtc_fast, persistent)]
 static mut RESET_COUNT: u32 = 0;
 
-/// Deep-sleep wake (`SocResetReason::CoreDeepSleep`). The expected cause on
-/// this node and the one worth filtering out; everything else is a report.
-pub const RESET_DEEP_SLEEP: u32 = 0x05;
+/// Says the two words above are ours rather than whatever the region held
+/// before. See [`crate::reset_reason::EPOCH_TAG`] for why this is not optional.
+#[ram(rtc_fast, persistent)]
+static mut RESET_TAG: u32 = 0;
 
 /// Record this boot's reset cause. Call once, early. A deep-sleep wake is the
 /// steady state and is ignored, so what stays latched is the last thing that
 /// was not routine.
 pub fn note_reset(code: u32) {
-    if code == RESET_DEEP_SLEEP {
-        return;
-    }
     unsafe {
-        core::ptr::addr_of_mut!(RESET_REASON).write(code);
-        let n = core::ptr::addr_of!(RESET_COUNT).read();
-        core::ptr::addr_of_mut!(RESET_COUNT).write(n.saturating_add(1));
+        let (tag, count, latched) = crate::reset_reason::latch(
+            core::ptr::addr_of!(RESET_TAG).read(),
+            core::ptr::addr_of!(RESET_COUNT).read(),
+            core::ptr::addr_of!(RESET_REASON).read(),
+            code,
+        );
+        core::ptr::addr_of_mut!(RESET_TAG).write(tag);
+        core::ptr::addr_of_mut!(RESET_COUNT).write(count);
+        core::ptr::addr_of_mut!(RESET_REASON).write(latched);
     }
+}
+
+/// Whether the words hold a history of ours. False before [`note_reset`] has
+/// run on a region that was never ours.
+fn reset_state_is_ours() -> bool {
+    unsafe { core::ptr::addr_of!(RESET_TAG).read() == crate::reset_reason::EPOCH_TAG }
 }
 
 /// The latched cause, or zero if nothing but deep sleep has happened.
 pub fn last_reset() -> u32 {
+    if !reset_state_is_ours() {
+        return 0;
+    }
     unsafe { core::ptr::addr_of!(RESET_REASON).read() }
 }
 
 /// How many non-routine resets since power-on.
 pub fn reset_count() -> u32 {
+    if !reset_state_is_ours() {
+        return 0;
+    }
     unsafe { core::ptr::addr_of!(RESET_COUNT).read() }
 }
