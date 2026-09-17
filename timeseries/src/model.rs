@@ -4,8 +4,8 @@
 //! Deliberately small: a reading is a node, a key, a number and a time, and
 //! everything downstream of the MQTT parser works in those terms. The firmware
 //! publishes exactly that and nothing more -- there is no schema to negotiate,
-//! because the topic *is* the schema (`<namespace>/<node>/<key>` carrying a
-//! decimal string).
+//! because the topic *is* the schema (`<namespace>/<node>/<key>`, carrying
+//! `{"v":<number>,"t":<unix_ms>}`).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,13 +29,19 @@ pub fn now_micros() -> Micros {
 
 /// One measurement, on its way to the database.
 ///
-/// `at` is when the *bridge* saw the message, not when the sensor read it. The
-/// nodes publish bare decimal strings with no timestamp of their own, so this
-/// is the best available -- and on a broker on the same LAN the gap is
-/// milliseconds. It does mean a node whose publish is delayed by a slow Wi-Fi
-/// join lands a little late; see `docs/timeseries.md` for why that is accepted
-/// rather than papered over with a node-side clock the battery nodes do not
-/// have.
+/// `at` is when the sensor produced it where the node could say so, and when
+/// the bridge saw the message otherwise. A node has no clock of its own -- the
+/// ESP32-C3 has no RTC that survives losing power -- so it asks the home server
+/// for the time once per publish round and walks each reading back by its own
+/// age (`src/clock.rs` in the firmware). A round whose time sync failed, or a
+/// node not yet reflashed, publishes without one and is dated on arrival, which
+/// is what every reading used to be.
+///
+/// The difference matters in exactly one place, and it is the reason for the
+/// whole arrangement: a reading that can date itself can be *replayed*. The
+/// broker holds the last value of each topic retained, so a restart of this
+/// service recovers the head of every series instead of discarding it as
+/// undateable -- see `mqtt::handle` and `schema::alter_dedup_ddl`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reading {
     pub node: String,

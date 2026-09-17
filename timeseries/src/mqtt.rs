@@ -4,7 +4,7 @@
 //! schema this service has:
 //!
 //! ```text
-//! smarthome/<node>/<key>              a reading, payload is a decimal string
+//! smarthome/<node>/<key>              a reading, `{"v":<number>,"t":<unix_ms>}`
 //! smarthome/<node>/status             online / offline (the last will)
 //! smarthome/<node>/config/<key>       retained knobs, Home Assistant -> node
 //! smarthome/provision/<mac>           retained identity, operator -> node
@@ -19,6 +19,13 @@
 //! The discovery topics are subscribed to but never written: they are where the
 //! units and display names come from, so adding a sensor to the firmware gives
 //! this dashboard its axis label without a line being changed here.
+//!
+//! A reading used to be a bare decimal string dated on arrival. It now brings
+//! its own timestamp, which is what makes a *retained* reading storable -- and
+//! therefore what lets a restart of this service recover the head of every
+//! series from the broker instead of losing it. Both shapes are accepted, and
+//! will be for as long as there is a node that has not been reflashed; see
+//! [`parse_measurement`].
 
 use std::time::Duration;
 
@@ -27,7 +34,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::config::Settings;
-use crate::model::{now_micros, Availability, ChannelMeta, Reading};
+use crate::model::{now_micros, Availability, ChannelMeta, Micros, Reading};
 use crate::questdb::Record;
 use crate::state::Shared;
 
@@ -90,7 +97,7 @@ pub fn classify<'a>(namespace: &str, discovery_prefix: &str, topic: &'a str) -> 
     Parsed::Ignored
 }
 
-/// A reading's payload: a bare decimal string, as the firmware writes it.
+/// A bare decimal string, as the firmware wrote it before it had a clock.
 ///
 /// Non-finite values are refused rather than stored. A NaN would be rejected by
 /// ILP anyway, and an infinity would poison every rollup bucket it landed in --
@@ -99,6 +106,62 @@ pub fn parse_value(payload: &[u8]) -> Option<f64> {
     let text = std::str::from_utf8(payload).ok()?.trim();
     let value: f64 = text.parse().ok()?;
     value.is_finite().then_some(value)
+}
+
+/// What a reading's payload turned out to say.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Measurement {
+    pub value: f64,
+    /// When the node says the sensor produced it, if it said. `None` for a node
+    /// that has not been reflashed yet, and for one whose time sync failed.
+    pub at: Option<Micros>,
+}
+
+/// The plausible window for a node-supplied timestamp, in milliseconds:
+/// 2025-01-01 to 2100-01-01.
+///
+/// The same bound the firmware applies before it publishes one (`clock.rs`),
+/// repeated here rather than shared because the two are separately deployed:
+/// nodes are reflashed one at a time, and this side has to survive whatever a
+/// node that has not been reflashed -- or has been flashed with something
+/// else -- puts on the topic. A timestamp is a claim, and this is where it stops
+/// being taken on trust.
+const SANE_FROM_MS: i64 = 1_735_689_600_000;
+const SANE_UNTIL_MS: i64 = 4_102_444_800_000;
+
+/// A reading's payload, in either of the two shapes that are live at once.
+///
+/// The fleet is reflashed node by node, so both forms arrive on the same topics
+/// for as long as that takes -- and the older one keeps working for ever, since
+/// nothing forces a node to be updated:
+///
+/// ```text
+/// 21.5                          a bare decimal: no clock, dated on arrival
+/// {"v":21.5}                    a node whose time sync failed this round
+/// {"v":21.5,"t":1789675200123}  taken at that Unix millisecond
+/// ```
+///
+/// An implausible `t` is dropped back to `None` rather than refusing the
+/// reading: the value is still good, and a node with a confused clock should
+/// cost its readings their precision, not their existence.
+pub fn parse_measurement(payload: &[u8]) -> Option<Measurement> {
+    // The bare form first: it is what every node sent until this change, it is
+    // unambiguous, and it costs one parse rather than a JSON walk.
+    if let Some(value) = parse_value(payload) {
+        return Some(Measurement { value, at: None });
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let value = json.get("v").and_then(serde_json::Value::as_f64)?;
+    if !value.is_finite() {
+        return None;
+    }
+    let at = json
+        .get("t")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|ms| (SANE_FROM_MS..SANE_UNTIL_MS).contains(ms))
+        .map(|ms| ms * 1_000);
+    Some(Measurement { value, at })
 }
 
 /// The availability payloads, as `discovery::PAYLOAD_ONLINE` / `_OFFLINE`.
@@ -206,27 +269,37 @@ async fn handle(
         topic,
     ) {
         Parsed::Reading { node, sensor } => {
-            // A retained reading is a value from the past being replayed on
-            // connect, and the only timestamp available here is "now" -- so
-            // storing it would put a stale number at the head of the series.
-            // The firmware publishes readings unretained precisely so this
-            // does not arise; anything retained on a reading topic came from
-            // somewhere else.
-            if retained {
-                debug!(topic, "ignoring a retained reading");
-                shared.stats().record_skipped();
-                return;
-            }
-            let Some(value) = parse_value(payload) else {
+            let Some(measurement) = parse_measurement(payload) else {
                 warn!(topic, payload = %String::from_utf8_lossy(payload), "unparseable reading");
                 shared.stats().record_skipped();
                 return;
             };
+            // A retained reading is a value from the past being replayed on
+            // connect. Whether that is worth storing turns entirely on whether
+            // it can be dated: with a timestamp of its own it is simply a
+            // reading that arrived late, and re-ingesting it is a no-op because
+            // the table deduplicates on (timestamp, node, sensor). Without one,
+            // the only clock available here is "now", which would put a stale
+            // number at the head of the series -- so it is still dropped.
+            //
+            // This is what the retained state topics are *for*: after a restart
+            // of this service, the broker replays the last value of every
+            // channel, and the head of each series is recovered rather than
+            // lost. See `schema::alter_dedup_ddl`.
+            let at = match measurement.at {
+                Some(at) => at,
+                None if retained => {
+                    debug!(topic, "ignoring a retained reading that carries no timestamp");
+                    shared.stats().record_skipped();
+                    return;
+                }
+                None => now_micros(),
+            };
             let reading = Reading {
                 node: node.to_string(),
                 sensor: sensor.to_string(),
-                value,
-                at: now_micros(),
+                value: measurement.value,
+                at,
             };
             shared.observe(&reading);
             if tx.send(Record::Reading(reading)).await.is_err() {
@@ -389,6 +462,75 @@ mod tests {
         assert_eq!(parse_value(b"inf"), None);
         assert_eq!(parse_value(b"NaN"), None);
         assert_eq!(parse_value(&[0xff, 0xfe]), None);
+    }
+
+    #[test]
+    fn a_reading_carries_its_own_timestamp() {
+        let m = parse_measurement(br#"{"v":21.5,"t":1789675200123}"#).unwrap();
+        assert_eq!(m.value, 21.5);
+        // Milliseconds on the wire, microseconds in the database.
+        assert_eq!(m.at, Some(1_789_675_200_123_000));
+    }
+
+    #[test]
+    fn both_payload_shapes_are_live_at_once() {
+        // Nodes are reflashed one at a time, so the bare form has to keep
+        // working for as long as one node has not been -- which is for ever, in
+        // the sense that nothing forces the update.
+        let bare = parse_measurement(b"412").unwrap();
+        assert_eq!(bare.value, 412.0);
+        assert_eq!(bare.at, None, "a bare reading is dated on arrival");
+
+        // And the shape a reflashed node sends when its time sync failed.
+        let unstamped = parse_measurement(br#"{"v":412}"#).unwrap();
+        assert_eq!(unstamped.value, 412.0);
+        assert_eq!(unstamped.at, None);
+    }
+
+    #[test]
+    fn a_confused_clock_costs_precision_and_not_the_reading() {
+        // The value is still good; only the claim about when is refused. Each
+        // of these is a real failure mode: an NTP era slip landing in 1900, a
+        // zero from a node that never synced, seconds sent where milliseconds
+        // are meant, and a garbage register.
+        for payload in [
+            br#"{"v":21.5,"t":0}"#.as_slice(),
+            br#"{"v":21.5,"t":-2208988800000}"#.as_slice(),
+            br#"{"v":21.5,"t":1789675200}"#.as_slice(),
+            br#"{"v":21.5,"t":999999999999999}"#.as_slice(),
+        ] {
+            let m = parse_measurement(payload).unwrap();
+            assert_eq!(m.value, 21.5, "{}", String::from_utf8_lossy(payload));
+            assert_eq!(m.at, None, "{}", String::from_utf8_lossy(payload));
+        }
+    }
+
+    #[test]
+    fn the_plausible_window_is_the_one_the_firmware_applies() {
+        // Same bound as `clock::is_plausible` on the node, checked at both
+        // edges so the two cannot drift apart unnoticed.
+        let at = |ms: i64| {
+            parse_measurement(format!(r#"{{"v":1,"t":{ms}}}"#).as_bytes())
+                .unwrap()
+                .at
+        };
+        assert_eq!(at(SANE_FROM_MS), Some(SANE_FROM_MS * 1_000));
+        assert_eq!(at(SANE_FROM_MS - 1), None);
+        assert_eq!(at(SANE_UNTIL_MS), None);
+        assert_eq!(at(SANE_UNTIL_MS - 1), Some((SANE_UNTIL_MS - 1) * 1_000));
+    }
+
+    #[test]
+    fn a_json_payload_without_a_value_is_not_a_reading() {
+        assert!(parse_measurement(br#"{"t":1789675200123}"#).is_none());
+        assert!(parse_measurement(br#"{"v":"warm"}"#).is_none());
+        assert!(parse_measurement(br#"{"v":null}"#).is_none());
+        assert!(parse_measurement(b"{").is_none());
+        assert!(parse_measurement(b"").is_none());
+        // The same non-finite refusal the bare form makes, since an infinity
+        // would poison every rollup bucket it landed in. JSON has no literal
+        // for one, but a big enough exponent overflows to it.
+        assert!(parse_measurement(br#"{"v":1e400}"#).is_none());
     }
 
     #[test]
