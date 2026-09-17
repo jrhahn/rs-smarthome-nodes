@@ -20,7 +20,7 @@
 
 use core::fmt::Write as _;
 use core::ptr::addr_of;
-#[cfg(feature = "hal")]
+#[cfg(any(feature = "hal", test))]
 use core::ptr::addr_of_mut;
 
 use heapless::String;
@@ -361,6 +361,38 @@ impl NodeConfig {
         t
     }
 
+    /// Retained topic an update offer arrives on.
+    ///
+    /// Four levels deep on purpose. The archiver subscribes to
+    /// `<namespace>/+/+`, i.e. exactly three, so an offer published one level
+    /// higher would be handed to the ingest path and counted as an unparseable
+    /// reading once per delivery. Everything under `ota/` is invisible to it.
+    pub fn ota_offer_topic(&self) -> String<64> {
+        let mut t = String::new();
+        let _ = write!(t, "{}/{}/ota/offer", self.namespace, self.id);
+        t
+    }
+
+    /// Where the node says which image it is actually running — the answer to
+    /// "is this one updated?", which cost an hour of guessing on 2026-09-17.
+    pub fn ota_version_topic(&self) -> String<64> {
+        let mut t = String::new();
+        let _ = write!(t, "{}/{}/ota/version", self.namespace, self.id);
+        t
+    }
+
+    /// Retained topic carrying what this board *is*, as opposed to what it
+    /// measures: MAC, running image, address, active slot.
+    ///
+    /// Four levels deep for the same reason the OTA topics are — the archiver's
+    /// `<namespace>/+/+` subscription must never be handed a payload that is
+    /// not a number.
+    pub fn meta_topic(&self) -> String<64> {
+        let mut t = String::new();
+        let _ = write!(t, "{}/{}/meta/board", self.namespace, self.id);
+        t
+    }
+
     /// Wildcard the firmware subscribes to while it is online.
     pub fn config_wildcard(&self) -> String<64> {
         let mut t = self.config_prefix();
@@ -665,6 +697,43 @@ static mut ACTIVE: NodeConfig = BUILT_AS;
 pub fn active() -> NodeConfig {
     unsafe { addr_of!(ACTIVE).read() }
 }
+
+/// This board's MAC, or all-zero before [`set_mac`] has been called.
+///
+/// The MAC is the only name that does not move: a board can be provisioned into
+/// another room and reflashed with another image, and this stays what it was.
+/// That is exactly the distinction that took two hours to make on 2026-09-17,
+/// when two boards published under one node name — so it is published, not just
+/// printed to a console nobody is reading.
+pub fn mac() -> [u8; 6] {
+    unsafe { addr_of!(BOARD_MAC).read() }
+}
+
+/// `ac:27:6e:7f:a6:b4`, lowercase and colon-separated — the form `udevadm`
+/// prints and Home Assistant expects in a device `connections` entry.
+pub fn mac_string() -> String<17> {
+    let m = mac();
+    let mut s = String::new();
+    let _ = write!(
+        s,
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        m[0], m[1], m[2], m[3], m[4], m[5]
+    );
+    s
+}
+
+/// Record the board's MAC. Call once in `main`, before anything announces
+/// itself; everything after that reads it through [`mac`].
+///
+/// Available to the host tests as well, because the discovery payload is bigger
+/// with a MAC in it than without — and a test that measured the smaller one
+/// would be guarding the wrong number.
+#[cfg(any(feature = "hal", test))]
+pub fn set_mac(mac: [u8; 6]) {
+    unsafe { addr_of_mut!(BOARD_MAC).write(mac) };
+}
+
+static mut BOARD_MAC: [u8; 6] = [0; 6];
 
 /// Resolve the identity for this boot: a provisioned name in flash wins over
 /// the one the image was built with. Call once, early in `main`, before any

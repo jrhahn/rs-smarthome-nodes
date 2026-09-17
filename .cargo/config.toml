@@ -1,5 +1,8 @@
 [target.riscv32imc-unknown-none-elf]
-runner = "espflash flash --monitor"
+# The partition table is part of every flash from here on: without it espflash
+# writes its default single-app table, which has no second slot and no otadata,
+# and the board silently loses the ability to update itself. See docs/ota.md.
+runner = "espflash flash --monitor --partition-table partitions.csv"
 
 rustflags = [
     # esp-hal's `linkall.x` pulls in every sub-script (memory map, ROM

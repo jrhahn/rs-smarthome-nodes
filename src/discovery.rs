@@ -67,7 +67,7 @@ pub const MAX_CONTROLS: usize = 12;
 /// control on a node with a last will and a long name); the headroom is for the
 /// device block, which grows with the node's name. An over-long payload is
 /// dropped rather than truncated, so this only ever costs an entity.
-pub const PAYLOAD_MAX: usize = 448;
+pub const PAYLOAD_MAX: usize = 512;
 
 /// A rendered discovery payload.
 pub type Payload = String<PAYLOAD_MAX>;
@@ -365,9 +365,20 @@ pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) 
 fn write_device(p: &mut Payload, node: &NodeConfig) -> core::fmt::Result {
     write!(
         p,
-        "\"dev\":{{\"ids\":[\"{}\"],\"name\":\"{}\",\"mf\":\"{}\",\"mdl\":\"{}\"}}}}",
-        node.id, node.name, MANUFACTURER, MODEL
-    )
+        "\"dev\":{{\"ids\":[\"{}\"],\"name\":\"{}\",\"mf\":\"{}\",\"mdl\":\"{}\",\"sw\":\"{}\"",
+        node.id, node.name, MANUFACTURER, MODEL, crate::FW_VERSION
+    )?;
+    // `cns` is Home Assistant's abbreviation for `connections`, and a `mac`
+    // entry is what puts the board's address on its device page. Omitted rather
+    // than written as all-zero when `node::set_mac` has not run — a host test
+    // has no efuse to read, and a zero MAC in Home Assistant's device registry
+    // is worse than no MAC, because two nodes would then share a connection and
+    // be merged into one device.
+    let mac = crate::node::mac();
+    if mac != [0u8; 6] {
+        write!(p, ",\"cns\":[[\"mac\",\"{}\"]]", crate::node::mac_string())?;
+    }
+    write!(p, "}}}}")
 }
 
 // --- Command entities --------------------------------------------------------
@@ -698,10 +709,55 @@ mod tests {
     }
 
     fn availability_of(node: &NodeConfig) -> Availability {
+        set_test_mac();
         availability(node, &Config::DEFAULT)
     }
 
+    /// Give the board a MAC before any device block is rendered.
+    ///
+    /// Every payload test goes through [`availability_of`], which makes it the
+    /// one place that can promise this. It matters because the MAC is a
+    /// process-wide global and the tests run in parallel: setting it inside a
+    /// single test made *other* tests render some of their payloads without it
+    /// and some with, so a device block that must be byte-identical across a
+    /// node's entities was not.
+    fn set_test_mac() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| crate::node::set_mac([0xAC, 0x27, 0x6E, 0x7F, 0xA6, 0xB4]));
+    }
+
     // --- Payloads -----------------------------------------------------------
+
+    #[test]
+    fn the_biggest_payload_still_has_room() {
+        // `config_payload` returns `None` rather than truncating, and `main`
+        // logs that and carries on -- so an entity that no longer fits does not
+        // fail anything, it simply never appears in Home Assistant. That is a
+        // silent loss, and this is the test that turns it into a loud one.
+        //
+        // Measured 2026-09-17: 384 bytes before the device block gained the
+        // firmware version and the MAC. The MAC has to be set or this would
+        // measure a payload 36 bytes smaller than the one a board really
+        // sends, and guard the wrong number.
+        set_test_mac();
+        let mut worst = (0usize, String::new());
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            for (topic, payload) in announcements(node, &avail) {
+                let len = serde_json::to_string(&payload).unwrap().len();
+                if len > worst.0 {
+                    worst = (len, topic);
+                }
+            }
+        }
+        assert!(
+            worst.0 + 32 <= super::PAYLOAD_MAX,
+            "the largest payload ({} bytes, {}) leaves under 32 bytes of headroom in a String<{}>",
+            worst.0,
+            worst.1,
+            super::PAYLOAD_MAX
+        );
+    }
 
     #[test]
     fn every_payload_is_valid_json_and_fits() {

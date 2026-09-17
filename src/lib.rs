@@ -32,17 +32,30 @@
 // protocol constants kept for symmetry); that is not dead code, it is the API.
 #![allow(dead_code)]
 
+/// Which image this is: `<node>-<commit>`, stamped in by `build.rs`, with
+/// `-dirty` when the working tree did not match the commit.
+///
+/// Lives here rather than in `main` because three things need it: the retained
+/// version topic, the `sw` field of the Home Assistant device block, and
+/// [`ota::parse_offer`], which refuses an offer naming the version already
+/// running.
+pub const FW_VERSION: &str = env!("FW_VERSION");
+
 pub mod battery;
 pub mod clock;
 pub mod config;
 pub mod discovery;
 pub mod ds18b20;
+#[cfg(feature = "drivers")]
+pub mod http;
 pub mod node;
 pub mod ntp;
+pub mod ota;
 pub mod presence;
 pub mod reset_reason;
 pub mod rssi;
 pub mod sensors;
+pub mod sha256;
 pub mod wifi;
 
 #[cfg(feature = "drivers")]

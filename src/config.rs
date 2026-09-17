@@ -442,7 +442,11 @@ pub fn clear_node_name() -> Result<(), &'static str> {
 }
 
 /// Standard CRC-32 (IEEE, reflected, poly `0xEDB88820`).
-const fn crc32(data: &[u8]) -> u32 {
+///
+/// Shared with [`crate::ota`], whose bookkeeping blob follows the same
+/// magic/version/CRC discipline. Note that `otadata` itself does *not* use this
+/// function — the bootloader seeds its CRC differently, see `ota::entry_crc`.
+pub(crate) const fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     let mut i = 0;
     while i < data.len() {

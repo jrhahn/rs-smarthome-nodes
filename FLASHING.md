@@ -108,14 +108,15 @@ your computer, no probe or adapter involved.
 
 ```bash
 # Build, flash, and open the serial monitor in one step
-# (`cargo run` uses the `espflash flash --monitor` runner from .cargo/config.toml)
+# (`cargo run` uses the runner from .cargo/config.toml, which passes
+#  `--partition-table partitions.csv` -- see below)
 SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
 
 # …for one of the other nodes
 NODE=kueche SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
 
 # …or flash an already-built ELF explicitly:
-espflash flash --monitor \
+espflash flash --monitor --partition-table partitions.csv \
   target/riscv32imc-unknown-none-elf/release/rs-smarthome-nodes
 ```
 
@@ -124,6 +125,35 @@ Useful checks:
 ```bash
 espflash board-info          # confirm the chip is detected
 ```
+
+### Every flash now carries the partition table
+
+`cargo run` passes `--partition-table partitions.csv`, and a hand-written
+`espflash flash` must do the same:
+
+```bash
+espflash flash --partition-table partitions.csv --port /dev/ttyACM0 "$ELF"
+```
+
+**Leaving it out is not a no-op.** `espflash` then writes its own default table
+— one `factory` app, no second slot, no `otadata` — and the board silently loses
+the ability to update itself over the air. It still boots and still publishes,
+so nothing about it looks wrong.
+
+The table splits the flash into two 1 984 KB application slots either side of a
+selector sector, and keeps `nvs` exactly where it was: the config blob at
+`0x9000`, the identity at `0xA000` and the stored Wi-Fi credentials at `0xB000`
+all stay addressable, so **the migration costs no board its calibration**. The
+reasoning, and what the second slot is for, is in [`docs/ota.md`](docs/ota.md).
+
+Check what a board actually has before assuming:
+
+```bash
+espflash partition-table partitions.csv     # what we intend to write
+```
+
+and after flashing, the boot log lists what is really there — a board that has
+been migrated shows `ota_0` and `ota_1` where it used to show `factory`.
 
 > **Getting into download mode:** a battery node (`NODE=terrasse`) enters deep
 > sleep a couple of seconds after boot, which can interrupt a flash — mains

@@ -1,0 +1,15 @@
+# Partition table for the OTA-capable firmware. Flashed once per board, by
+# cable, at 0x8000 -- see docs/ota.md.
+#
+# The three sectors this firmware writes itself (0x9000 config, 0xA000 identity,
+# 0xB000 stored Wi-Fi credentials, see src/config.rs) stay exactly where they
+# are, and 0xC000 is the OTA bookkeeping blob. Moving `nvs` would cost the fleet
+# its calibration -- the terrasse load cell above all, which nothing can
+# reproduce from memory.
+#
+# Name,     Type, SubType,  Offset,    Size
+nvs,        data, nvs,      0x9000,    0x4000
+otadata,    data, ota,      0xD000,    0x2000
+phy_init,   data, phy,      0xF000,    0x1000
+ota_0,      app,  ota_0,    0x10000,   0x1F0000
+ota_1,      app,  ota_1,    0x200000,  0x1F0000

@@ -66,8 +66,8 @@ use rust_mqtt::{
 
 use node::{NodeConfig, Provision};
 use rs_smarthome_nodes::{
-    battery, clock, config, discovery, ds18b20, hx711, node, ntp, platform, presence, reset_reason,
-    rssi, sensors::scale, state, wifi,
+    battery, clock, config, discovery, ds18b20, http, hx711, node, ntp, ota, platform, presence,
+    reset_reason, rssi, sensors::scale, state, wifi, FW_VERSION,
 };
 
 use battery::Battery;
@@ -78,6 +78,20 @@ use platform::{Samples, Sensors};
 
 /// The concrete network-stack type used throughout the firmware.
 type WifiStack = Stack<WifiDevice<'static, WifiStaDevice>>;
+
+/// Staging buffer for a firmware download, one flash sector wide.
+///
+/// Static rather than stacked: 4 KB is a lot to ask of a task stack, and rather
+/// than a heap allocation that could fail halfway through an update with the
+/// radio up. See [`ota::Writer::new`] for why the size is a whole sector.
+fn ota_staging() -> &'static mut [u8; ota::SECTOR as usize] {
+    static mut STAGING: [u8; ota::SECTOR as usize] = [0; ota::SECTOR as usize];
+    // SAFETY: one consumer, never re-entered. `run_update` is the only caller,
+    // it runs on the single executor thread, and it is awaited to completion
+    // inside one publish round -- the next round cannot begin until it has
+    // returned.
+    unsafe { &mut *core::ptr::addr_of_mut!(STAGING) }
+}
 
 // --- Compile-time configuration --------------------------------------------
 // Override the credentials at build time, e.g.:
@@ -304,6 +318,7 @@ async fn main(spawner: Spawner) {
     // built with. Must happen before any peripheral is touched: the sensor set
     // decides which buses come up at all.
     node::init();
+    node::set_mac(Efuse::read_base_mac_address());
     let node = node::active();
 
     info!(
@@ -316,8 +331,9 @@ async fn main(spawner: Spawner) {
     // is the only name it is sure of before provisioning.
     info!(
         "provision topic: {}",
-        node::provision_topic(Efuse::read_base_mac_address())
+        node::provision_topic(node::mac())
     );
+    info!("firmware: {} on board {}", FW_VERSION, node::mac_string());
 
     // Which network? Credentials stored over the serial console win over the
     // ones compiled in. Resolved before the radio comes up, and before the
@@ -860,11 +876,19 @@ async fn run_awake(
                 Ok(Ok(d)) => d,
                 Ok(Err(e)) => {
                     warn!("publish failed: {}", e);
-                    Drained { cfg, tare: false }
+                    Drained {
+                cfg,
+                tare: false,
+                offer: None,
+            }
                 }
                 Err(_) => {
                     warn!("publish exceeded {:?}", WIFI_BUDGET);
-                    Drained { cfg, tare: false }
+                    Drained {
+                cfg,
+                tare: false,
+                offer: None,
+            }
                 }
             };
         let updated = if drained.tare {
@@ -1132,6 +1156,10 @@ fn persist_if_changed(old: Config, new: Config) -> Config {
 struct Drained {
     cfg: Config,
     tare: bool,
+    /// An update offer picked up while draining, carried out of the MQTT code
+    /// for the same reason `tare` is: acting on it needs the network stack and
+    /// a socket of its own, and neither belongs inside the drain loop.
+    offer: Option<heapless::String<256>>,
 }
 
 /// Bring up Wi-Fi + the network stack, publish `samples`, and pull any retained
@@ -1156,11 +1184,19 @@ async fn publish(
         Ok(Ok(d)) => d,
         Ok(Err(e)) => {
             warn!("publish failed: {}", e);
-            Drained { cfg, tare: false }
+            Drained {
+                cfg,
+                tare: false,
+                offer: None,
+            }
         }
         Err(_) => {
             warn!("Wi-Fi/publish exceeded {:?}, giving up", WIFI_BUDGET);
-            Drained { cfg, tare: false }
+            Drained {
+                cfg,
+                tare: false,
+                offer: None,
+            }
         }
     };
     let updated = if drained.tare {
@@ -1295,11 +1331,171 @@ async fn connect_and_publish(
 ) -> Result<Drained, &'static str> {
     let stack = bring_up_wifi(spawner, radio).await?;
 
+    // Count this round against an image that has not proved itself yet, before
+    // the round rather than after it: an image that panics halfway through a
+    // publish is exactly what the rollback exists for, and it would never get
+    // as far as recording its own attempt.
+    let on_trial = ota_begin_attempt();
+
     let updated = publish_samples(stack, samples, cfg, sync_time(stack).await).await?;
+
+    // Reaching the broker is the proof, and nothing weaker will do. An image
+    // with a wrong SSID, a moved broker or a panic after association boots
+    // perfectly well and is never heard from again.
+    if on_trial {
+        ota_confirm();
+    }
+
+    // An offer picked up in the round just now. Installed here, where the stack
+    // is up and the MQTT socket has been handed back.
+    if let Some(offer) = updated.offer.as_deref() {
+        match run_update(stack, offer).await {
+            Ok(seq) => {
+                info!("image written and selected (seq {}); restarting into it", seq);
+                Timer::after(Duration::from_millis(200)).await;
+                software_reset();
+            }
+            Err(e) => warn!("update not installed: {}", e),
+        }
+    }
 
     // Give the TCP stack a moment to flush the FIN before we cut power.
     Timer::after(Duration::from_millis(200)).await;
     Ok(updated)
+}
+
+/// What this board is, as opposed to what it measures.
+///
+/// JSON rather than a handful of topics: it is read by a person with
+/// `mosquitto_sub`, not by the archiver, and one retained object per node makes
+/// `smarthome/+/meta/board` a listing of the whole fleet — MAC, image, address
+/// and which slot it is running from, for sleeping nodes too.
+fn board_meta(stack: &'static WifiStack) -> Option<heapless::String<224>> {
+    use core::fmt::Write as _;
+
+    let node = node::active();
+    let active = ota::active(ota::read_otadata());
+    let mut p = heapless::String::new();
+    write!(
+        p,
+        r#"{{"mac":"{}","version":"{}","node":"{}","identity":"{}","slot":{},"seq":{}"#,
+        node::mac_string(),
+        FW_VERSION,
+        node.id,
+        // Whether this board is running the identity it was flashed with, which
+        // is the other half of "why is this node called that".
+        if config::load_node_name().is_some() {
+            "provisioned"
+        } else {
+            "built-in"
+        },
+        active.slot,
+        active.seq,
+    )
+    .ok()?;
+    if let Some(config) = stack.config_v4() {
+        write!(p, r#","ip":"{}""#, config.address.address()).ok()?;
+    }
+    p.push('}').ok()?;
+    Some(p)
+}
+
+/// How long a download gets before it is abandoned. Generous: 740 KB over a
+/// link a battery node is paying for, with a flash erase every sector. A round
+/// that overruns it costs the update, not the node -- the slot being written is
+/// the one that is *not* running.
+const OTA_BUDGET: Duration = Duration::from_secs(240);
+
+/// Count a publish attempt against an unconfirmed image, rolling back if it has
+/// had its three. Returns whether an image is on trial at all.
+fn ota_begin_attempt() -> bool {
+    let active = ota::active(ota::read_otadata());
+    match ota::on_attempt(ota::load_pending(), active.seq, ota::MAX_ATTEMPTS) {
+        ota::Verdict::Nothing => false,
+        ota::Verdict::Trying { attempts } => {
+            warn!(
+                "running an unconfirmed image (attempt {} of {}); it is confirmed by reaching the broker",
+                attempts,
+                ota::MAX_ATTEMPTS
+            );
+            if let Err(e) = ota::store_pending(Some(ota::Pending {
+                seq: active.seq,
+                attempts,
+            })) {
+                warn!("could not record the attempt: {}", e);
+            }
+            true
+        }
+        ota::Verdict::RollBack => {
+            warn!(
+                "unconfirmed image failed {} attempts; going back to slot {}",
+                ota::MAX_ATTEMPTS,
+                active.target_slot()
+            );
+            match ota::roll_back(active) {
+                Ok(seq) => info!("selector points back at slot {} (seq {})", active.target_slot(), seq),
+                Err(e) => warn!("rollback failed, and this node is now on its own: {}", e),
+            }
+            software_reset();
+            false
+        }
+    }
+}
+
+/// Mark the running image as proved.
+fn ota_confirm() {
+    match ota::clear_pending() {
+        Ok(()) => info!("update confirmed: this image has published a round"),
+        Err(e) => warn!("could not clear the trial record: {}", e),
+    }
+}
+
+/// Fetch an offered image into the slot that is not running, check it, and point
+/// the selector at it. Returns the new sequence number; the caller reboots.
+///
+/// Every failure here leaves the node exactly as it was: the slot being written
+/// is the inactive one, and the selector is not touched until the digest has
+/// matched.
+async fn run_update(stack: &'static WifiStack, offer_json: &str) -> Result<u32, &'static str> {
+    let node = node::active();
+    let offer =
+        ota::parse_offer(offer_json, FW_VERSION, node.id).map_err(ota::OfferError::as_str)?;
+    let url = http::parse_url(offer.url).map_err(http::UrlError::as_str)?;
+    let active = ota::active(ota::read_otadata());
+    let slot = active.target_slot();
+    info!(
+        "update offered: {} ({} bytes) -> slot {}",
+        offer.version, offer.size, slot
+    );
+
+    let mut writer = ota::Writer::new(slot, offer.size, ota_staging())?;
+
+    let mut rx_buffer = [0u8; 1536];
+    let mut tx_buffer = [0u8; 512];
+    let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+    socket.set_timeout(Some(Duration::from_secs(15)));
+    socket
+        .connect((
+            Ipv4Address::new(url.ip[0], url.ip[1], url.ip[2], url.ip[3]),
+            url.port,
+        ))
+        .await
+        .map_err(|_| "could not reach the image server")?;
+
+    let mut scratch = [0u8; 512];
+    let fetched = with_timeout(
+        OTA_BUDGET,
+        http::fetch(&mut socket, &url, 0, &mut scratch, |chunk| {
+            writer.write(chunk)
+        }),
+    )
+    .await
+    .map_err(|_| "download exceeded its budget")??;
+    socket.close();
+
+    let slot = writer.finish(&offer.sha256)?;
+    info!("{} bytes written to slot {}, digest matches", fetched, slot);
+    ota::activate(active, slot)
 }
 
 /// What time it is, or `None` if this round will go out unstamped.
@@ -1436,6 +1632,37 @@ async fn publish_samples(
             .map_err(|_| "mqtt availability")?;
     }
 
+    // Which image this is. Retained, four levels deep so the archiver's
+    // `<namespace>/+/+` subscription never sees a payload that is not a number.
+    let version_topic = node.ota_version_topic();
+    if client
+        .send_message(
+            &version_topic,
+            FW_VERSION.as_bytes(),
+            QualityOfService::QoS0,
+            true,
+        )
+        .await
+        .is_err()
+    {
+        warn!("could not publish the firmware version");
+    }
+
+    // And which *board* this is, which is a different question: the node name
+    // can be provisioned from one board to another, the MAC cannot. Two boards
+    // publishing under one name showed up as flapping values on 2026-09-17 and
+    // took two hours to pin down; here it would have been one `mosquitto_sub`.
+    let meta_topic = node.meta_topic();
+    if let Some(payload) = board_meta(stack) {
+        if client
+            .send_message(&meta_topic, payload.as_bytes(), QualityOfService::QoS0, true)
+            .await
+            .is_err()
+        {
+            warn!("could not publish the board description");
+        }
+    }
+
     // --- Home Assistant discovery (#16) ------------------------------------
     // Retained, so the broker replays it to Home Assistant on its next restart;
     // hence once per power cycle is enough (the flag lives in RTC RAM).
@@ -1570,6 +1797,7 @@ async fn publish_samples(
     // backstop. Best-effort: a failed sync never fails the publish.
     let mut updated = cfg;
     let mut reprovision = None;
+    let mut offer: Option<heapless::String<256>> = None;
     let mut tare_pressed = false;
     let mut reannounce_pressed = false;
     let mut reset_visits_pressed = false;
@@ -1585,9 +1813,11 @@ async fn publish_samples(
     // knob was unreachable that way: tare, scale_factor, deep_sleep and the
     // intervals all sat retained on the broker being thrown away once a round.
     let config_wildcard = node.config_wildcard();
-    let mut filters = heapless::Vec::<&str, 2>::new();
+    let ota_offer_topic = node.ota_offer_topic();
+    let mut filters = heapless::Vec::<&str, 3>::new();
     let _ = filters.push(config_wildcard.as_str());
     let _ = filters.push(provision_topic.as_str());
+    let _ = filters.push(ota_offer_topic.as_str());
 
     if client.subscribe_to_topics(&filters).await.is_ok() {
         for _ in 0..12 {
@@ -1597,7 +1827,17 @@ async fn publish_samples(
                         continue;
                     };
                     let value = value.trim();
-                    if topic == provision_topic {
+                    if topic == ota_offer_topic {
+                        // Copied out rather than acted on here: installing it
+                        // needs a socket of its own, and this one is busy being
+                        // an MQTT client. An offer too long to hold is dropped
+                        // with a word rather than silently truncated into
+                        // something that would fail to parse later.
+                        match heapless::String::try_from(value) {
+                            Ok(text) => offer = Some(text),
+                            Err(()) => warn!("update offer is too long to hold; ignoring it"),
+                        }
+                    } else if topic == provision_topic {
                         reprovision = node::provision_request(
                             value,
                             &node,
@@ -1720,6 +1960,7 @@ async fn publish_samples(
     Ok(Drained {
         cfg: updated,
         tare: tare_pressed,
+        offer,
     })
 }
 
@@ -1756,7 +1997,7 @@ fn apply_provisioning(request: Provision) {
 /// MQTT read/write buffer size. Sized for the largest packet the node sends —
 /// a Home Assistant discovery config (topic ≤96 B + payload ≤`PAYLOAD_MAX` +
 /// MQTT v5 headers) — with room to spare.
-const MQTT_BUFFER: usize = 640;
+const MQTT_BUFFER: usize = 768;
 
 const _: () = assert!(MQTT_BUFFER >= discovery::PAYLOAD_MAX + 96 + 64);
 
