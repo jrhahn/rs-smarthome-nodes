@@ -20,8 +20,32 @@ rustup toolchain install 1.83.0
 rustup target add riscv32imc-unknown-none-elf --toolchain 1.83.0
 
 # Flasher / monitor. espflash speaks the ESP ROM bootloader over any serial port.
-cargo install espflash
+# Pin the major version -- see the warning below.
+cargo install espflash --version '^3'
 ```
+
+> ⚠️ **espflash 4.x cannot flash this firmware.** It refuses the ELF with
+>
+> ```
+> Error: ESP-IDF App Descriptor missing in your `esp-idf` application.
+> ```
+>
+> which is not a fault in the image: espflash 4 expects an esp-idf application
+> header, and a `no_std` Rust binary has none. **3.2.0 flashes it without
+> complaint**, and that is the version the rest of this page assumes.
+>
+> The trap is that the failure looks like a broken board rather than a wrong
+> tool, and it repeats forever inside a retry loop. On 2026-09-16 a poller ran
+> **1500 attempts** against a perfectly healthy node this way, because
+> `nix shell nixpkgs#espflash` resolved to 4.4.0 on that machine while the
+> local checkout had 3.2.0. `espflash --version` before starting a loop is the
+> cheap check.
+>
+> Between two nix machines the fix is one command — no rebuild, no install:
+>
+> ```bash
+> nix copy --to ssh://<host> /nix/store/<hash>-espflash-3.2.0
+> ```
 
 > The XIAO ESP32-C3 is RISC-V, so it uses the stock bare-metal target —
 > **no Xtensa `espup` toolchain is needed.**
@@ -116,6 +140,11 @@ The reason a single `espflash flash` fails is not that the node is unreachable;
 it is that it is only reachable *briefly*. It deep-sleeps about two seconds
 after boot and its USB port goes with it, so one invocation started at the
 wrong moment finds nothing.
+
+**Check `espflash --version` first.** A 4.x flasher fails on every single
+attempt for a reason that has nothing to do with timing (see
+[Prerequisites](#1-prerequisites-one-time)), and a retry loop turns that into
+thousands of identical failures that read like an unreachable board.
 
 **Waking up is not enough, and this is the part that wasted half an hour on
 2026-09-12.** The USB controller does come back on every wake and does start to
