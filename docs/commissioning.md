@@ -23,14 +23,20 @@ second.
 | MAC | Node | Power | Address |
 | --- | --- | --- | --- |
 | `e0:72:a1:18:e2:c0` | `terrasse` | battery | 192.168.1.81 |
-| `ac:27:6e:80:51:f8` | `wohnzimmer` | mains | — |
+| `ac:27:6e:80:51:f8` | `wohnzimmer` | mains | 192.168.1.87 |
 | `ac:27:6e:82:43:94` | `kueche` | mains, duty-cycled | 192.168.1.30 |
-| `ac:27:6e:7e:10:a0` | `schlafzimmer` | mains | — |
+| `ac:27:6e:7e:10:a0` | `schlafzimmer` | mains | 192.168.1.72 |
 | `ac:27:6e:7f:a6:b4` | `bad` | mains, duty-cycled | 192.168.1.143 |
 
 Complete as of 2026-09-10: the last two were read off `espflash board-info`
 during the RSSI rollout, so every board in the fleet is now identifiable
-without opening anything.
+without opening anything. The addresses were filled in on 2026-09-17 from the
+nodes themselves — since that evening each one publishes its MAC and address
+retained, so this table can be checked against reality rather than trusted:
+
+```bash
+mosquitto_sub -h <broker> -u <user> -P <pass> -t 'smarthome/+/meta/board' -v
+```
 
 ---
 
@@ -467,23 +473,30 @@ on 2026-09-10.
   pin, not a local `flake.lock`** — the laptop's checkout was days stale and
   reading it produced a confident wrong answer about what the server was
   running.
-- **`terrasse` is the only board with OTA partitions.** Migrated 2026-09-17 at
-  22:49, from `develop`, with `--partition-table partitions.csv`: two 1 984 KB
-  application slots and an `otadata` selector where the other four still have a
-  single `factory` partition. `nvs` did not move, so nothing stored was lost,
-  and the node came back publishing `slot 0`, `seq 1` — i.e. `espflash` wrote a
-  valid selector along with the table. The other four are migrated the next time
-  each is in reach; until then **a flash of those boards without
-  `--partition-table` is correct, and one *with* it is the migration**. See
-  [`ota.md`](ota.md).
-- **The whole fleet says what it is, but only `terrasse` says it yet.** The same
-  flash added two retained topics — `<node>/ota/version` carrying
-  `<node>-<commit>`, and `<node>/meta/board` carrying the MAC, the address, the
-  running slot and whether the identity is provisioned or built in — plus the
-  MAC and firmware version in the Home Assistant device block (`cns` and `sw`).
-  `mosquitto_sub -t 'smarthome/+/meta/board' -v` is meant to become the answer
-  to "which board is publishing as what", which on 2026-09-17 took two hours to
-  work out from a `reset_count` that went backwards.
+- **The whole fleet is on OTA partitions**, migrated 2026-09-17 between 22:49
+  and 23:10 — `terrasse` first, then `bad`, `kueche`, `schlafzimmer` and
+  `wohnzimmer` — each with `--partition-table partitions.csv`: two 1 984 KB
+  application slots and an `otadata` selector where every board previously had a
+  single `factory` partition. `nvs` did not move, so no board lost anything it
+  had stored, and all five came back reporting `slot 0`, `seq 1`, i.e. `espflash`
+  writes a valid selector along with the table. **Every cabled flash from here
+  needs `--partition-table`**; without it `espflash` silently restores its own
+  single-app default and the board loses the ability to update itself while
+  still looking perfectly healthy. See [`ota.md`](ota.md).
+- **Every node says what it is.** Two retained topics per node —
+  `<node>/ota/version` carrying `<node>-<commit>`, and `<node>/meta/board`
+  carrying the MAC, the address, the running slot and whether the identity is
+  provisioned or built in — plus the MAC and firmware version in the Home
+  Assistant device block (`cns` and `sw`). One `mosquitto_sub` on
+  `smarthome/+/meta/board` now answers "which board is publishing as what",
+  which on the evening it was written took two hours to work out from a
+  `reset_count` that went backwards.
+
+  Checked across the fleet on 2026-09-17 at 23:12: all five MACs match the
+  boards table above, four nodes on `…-0fb7d0e`, and **`terrasse` still on
+  `terrasse-425e2c4-dirty`** — it was flashed before the commit and is the one
+  node whose version does not name a commit that exists. Reflash it the next
+  time it is in reach.
 - **The reset diagnostics are live on all five**, as of the 2026-09-17 evening
   rollout, and the first hour of them is a fair sample of what the codes are
   for. Most nodes read `reset_reason 21` with `reset_count 1` — the USB reset
