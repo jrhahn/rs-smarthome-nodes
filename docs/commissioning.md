@@ -329,6 +329,21 @@ page.
 
 ## Open across the fleet
 
+- **The reset diagnostics are live on `terrasse` only**, verified 2026-09-17:
+  `reset_reason 21` (the USB reset espflash itself causes) and `reset_count 1`,
+  unchanged across two heartbeats, so deep-sleep wakes correctly do not count.
+  The other four still run without them.
+
+  It took three attempts, and the middle one is worth knowing about. The counter
+  first published **3319124736** — RTC fast RAM is not zeroed on power-up, so
+  the count started from garbage. An epoch tag, the shape `discovery_tag` uses,
+  *should* have fixed that and did not: the next publish read the old nonsense
+  plus one, meaning the tag compared equal on the first boot of firmware that
+  had only just introduced the constant. **That is still unexplained.** What
+  ships now is a plausibility bound on top of the tag — past a million the count
+  is discarded whatever the tag says — which is crude but cannot be defeated by
+  an accidental match.
+
 - **The whole fleet reports why it last restarted.** Added 2026-09-16, after
   the outdoor node twice went silent mid-cadence with a healthy cell and came
   back only once power was removed entirely. Two entities per node:
