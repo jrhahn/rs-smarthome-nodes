@@ -370,6 +370,35 @@ been, with `seq 3`. The slots alternate, the sequence number only climbs, and a
 node that has been updated twice is running from the slot it started in. Nothing
 about the second run needed a cable, a button or a person in the room.
 
+## The fleet, over the air
+
+2026-09-18, 08:32 to 08:55: all five nodes went from `…-fa931e5` to
+`…-c0b36ee` without anyone touching a board. The images were served by the home
+server — `server.firmwareServer` in `home-server`, an nginx `location` and a
+directory — rather than off a laptop, which changes three things:
+
+- **Resume is reachable at last.** nginx answers `Range` for a static file:
+  `curl -r 100-199` returns `206` with `Content-Range: bytes 100-199/768256`,
+  where a Python `http.server` answered `200` and the node correctly refused it.
+- **The fleet has no DNS**, so the vhost carries `192.168.1.67` in its
+  `server_name` beside `fw.home.arpa`. Without the literal a node reaches
+  whichever vhost nginx treats as the default, and the failure reads as "server
+  refused the request".
+- **Nothing depends on a laptop being open**, or on a hole in its firewall.
+
+Two firsts worth separating. `bad` was the first node updated **through the
+deep-sleep path** — `wohnzimmer` is a mains node and had only ever exercised the
+stay-associated loop — and it was done to a board on a bathroom wall, out of
+sight. And `terrasse` is the first **battery** node to update itself: it wakes,
+measures, publishes, fetches, writes, restarts, and confirms on its next
+heartbeat. That is the case this whole mechanism was built for, and the one
+where a cable means a ladder.
+
+An update leaves `reset_reason 3` behind — the software reset the node performs
+on itself to boot the new slot. It is worth knowing as a *signature*: 3 after an
+offer is the mechanism working, while 7, 15 or 21 in the same place would be a
+watchdog, a brownout or somebody with a cable.
+
 Afterwards each retained offer was withdrawn (`-r -n`) and the firewall hole
 closed. Both matter: an offer left on the broker is re-delivered on every
 connect for ever, and it is the one piece of this mechanism that outlives the

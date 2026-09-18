@@ -491,12 +491,16 @@ on 2026-09-10.
   needs `--partition-table`**; without it `espflash` silently restores its own
   single-app default and the board loses the ability to update itself while
   still looking perfectly healthy. See [`ota.md`](ota.md).
-- **`wohnzimmer` has been updated over the air twice**, on 2026-09-17 at 23:36
-  and again at 23:58, and is the only node in the fleet that has never been
-  reflashed by cable since. It sits at `seq 3` where the other four sit at
-  `seq 1`, and the two updates went to **slot 1 and then back to slot 0**, which
-  is the A/B alternation doing exactly what it is for. The account is in
-  [`ota.md`](ota.md).
+- **The whole fleet was updated over the air on 2026-09-18**, between 08:32 and
+  08:55, from `…-fa931e5` to `…-c0b36ee`. Nobody touched a board: `bad` was on
+  the bathroom wall, `terrasse` on its battery, and the images came from the
+  home server rather than from a laptop (`server.firmwareServer` over there).
+  That was the point of all of it, and it is the first day the fleet did not
+  need a cable.
+
+  `wohnzimmer` is at `seq 4` because it went first and went twice the night
+  before; the others sit at `seq 2`. Every node runs from slot 1 now, having
+  started in slot 0. The account is in [`ota.md`](ota.md).
 - **Every node says what it is.** Two retained topics per node —
   `<node>/ota/version` carrying `<node>-<commit>`, and `<node>/meta/board`
   carrying the MAC, the address, the running slot and whether the identity is
@@ -506,11 +510,10 @@ on 2026-09-10.
   which on the evening it was written took two hours to work out from a
   `reset_count` that went backwards.
 
-  Checked across the fleet on 2026-09-18 at 00:15: all five MACs match the
-  boards table above and **all five run `…-fa931e5`** — four of them flashed by
-  cable that night, `wohnzimmer` over the air. Every version names a commit that
-  exists, which was not true an hour earlier and is the whole reason the string
-  carries the commit at all.
+  Checked across the fleet on 2026-09-18 at 08:56: all five MACs match the
+  boards table above and **all five run `…-c0b36ee`** — all five updated over the air that
+  morning. Every version names a commit that exists, which is the whole reason
+  the string carries the commit at all.
 - **The reset diagnostics are live on all five**, as of the 2026-09-17 evening
   rollout, and the first hour of them is a fair sample of what the codes are
   for. Most nodes read `reset_reason 21` with `reset_count 1` — the USB reset
@@ -550,7 +553,7 @@ on 2026-09-10.
   | --- | --- | --- |
   | 0 | — | nothing but deep sleep since power-on — **the healthy reading** |
   | 1 | 0x01 | power on: the cell was disconnected, or the protection board cut |
-  | 3 | 0x03 | software reset of the digital core |
+  | 3 | 0x03 | software reset of the digital core — **what an over-the-air update leaves behind**, since the node restarts itself into the new slot |
   | 5 | 0x05 | deep-sleep wake — routine, never latched, so it never appears |
   | 7 | 0x07 | **main watchdog 0** — the app hung and was rebooted |
   | 8 | 0x08 | main watchdog 1 |
