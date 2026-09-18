@@ -180,6 +180,43 @@ it. The divider values in the same BOM (`R3` 30k, `R4` 62k, `R5` 300k, `R6`
 130k, `R7` 75k) are exactly the ones the MPPT table above is built on, which is
 a useful cross-check that the board in hand is the board this page describes.
 
+### Finding `R8`, and getting it off
+
+**It is the only 1210 on the board.** Every other resistor is 0603 (`R2`–`R7`)
+or 0402 (`R1`, `R9`, `R10`), so the part to rework is simply the biggest
+resistor there is — no marking has to be read, and a 40 mΩ part often carries
+none worth reading.
+
+**Where it sits**, from the manufacturer's KiCad layout rather than by eye: its
+two pads are on `Net-(L1-Pad2)` and `BAT`, i.e. between the inductor's output
+and the battery net, which is exactly where a charge current is sensed. On the
+board that puts it right of the IC `U1`, about 12 mm below the inductor `L1`
+(the big square coil) and 10 mm left of the battery terminals — roughly 34 mm
+right and 16 mm up from the lower-left mounting hole.
+
+Worth knowing before the iron is hot, because the two ends of the board look
+alike: the terminal block on the **left, `K1`, is `VCC`/`GND` — the panel**.
+The two on the **right, `K3` and `K6`, are `BAT`/`GND` — the cell**. `R8` stands
+between the inductor and that right-hand pair.
+
+**Removing it with an ordinary iron** means getting both ends molten at once,
+and the way to do that is not to aim better but to bridge them: flux generously,
+then build **leaded** solder onto both ends until one blob spans the part. The
+blob carries heat to both terminations, and the part slides off sideways — push
+it, never lever it, or a pad comes with it. Leaded solder is the point rather
+than a preference: mixed into the board's lead-free joints it drops the melting
+point from 217 °C to nearer 183 °C. A 3–4 mm chisel tip does the same job by
+touching both ends at once, a 3.2 mm part being wider than a fine tip.
+
+If it refuses to melt, the reason is underneath: these pads hang on the battery
+current path and its copper sinks heat. More solder mass helps; turning the iron
+up mostly does not.
+
+**Then check it.** Across the two pads a multimeter should read about 1 Ω once
+the leads' own 0.2–0.5 Ω is subtracted — nothing else is in parallel but the
+IC's sense input. Zero means one end is still bridged to the old joint;
+open means one end never took.
+
 ### Two jumpers to set while it is open
 
 **`K2` — set the MPPT point to 18 V.** `R5` = 300 k is the fixed upper leg and
