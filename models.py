@@ -1599,6 +1599,8 @@ WU_EAR_X = 40.0                  # centre; the 10 mm ear overlaps the barrel by
 WU_EAR_W = 10.0                  # 0.5 mm so it unions instead of touching
 WU_EAR_Y = 9.0
 WU_EAR_Z0, WU_EAR_H = -22.0, 20.0
+WU_EAR_TAPER = 7.0               # 45 deg on the outer face; see the ear union
+WU_EAR_TIP = 3.0                 # what is left of the 10 mm at the tip
 WU_SCREW_Z = -12.0
 
 # Illumination band. The seat is bored 4 mm into a 3 mm wall, so the wall has
@@ -1717,6 +1719,16 @@ wu_tube = _cyl(WU_OD, WU_WORK, (0, 0, 0))
 wu_tube = wu_tube.union(
     _cyl(WU_BAND_OD, WU_BAND_Z1 - WU_BAND_Z0, (0, 0, WU_BAND_Z0))
 )
+# The band's far shoulder, at 45 deg. Printed lens-end-down the layers arrive
+# here from z = 40, so a square step at z = 25 is 3 mm of annular ledge over
+# air -- 697 mm2 of it, the largest overhang left on this part after the cap
+# stopped needing one. The near shoulder at z = 11 needs nothing: going that
+# way material only ever leaves.
+wu_tube = wu_tube.union(
+    cq.Workplane("XY").circle(WU_BAND_OD / 2)
+    .workplane(offset=(WU_BAND_OD - WU_OD) / 2).circle(WU_OD / 2)
+    .loft().translate((0, 0, WU_BAND_Z1))
+)
 
 # Saddle: the same annulus, then everything on the +Y side of the split taken
 # away. The cut box is deliberately larger than the part in every direction;
@@ -1726,10 +1738,25 @@ wu_saddle = wu_saddle.cut(
     _box(WU_OD + 4, WU_OD + 4, WU_CLAMP_L + 2,
          (0, (WU_OD + 4) / 2 - WU_SPLIT, WU_Z0 - 1))
 )
+# Ears, and the top 7 mm of each is a taper rather than a square end. That end
+# face is the one the printer reaches first -- 90 mm2 of it per ear, hanging in
+# air 42 mm up. The taper keeps the INNER face where it is, at the barrel, and
+# pulls only the outer face in: 7 mm across 7 mm is 45 deg, and what is left at
+# the tip still lands on the barrel instead of starting as an island. The
+# screw at z = -12 stays inside the full section.
 for sx in (-1, 1):
     wu_saddle = wu_saddle.union(
-        _box(WU_EAR_W, WU_EAR_Y, WU_EAR_H,
+        _box(WU_EAR_W, WU_EAR_Y, WU_EAR_H - WU_EAR_TAPER,
              (sx * WU_EAR_X, -WU_EAR_Y / 2 - WU_SPLIT, WU_EAR_Z0))
+    )
+    wu_saddle = wu_saddle.union(
+        cq.Workplane("XY").rect(WU_EAR_W, WU_EAR_Y)
+        .workplane(offset=WU_EAR_TAPER)
+        .center(-sx * (WU_EAR_W - WU_EAR_TIP) / 2, 0)
+        .rect(WU_EAR_TIP, WU_EAR_Y - 2 * WU_EAR_TAPER / 2)
+        .loft()
+        .translate((sx * WU_EAR_X, -WU_EAR_Y / 2 - WU_SPLIT,
+                    WU_EAR_Z0 + WU_EAR_H - WU_EAR_TAPER))
     )
 wu_tube = wu_tube.union(wu_saddle)
 
