@@ -60,9 +60,10 @@ except NameError:
 ##   b) cord attachment        Two round-ended tabs at roof level, outboard of
 ##      the walls. One cord through both makes a bail: it hangs level and
 ##      pierces nothing. Load path is tab -> wall -> floor -> anchor, in line.
-##   c) beam anchor            A pad on the underside of the floor, matching
-##      the bending-beam clamp (25 x 12 face, two screws 15 mm apart), with
-##      captive nuts reachable from inside the box.
+##   c) beam anchor            A pad matching the bending-beam clamp (25 x 12
+##      face, two screws 15 mm apart), its own part since 2026-09-18 so this
+##      plate prints flat. Two M4 x 25 countersunk screws run DOWN from inside
+##      the box, through plate and anchor, into nuts in the spacer's underside.
 ##   d) ventilation            An L-shaped chamber in the -X/-Y corner, walled
 ##      off from the electronics so the board's own heat does not reach the
 ##      SHT31. Air enters through slots in the floor and leaves through slots
@@ -192,6 +193,7 @@ POST_PILOT, POST_PILOT_H = 2.5, 9.0      # M3 self-tapper, into the tray
 ANCHOR_PITCH = 15.0              # clamp screw pitch
 ANCHOR_HOLE = 4.3
 NUT_AF, NUT_T = 7.2, 3.4         # M4 nut across flats, thickness
+ANCHOR_CSK = 8.6                 # M4 countersunk head, plus a little
 PAD_X, PAD_Y, PAD_H = 27.0, 14.0, 3.5
 FLANGE_X, FLANGE_Y, FLANGE_H = 33.0, 18.0, 2.5
 NUT_BOSS_H = 5.0                 # boss inside the box carrying the nuts
@@ -391,18 +393,16 @@ floor = floor.union(_box(PAD_X, PAD_Y, NUT_BOSS_H, (0, 0, FLOOR_T)))
 
 anchor_pts = [(-ANCHOR_PITCH / 2, 0.0), (ANCHOR_PITCH / 2, 0.0)]
 anchor_z0 = 0.0
-for (px, py) in anchor_pts:
-    floor = floor.cut(
-        cq.Workplane("XY").circle(ANCHOR_HOLE / 2)
-        .extrude(FLOOR_T + NUT_BOSS_H - anchor_z0)
-        .translate((px, py, anchor_z0))
-    )
-    # Captive nut, dropped in from inside the box.
-    floor = floor.cut(
-        cq.Workplane("XY").polygon(6, NUT_AF / math.cos(math.radians(30)))
-        .extrude(NUT_T)
-        .translate((px, py, FLOOR_T + NUT_BOSS_H - NUT_T))
-    )
+# The screws run downward now -- head inside the box, nut under the spacer,
+# which is the end that is in the open air when this is assembled. It used to be
+# the other way, with captive nuts in pockets here: a nut that has to be held in
+# a pocket while a screw is turned from below, in a box whose floor also carries
+# the boards, and which is lost inside a sealed enclosure if it drops.
+floor = (
+    floor.faces(">Z").workplane()
+    .pushPoints(anchor_pts)
+    .cskHole(ANCHOR_HOLE, ANCHOR_CSK, 90)
+)
 
 # Load-cell cable. The collar that used to hang below this hole and shed water
 # off the lead is gone with everything else on this face: it was belt and
@@ -671,11 +671,20 @@ _spacer_x1 = max(FIXED_X + BEAM_PITCH / 2, ANCHOR_PITCH / 2) + CLAMP_EDGE
 spacer = _box(_spacer_x1 - _spacer_x0, CLAMP_W, SPACER_H,
               ((_spacer_x0 + _spacer_x1) / 2, 0, SPACER_Z))
 
-# Up into the floor's captive nuts: head recessed in the underside.
+# The anchor screws pass all the way through and take their nuts here, in a
+# hex pocket in this underside. The screws used to run the other way, with their
+# heads in this counterbore and captive nuts up inside the box; the nuts moved
+# down here because this face is the one you can reach with a spanner while the
+# box is assembled, and because a nut dropped in there is a nut inside a sealed
+# enclosure.
 for sx in (-1, 1):
     px = sx * ANCHOR_PITCH / 2
     spacer = spacer.cut(_cyl(ANCHOR_HOLE, SPACER_H, (px, 0, SPACER_Z)))
-    spacer = spacer.cut(_cyl(CBORE_D, CBORE_H, (px, 0, SPACER_Z)))
+    spacer = spacer.cut(
+        cq.Workplane("XY").polygon(6, NUT_AF / math.cos(math.radians(30)))
+        .extrude(NUT_T + 0.4)
+        .translate((px, 0, SPACER_Z))
+    )
 
 # Down into the bar's own threads. Both sit outside the pad's 27 mm footprint,
 # so their heads have somewhere to go.

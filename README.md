@@ -292,7 +292,12 @@ The design follows from it hanging outdoors in the rain:
   one splits, the way out is a reprinted floor with the holes further in, which
   buys 3.5 mm.
 - **The load hangs off a pad** matching the clamp's 25 × 12 face and its screw
-  pitch, with captive nuts reachable from inside the box. That pad is
+  pitch. Two **M4 × 25 countersunk** screws run *down* from inside the box —
+  heads countersunk into the nut boss, nuts in a hex pocket under the beam
+  spacer, which is the end you can still reach with a spanner once the box is
+  together. They ran the other way until 2026-09-18, with captive nuts in
+  pockets inside the box; a nut that drops out during assembly is a nut inside
+  a sealed enclosure. That pad is
   `terrasse_anchor`, its own part since 2026-09-18 and clamped under the plate
   by the same two M4 screws. It was part of the plate until then, and it was
   the only thing on that face: while it was there the plate could not be
