@@ -337,11 +337,19 @@ and a 54 × 38 board lies in it comfortably.
   printing in mid-air, the body printing roof-down — which is the same
   constraint that put every other mount on the floor.
 
-**The box grows by 4 mm**, and only because of the charger's own height. `ENV_Z`
-is now computed rather than fixed: `max(60, tray + CHARGER_H + clearance)`. At
-`CHARGER_H = 9.5` or less nothing changes and only the floor plate is reprinted;
-the 12 mm currently in the file is **an assumption and has to be measured on the
-populated board** before anything is printed.
+**The box grows from 60 mm to 71 mm**, and only because of the charger's own
+height. `ENV_Z` is computed rather than fixed — `max(60, tray + CHARGER_H +
+clearance)` — so it is one measured number that decides it, and the number came
+back **20 mm** on the populated board (measured 2026-09-18, with 2 mm of
+headroom already included in it).
+
+Eleven millimetres is a real cost — the body goes from 56 cm³ to 60 cm³ of
+filament and prints taller — and there is no way around it: the band the two
+boards leave under the old roof is 13 mm, and the tray cannot sit lower than
+1 mm over the ESP's 37 mm. Anything shorter than 9.5 mm would have left the body
+alone entirely; at 20 mm the roof has to move. Everything that hangs off the
+roof moves with it, including the cord tabs and the vent outlets, which are
+expressed relative to the ceiling and land at 49/55/61 instead of 38/44/50.
 
 The alternative — a pod at the panel — stays rejected, and now for a better
 reason than tidiness: it would put the *cell* at the far end of the long

@@ -78,7 +78,10 @@ except NameError:
 # 9.5 mm it fits under the existing roof and only the floor plate is reprinted.
 # Beyond that ENV_Z follows it automatically, and the body is reprinted too.
 CHARGER_X, CHARGER_Y = 38.0, 54.0
-CHARGER_H = 12.0                 # ASSUMED. Measure before printing.
+# Measured 2026-09-18 on the populated board, 2 mm of headroom already in it.
+# It does not fit the 13 mm band the boards leave under the old roof, so this
+# number is what raises the box: 60 -> 71 mm.
+CHARGER_H = 20.0
 CHARGER_AT = (-9.0, 2.0)         # tray-relative centre of the board
 
 TRAY_T = 2.5                     # the tray plate itself
@@ -90,9 +93,9 @@ TRAY_TOP = POST_TOP + TRAY_T
 # whatever the charger on its tray needs, and never less than the 60 mm this box
 # shipped with, so a short charger changes nothing.
 ENV_X, ENV_Y = 88.0, 78.0
-ENV_Z = max(60.0, math.ceil(TRAY_TOP + CHARGER_H + 1.0 + 2.0))
 
 WALL = 2.0        # side and roof wall
+ENV_Z = max(60.0, math.ceil(TRAY_TOP + CHARGER_H + 0.5 + WALL))
 FLOOR_T = 3.0     # floor plate
 EAVE = 2.0        # how far the drip edge stands proud of the wall
 EAVE_H = 5.0      # height of the drip-edge band
