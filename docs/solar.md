@@ -133,11 +133,30 @@ fixed by the chip and cannot be got wrong. Smaller board, worse failure mode.
 
 ### The one change that is not optional
 
-**`R8` must be replaced with 1.2 Ω** (1 %, ≥0.25 W).
+**`R8` must be replaced with 1 Ω** (fitted 2026-09-18, 0805 across the 1210
+land; the design value was 1.2 Ω and anything from 1 to 1.5 Ω is a reasonable
+choice — see below).
 
 The board ships `R8 = 40 mΩ`, which by `120 mV / RCS` is a **3 A charge
-current** — 1.5 C into a 2000 mAh cell, and roughly thirty times what this node
-can use. At 1.2 Ω it becomes **100 mA ≈ C/20**.
+current** — 1.5 C into a 2000 mAh cell. That is not a nominal figure the panel
+cannot reach: the charger is a buck converter, so 18 V at 0.55 A comes out as
+roughly 4 V at 2 A, and in full sun it really would push about 1 C. At 1 Ω it
+becomes **120 mA ≈ C/17**, at 1.2 Ω **100 mA**.
+
+**Which value, and why the higher end.** The measured consumption is 240 mAh a
+day, not the 79 mAh this page assumed before 2026-09-16, so a charging day has
+three times as much to make up as the original sizing thought:
+
+| `R8` | charge current | one 5-hour day returns | days of running |
+| --- | --- | --- | --- |
+| 2.0 Ω | 60 mA | 300 mAh | 1.25 |
+| 1.5 Ω | 80 mA | 400 mAh | 1.7 |
+| 1.2 Ω | 100 mA | 500 mAh | 2.1 |
+| **1.0 Ω** | **120 mA** | **600 mAh** | **2.5** |
+
+Tolerance does not matter — 5 % is ±6 mA — and neither does power rating: the
+resistor dissipates `I²R` = 14 mW, so any 0805 is ten times over-specified. The
+land is 1210, so an 0805 needs its pads bridged with solder or a wire link.
 
 That single resistor is also what answers the cold-charging problem. A LiPo must
 not be charged below 0 °C — lithium plating, permanent capacity loss, and on a
@@ -145,8 +164,8 @@ German terrace that is four months of the year rather than an edge case. But
 plating is strongly rate-dependent: [Battery University](https://www.batteryuniversity.com/article/bu-410-charging-at-high-and-low-temperatures/)
 puts the permitted rate at −30 °C at 0.02 C, so C/20 sits in the reduced-rate
 regime that temperature-aware chargers aim for, not in the fast-charge danger
-zone. And 100 mA is still ample: the 79 mAh daily budget is covered in **48
-minutes** of charging.
+zone. And the current is still modest in absolute terms: covering the measured
+240 mAh daily budget takes **two hours** of charging at 120 mA.
 
 `R8` is a **1210** part — large, and reworkable with an ordinary iron.
 
@@ -199,11 +218,17 @@ swings hard by winter — Berlin had 4 in the mild 2006/07 and 43 in the severe
 2009/10 — and is falling across the climate reference periods. Even a severe
 winter leaves well over a hundred usable days in the winter half-year.
 
-**One usable day covers about a week.** The requirement is not one charge window
-per buffer length. Consumption is 79 mAh/day; one permitted day at 100 mA over
-~5 usable daylight hours returns ~500 mAh, i.e. **six days of running**. So the
-node needs roughly one charge day in seven, against a 25-day buffer that is
-still there underneath as the second reserve.
+**One usable day covers two to three.** The requirement is not one charge window
+per buffer length — but it is tighter than this page claimed until 2026-09-18,
+because it was still using the 79 mAh/day estimate that the discharge curve had
+already tripled. Consumption is **240 mAh/day**; one permitted day at 120 mA
+over ~5 usable daylight hours returns ~600 mAh, i.e. **two and a half days of
+running**. So the node needs roughly one usable day in two or three, against an
+8–9 day buffer as the second reserve.
+
+That is the honest version, and it is worth stating plainly: the margin here is
+days, not weeks. A run of ice days is covered by the cell; a fortnight of them
+would not be.
 
 **And at C/20 the sub-zero prohibition is not absolute anyway** — see `R8`
 above. The rate is what makes cold charging dangerous, and the rate has already
