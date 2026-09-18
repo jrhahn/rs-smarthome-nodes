@@ -169,6 +169,17 @@ zone. And the current is still modest in absolute terms: covering the measured
 
 `R8` is a **1210** part — large, and reworkable with an ordinary iron.
 
+**Do not look for this in the Soldered documentation; it is not there.** The
+product pages describe `JP1` and the solar-voltage pins and say only "charge
+current: up to 4A" — nothing about what sets it. The value is in the
+manufacturer's own hardware design files, and it was verified there on
+2026-09-18 rather than inferred:
+[`OUTPUTS/V1.2.1/… BOM.csv`](https://github.com/SolderedElectronics/MPPT-Li-Ion-CN3791-charger-board-hardware-design)
+lists `R8, 1210R, 40m` — and the same in V1.0.0, so both board revisions ship
+it. The divider values in the same BOM (`R3` 30k, `R4` 62k, `R5` 300k, `R6`
+130k, `R7` 75k) are exactly the ones the MPPT table above is built on, which is
+a useful cross-check that the board in hand is the board this page describes.
+
 ### Two jumpers to set while it is open
 
 **`K2` — set the MPPT point to 18 V.** `R5` = 300 k is the fixed upper leg and
