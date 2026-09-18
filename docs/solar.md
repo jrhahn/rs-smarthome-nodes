@@ -421,11 +421,26 @@ and a 54 × 38 board lies in it comfortably.
   reason.
 - **Three columns** up from the floor plate, not four. The +X/−Y corner is the
   ESP's, and the only gap there is the 2 mm between it and the cell lane; three
-  points carry a 20 g board and are statically determinate. They stand in the
-  pockets the existing parts leave — one 9 mm column where there is 25 mm of
-  clear floor, and two 5 mm ones in gaps exactly 7 mm wide, with a millimetre
-  either side. Those two get no foot: a foot is something a board has to be
-  threaded past during assembly.
+  points carry a 20 g board and are statically determinate. Each is bored
+  **Ø3.5 for an M3 heat-set insert**, the same fastening the body's corner posts
+  use, and each is as fat as its pocket allows and no fatter:
+
+  | column | Ø | wall around the bore | what limits it |
+  | --- | --- | --- | --- |
+  | (−34, −8) | 9.0 | 2.75 mm | nothing — 25 mm of clear floor |
+  | (15.4, 30) | 6.6 | 1.55 mm | HX711 ends at x 12, cell guide starts at 18.8 |
+  | (−18.5, −27) | 6.8 | 1.65 mm | vent chamber to −22, ESP from −15 |
+
+  A sweep over the plan says **8.5 mm fits in exactly one place on this floor**,
+  and it is the first row. The other two are thinner than the 2.5 mm the body's
+  posts leave — which this project already describes as thinner than one would
+  choose — and they are accepted because of what hangs on them: a 20 g board,
+  where the insert exists so a screw can be undone twice, not because the joint
+  is working hard. Warm those two gently. If one splits, the fallback is to glue
+  the insert rather than to reprint, since nothing about the load needs it.
+
+  The two thin columns get no foot, either: a foot is something a board has to
+  be threaded past during assembly.
 - Everything rises from the **floor plate**, because that is the part that
   prints anchor-down. A column standing free inside the body would begin
   printing in mid-air, the body printing roof-down — which is the same

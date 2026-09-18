@@ -182,9 +182,28 @@ SCREW_CLEAR, SCREW_CSK = 3.4, 6.6
 # between the HX711 and the cell lane, and between the vent chamber and the ESP
 # -- so they are 5 mm with a millimetre either side, and no foot, because a foot
 # is something a board has to be threaded past during assembly.
-POSTS = [(-34.0, -8.0, 9.0), (15.5, 30.0, 5.0), (-18.5, -27.0, 5.0)]
+POSTS = [(-34.0, -8.0, 9.0), (15.4, 30.0, 6.6), (-18.5, -27.0, 6.8)]
 POST_FOOT_MIN = 8.0                      # below this, no flare at the root
-POST_PILOT, POST_PILOT_H = 2.5, 9.0      # M3 self-tapper, into the tray
+# Bore for an M3 heat-set insert, as the body's corner posts already use. Each
+# column is as fat as its pocket allows and no fatter, which is what sets the
+# wall left around the bore:
+#
+#   ( -34, -8)  9.0 mm -> 2.75 mm of wall   the one pocket with room to spare
+#   (15.4, 30)  6.6 mm -> 1.55 mm           HX711 ends at x 12, cell guide at 18.8
+#   (-18.5,-27) 6.8 mm -> 1.65 mm           vent chamber to -22, ESP from -15
+#
+# The last two are a tenth back from their pockets' edges rather than filling
+# them: the cell lane has 0.4 mm of slack in it for a 12 mm cell, and a column
+# bulging into that slack is a cell that does not drop in.
+#
+# A search over the plan says 8.5 mm fits in exactly one place on this floor,
+# and it is the first of the three. The other two are thinner than the 2.5 mm
+# the body's posts leave, which that part of this file already calls thinner
+# than one would choose. It is accepted here because of what hangs on them: a
+# 20 g board, held by three screws, where the insert exists so the screw can be
+# undone more than once rather than because the joint is working hard. Warm
+# those two inserts gently and do not lean on them.
+POST_BORE, POST_BORE_H = 3.5, 6.0
 
 # --- bending-beam anchor (M4) ---------------------------------------------
 # Interface to the bending-beam clamp. The clamp's own model lived in this
@@ -474,7 +493,7 @@ for (px, py, pd) in POSTS:
     if pd >= POST_FOOT_MIN:
         floor = floor.union(_cyl(pd + 4.0, 2.0, (px, py, FLOOR_T)))
     floor = floor.cut(
-        _cyl(POST_PILOT, POST_PILOT_H, (px, py, POST_TOP - POST_PILOT_H))
+        _cyl(POST_BORE, POST_BORE_H, (px, py, POST_TOP - POST_BORE_H))
     )
 
 display(floor)
