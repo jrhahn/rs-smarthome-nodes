@@ -1485,30 +1485,49 @@ print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
 ## nothing below depends on them except the check that the LED ring does not
 ## shade the window.
 ##
-## The optics, which set the length. The OV2640 with the stock ~66 deg lens
-## sees 55 deg horizontally, so the frame is 1.04 x the working distance. At 62
-## mm the frame is 64.4 mm wide, near enough the capsule's own 64 -- which is
-## the framing jomjol's alignment wants: it locks onto the bezel and the printed
-## text, not onto the digits, then crops the digit ROIs itself. Resolution is
-## not the constraint anywhere near here -- at 62 mm and UXGA the digit row
-## gets ~750 px, about 95 px per digit, against the 32 x 20 px the digit net
-## actually consumes.
+## The optics, which set the length. This is a measured focus distance and no
+## longer a computed framing. The draft that dimensioned this part at 62 mm
+## reasoned from the stock lens -- 55 deg horizontal, frame 1.04 x distance,
+## 64.4 mm at 62 mm, near enough to swallow the capsule whole. That lens is
+## gone: on 2026-09-18 the OV2640 on board 1 was screwed out of its factory
+## setting, which was fixed near 300 mm and left the dial unreadable from
+## anywhere inside this tube. See `nixos-private/docs/zaehler.md`.
+##
+## Extending a lens narrows its field, so 1.04 does not survive the change and
+## the frame below is read off the acceptance photograph instead of derived.
+## The 37 mm reading window spans roughly 70 % of frame width there, putting
+## the frame near 53 mm and the digit row at ~60 px per digit at VGA -- four
+## times that at UXGA, against the 32 x 20 px the digit net consumes.
+## Resolution was never the constraint at either length.
+##
+## What the shortening costs is the framing argument, and it should be stated
+## plainly: at 62 mm the frame took in the whole 64 mm capsule, and jomjol's
+## alignment could lock onto that outline. It cannot now. It aligns on the
+## bezel and the printed text inside the window instead -- which is what it
+## matches on anyway, but with 53 mm of frame around a 37 mm window there is
+## only ~8 mm of lateral slack before the window clips. The clamp has to sit
+## square; on a concentric capsule it does, which is the one thing that makes
+## this acceptable.
 ##
 ## The barrel bore is 62 and not 65 because the step at z = 0 doubles as the
-## axial stop -- it sits on the meter's face and sets that 62 mm, instead of
+## axial stop -- it sits on the meter's face and sets that 40 mm, instead of
 ## leaving it to wherever the clamp happened to be tightened.
 ##
-## 62 mm is also the most the depth allows, and that is the tight dimension in
-## this design:
+## Depth has stopped being the tight dimension:
 ##
-##   dial face to lens front      62
+##   dial face to lens front      40
 ##   lens plate                    3
 ##   board bay                    20
 ##   ----------------------------------
-##   forward of the dial face     85   of 90 available
+##   forward of the dial face     63   of 90 available
 ##
-## Five millimetres, and they are five to the *frame*; the mirror door swings
-## in front of that. Check it against a closed door before printing the second.
+## 27 mm of slack where the 62 mm draft had 5. The mirror door is no longer a
+## question worth checking.
+##
+## Still unmeasured: the working distance itself. 40 mm is where a hand-held
+## board looked sharp, not a caliper reading, and the photograph hints the true
+## peak sits further out than that. Before the second barrel is printed, find
+## the sharpness peak again with the folding rule in frame and read it off.
 ##
 ## Why the clamp is two parts. The first draft had a slit sleeve with an ear
 ## and one screw, like a shaft collar, and it would not have worked: the slit
@@ -1547,10 +1566,15 @@ print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
 ## At z = 14 that cone is 48 mm and the same ring clears it by 2 mm all round.
 ##
 ## Print the tube and the cap standing on their LENS ENDS, saddle and bay
-## upward. That orientation matters on the tube: the barrel is a full annulus
-## and the saddle only half of one, so printed the other way up the missing
-## half would start 180 degrees of 3 mm ledge in mid-air. This way material
-## only ever disappears going up. The strap and the ring print flat.
+## upward, and both go down without support. On the tube that is because the
+## barrel is a full annulus and the saddle only half of one: printed the other
+## way up, the missing half would start 180 degrees of 3 mm ledge in mid-air.
+## This way material only ever disappears going up, the three flange bosses
+## included -- they grow down from the very face that meets the bed.
+##
+## On the cap it is because the lens plate IS that face. It was not always: see
+## the note at WU_CAP_FIT for the socket this replaced and the 4038 mm2 of
+## ceiling it cost. The strap and the ring print flat.
 ##
 ## PETG, not PLA. The clamp is under sustained load in a warm damp room and PLA
 ## creeps; the rest of this file is PLA because nothing in it is a spring.
@@ -1560,7 +1584,7 @@ WU_CLAMP_BORE = WU_CAP_D         # the two halves close ONTO this, not past it
 WU_BORE = 62.0                   # barrel, and the reason is the shoulder below
 WU_OD = 71.0
 
-WU_WORK = 62.0                   # dial face to lens front; see the optics note
+WU_WORK = 40.0                   # dial face to lens front; see the optics note
 WU_CLAMP_L = 24.0
 WU_Z0 = -WU_CLAMP_L              # -24, back end of the saddle
 WU_SPLIT = 0.4                   # each half stops this far short of y = 0
@@ -1598,20 +1622,42 @@ WU_LED_D = 5.2                   # 5 mm LEDs, pointing back at the dial.
 WU_LED_R = 30.0
 WU_LED_N = 6
 
-# Cap. Slips over the barrel until it bottoms on the barrel's end face -- that
-# face is what sets the working distance, not the screw -- and one M3 grub in a
-# boss stops it walking off. No slit here either: this socket hangs off a solid
-# plate and would have had even less give than the collar did.
+# Cap. It bolts to the barrel's end face through three lugs; that face is what
+# sets the working distance, as it did before.
+#
+# It used to slip over the barrel instead, on a 12 mm socket held by one M3
+# grub. That joint printed badly and the shape is why, not the orientation. A
+# socket below the plate and the board bay above it put a cavity on each side
+# of a plate in the middle of a tube, so whichever end went on the bed, the
+# plate spanned the one underneath it as a ceiling: 4038 mm2 of it, measured
+# off the mesh, against 598 mm2 of bed contact on a 2.5 mm ring. Both ends
+# measured the same, within 30 mm2 -- there was nothing to gain by flipping it.
+#
+# Deleting the socket makes the lens plate the bottom face: 4430 mm2 flat on
+# the bed and no ceiling anywhere. What is left overhead are the two slots in
+# the bay wall, 4.2 and 12 mm across, which bridge.
+#
+# The cost is honest and small. The 12 mm overlap that used to light-seal this
+# joint is now a plane face pulled together by three screws -- less of a
+# labyrinth, but it sits 40 mm in front of the dial and well outside the view
+# cone, so a hairline there is not a light path onto the glass.
 WU_CAP_FIT = 0.4
-WU_CAP_BORE = WU_OD + WU_CAP_FIT             # 71.4
+WU_CAP_BORE = WU_OD + WU_CAP_FIT             # 71.4, now just the bay bore
 WU_CAP_WALL = 2.5
 WU_CAP_OD = WU_CAP_BORE + 2 * WU_CAP_WALL    # 76.4
-WU_SOCKET_L = 12.0
 WU_PLATE = 3.0
 WU_BAY = 20.0
-WU_CAP_Z0 = WU_WORK - WU_SOCKET_L            # 50
 WU_LENS_D = 14.0                             # clears the cone with room to spare
-WU_GRUB_Z = WU_CAP_Z0 + 6.0
+
+# The flange. Three lugs at 120 deg, on a bolt circle just outside both bodies
+# so each lug unions rather than touches. The tube's are 10 mm tall and grow
+# downward from the same end face, which is the end it prints on -- so they lie
+# flat on the bed too, and material only ever disappears going up.
+WU_LUG_N = 3
+WU_LUG_R = 39.0                              # bolt circle; barrel R is 35.5
+WU_LUG_D = 10.0                              # 3.25 mm of wall around a heat-set M3
+WU_LUG_H = 10.0                              # tube-side boss, takes the insert
+WU_LUG_A0 = 90.0                             # first lug at +Y, clear of the clamp ears
 
 # The camera module rides on a ribbon, so it is located by the cap and not by
 # the board. Nominal, from the OV2640 module that ships with these boards --
@@ -1627,12 +1673,26 @@ WU_BOSS = 16.0
 # do not agree on where their mounting holes are, and a tie takes any of them
 # while leaving the card edge clear.
 WU_TIE_W, WU_TIE_T = 4.2, 2.2
-WU_TIE_Z = 79.0
+WU_TIE_Z = WU_WORK + WU_PLATE + 14.0         # 14 up the bay, wherever the bay is
 
 # Flat USB cable in. A slot, not a gland: the cable is ~1.5 mm thick, and a
 # round gland would have wanted a bend radius the shaft has not got.
 WU_SLOT_W, WU_SLOT_H = 12.0, 3.0
-WU_SLOT_Z = 67.0
+WU_SLOT_Z = WU_WORK + WU_PLATE + 2.0        # just behind the lens plate
+
+
+def _lugs():
+    """The three flange positions, shared by the cap and the barrel.
+
+    One helper rather than two loops with the same trigonometry in them: the
+    two parts have to agree on this circle or the screws do not go in, and the
+    cheapest way to guarantee that is to have only one copy of it.
+    """
+    return [
+        (WU_LUG_R * math.cos(math.radians(WU_LUG_A0 + i * 360.0 / WU_LUG_N)),
+         WU_LUG_R * math.sin(math.radians(WU_LUG_A0 + i * 360.0 / WU_LUG_N)))
+        for i in range(WU_LUG_N)
+    ]
 
 
 def _along_y(d, length, at):
@@ -1684,6 +1744,16 @@ wu_tube = wu_tube.union(wu_saddle)
 # The window is 37 mm and sits well inside that, and jomjol's alignment wants
 # the bezel and the printed text, both of which are inside it too.
 wu_tube = wu_tube.cut(_cyl(WU_BORE, WU_WORK + 1, (0, 0, 0)))
+
+# Flange bosses, grown down from the end face the cap bolts to.
+for _x, _y in _lugs():
+    wu_tube = wu_tube.union(
+        _cyl(WU_LUG_D, WU_LUG_H, (_x, _y, WU_WORK - WU_LUG_H))
+    )
+for _x, _y in _lugs():
+    wu_tube = wu_tube.cut(
+        _cyl(WU_PILOT, WU_LUG_H + 1, (_x, _y, WU_WORK - WU_LUG_H - 0.5))
+    )
 wu_tube = wu_tube.cut(_cyl(WU_CLAMP_BORE, WU_CLAMP_L + 1, (0, 0, WU_Z0 - 1)))
 # LED seat, and the lead-in is not decoration. Printed lens-end-down, the
 # layers run from z = 62 towards the meter, so the seat's far face at z = 22 is
@@ -1759,10 +1829,13 @@ _export(wu_ring, "wasserzaehler_ring")
 # ---------------------------------------------------------------------------
 # Cap
 # ---------------------------------------------------------------------------
-wu_cap = _cyl(WU_CAP_OD, WU_SOCKET_L + WU_PLATE + WU_BAY, (0, 0, WU_CAP_Z0))
-wu_cap = wu_cap.cut(_cyl(WU_CAP_BORE, WU_SOCKET_L + 1, (0, 0, WU_CAP_Z0 - 1)))
+wu_cap = _cyl(WU_CAP_OD, WU_PLATE + WU_BAY, (0, 0, WU_WORK))
+for _x, _y in _lugs():
+    wu_cap = wu_cap.union(_cyl(WU_LUG_D, WU_PLATE, (_x, _y, WU_WORK)))
 wu_cap = wu_cap.cut(_cyl(WU_CAP_BORE, WU_BAY + 1, (0, 0, WU_WORK + WU_PLATE)))
 wu_cap = wu_cap.cut(_cyl(WU_LENS_D, WU_PLATE + 2, (0, 0, WU_WORK - 1)))
+for _x, _y in _lugs():
+    wu_cap = wu_cap.cut(_cyl(WU_CLEAR, WU_PLATE + 2, (_x, _y, WU_WORK - 1)))
 
 # Camera boss, standing off the back of the lens plate: a square pocket for the
 # lens holder, then a wider relief so the module's own PCB has somewhere to sit.
@@ -1786,13 +1859,6 @@ wu_cap = wu_cap.cut(
          (WU_CAP_BORE / 2, 0, WU_SLOT_Z))
 )
 
-# Grub screw boss.
-wu_cap = wu_cap.union(
-    _box(12.0, 6.0, 10.0, (0, WU_CAP_OD / 2 + 1.0, WU_CAP_Z0 + 1.0))
-)
-wu_cap = wu_cap.cut(
-    _along_y(WU_PILOT, 12.0, (0, WU_CAP_BORE / 2 - 1.0, WU_GRUB_Z))
-)
 
 display(wu_cap)
 _export(wu_cap, "wasserzaehler_cap")
