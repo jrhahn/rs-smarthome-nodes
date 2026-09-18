@@ -20,10 +20,12 @@ except NameError:
 ## Terrasse — outdoor housing for the bird-scale node
 ## ===========================================================================
 ##
-## Two printed parts:
+## Three printed parts:
 ##
-##   terrasse_body   walls + closed top. Open at the BOTTOM.
-##   terrasse_floor  bottom plate. Carries the anchor and every mount.
+##   terrasse_body          walls + closed top. Open at the BOTTOM.
+##   terrasse_floor         bottom plate. Carries the anchor and every mount.
+##   terrasse_charger_tray  shelf over the boards for the solar charger, added
+##                          2026-09-18. Screws to three columns on the floor.
 ##
 ## Sized from the measured envelopes, plugs included:
 ##
@@ -64,8 +66,31 @@ except NameError:
 ## is then vertical or steps inward, so nothing needs support and the roof
 ## gets the smooth plate-side surface.
 
+# --- the solar charger, and what it costs in height ------------------------
+# Soldered CN3791 MPPT board (SKU 333136), 54 x 38 mm. It arrives after the box
+# was designed and there is no spare volume on the floor: a packing search put
+# the smallest interior taking the existing four parts at 76 x 66 x 52 against
+# the 80 x 70 x 55 there is. So it goes *above* the two boards, on a tray, in
+# the band their 37 mm leaves under the roof.
+#
+# CHARGER_H is the measured height of the *populated* board -- connectors, not
+# PCB -- and it is the one number that decides whether this box grows. Up to
+# 9.5 mm it fits under the existing roof and only the floor plate is reprinted.
+# Beyond that ENV_Z follows it automatically, and the body is reprinted too.
+CHARGER_X, CHARGER_Y = 38.0, 54.0
+CHARGER_H = 12.0                 # ASSUMED. Measure before printing.
+CHARGER_AT = (-9.0, 2.0)         # tray-relative centre of the board
+
+TRAY_T = 2.5                     # the tray plate itself
+POST_TOP = 46.0                  # tray underside: 1 mm over the ESP's 45
+TRAY_TOP = POST_TOP + TRAY_T
+
 # --- envelope -------------------------------------------------------------
-ENV_X, ENV_Y, ENV_Z = 88.0, 78.0, 60.0   # length, width, height
+# The height is the only dimension that is not fixed by the parts inside: it is
+# whatever the charger on its tray needs, and never less than the 60 mm this box
+# shipped with, so a short charger changes nothing.
+ENV_X, ENV_Y = 88.0, 78.0
+ENV_Z = max(60.0, math.ceil(TRAY_TOP + CHARGER_H + 1.0 + 2.0))
 
 WALL = 2.0        # side and roof wall
 FLOOR_T = 3.0     # floor plate
@@ -97,7 +122,10 @@ CH_Y0 = -IN_Y / 2                # -35, against the -Y wall
 VENT_H = 2.5                     # outlet slots, both walls
 VENT_Y_W = 8.0                   # -Y wall, clear of the corner post
 VENT_X_W = 7.0                   # -X wall, likewise
-VENT_Z = [38.0, 44.0, 50.0]
+# Given relative to the ceiling, not as absolutes: the outlets belong high in
+# the wall, and the box grew a roof-ward. At ENV_Z = 60 these are the 38/44/50
+# this box has always had.
+VENT_Z = [Z_CEIL - 20.0, Z_CEIL - 14.0, Z_CEIL - 8.0]
 VENT_TILT = 30.0                 # degrees, sloping down and outward
 
 # --- floor-to-body screws, into M3 heat-set inserts -----------------------
@@ -120,6 +148,28 @@ BOSS_XY = [(sx * (IN_X / 2 - 4.0), sy * (IN_Y / 2 - 4.0))
            for sx in (-1, 1) for sy in (-1, 1)]
 SCREW_CLEAR, SCREW_CSK = 3.4, 6.6
 
+# Columns carrying the charger tray. Three, not four, and the missing one is
+# the +X/-Y corner: the ESP's 32 x 41 footprint reaches x = 17 at y = -35..6,
+# and the only gap left there is the 2 mm between it and the cell lane. Three
+# points carry a 20 g board perfectly well and are statically determinate into
+# the bargain; a fourth would have meant moving the ESP, which is the one
+# footprint that cannot avoid the centre.
+#
+# Each one sits in a pocket the existing parts leave: -34/-8 between the vent
+# chamber and the ESP, 15.5/30 between the HX711 and the cell, -18.5/-27
+# between the chamber and the ESP's -X edge. They rise from the floor plate
+# because that is the part that prints anchor-down -- a column standing free in
+# the body would start in mid-air, the body printing roof-down.
+# Each carries its own diameter, because the pockets are not the same size and
+# a single number would have to be the smallest of them. The -X one has 25 mm
+# of clear floor and gets a foot; the other two sit in gaps exactly 7 mm wide --
+# between the HX711 and the cell lane, and between the vent chamber and the ESP
+# -- so they are 5 mm with a millimetre either side, and no foot, because a foot
+# is something a board has to be threaded past during assembly.
+POSTS = [(-34.0, -8.0, 9.0), (15.5, 30.0, 5.0), (-18.5, -27.0, 5.0)]
+POST_FOOT_MIN = 8.0                      # below this, no flare at the root
+POST_PILOT, POST_PILOT_H = 2.5, 9.0      # M3 self-tapper, into the tray
+
 # --- bending-beam anchor (M4) ---------------------------------------------
 # Interface to the bending-beam clamp. The clamp's own model lived in this
 # file until it was retired -- `git show d0df819:models.py` still has it. The
@@ -135,6 +185,17 @@ NUT_BOSS_H = 5.0                 # boss inside the box carrying the nuts
 # then lives *under* the ESP instead of fighting it for floor area -- and the
 # ESP's 42 mm depth is the one footprint that cannot avoid the centre.
 DECK_Z = FLOOR_T + NUT_BOSS_H    # 8
+
+# Panel lead, in through a side wall. Low, and emphatically not in the roof:
+# this box is a cup opening downward so that its only joint faces the ground,
+# and a penetration up top would give away the single property the whole shape
+# exists to provide. It enters the +X wall, where the 9 mm between the cell lane
+# and the wall is a clear chase all the way up to the charger tray -- the other
+# three walls have a board, the vent chamber or a corner post behind them.
+GLAND_HOLE = 8.2                 # M8 gland; PG7 wants 12.5 and the same pad
+GLAND_Z = 18.0                   # centre height, below everything it passes
+GLAND_PAD_T = 4.0                # local wall thickening, inside face
+GLAND_PAD_W = 16.0
 
 CABLE_D, CABLE_XY = 6.0, (-34.0, 20.0)   # load-cell cable, up through the floor
 DRAIN_D, DRAIN_XY = 3.0, (-34.0, 0.0)    # condensate drain
@@ -279,6 +340,31 @@ for (px, py) in BOSS_XY:
 rib_x = HX711[3] - (HX711[0] + RIB) / 2
 body = body.cut(_box(RIB + 0.6, 14.0, BOSS_H, (rib_x, 30.0, Z_FLOOR)))
 
+# Gland pad and hole. The pad is a vertical rib on the inside face, chamfered
+# at its top edge: printing roof-down, the pad's first layer would otherwise be
+# a 4 mm ledge hanging off the wall in mid-air, and a 45 degree ramp turns that
+# into a feature that grows downward at a printable angle. The bore itself is
+# horizontal, so its crown is an 8 mm bridge -- short enough to span cleanly,
+# and it is a clearance hole for a gland's thread, not a fit.
+_pad_out, _pad_in = IN_X / 2, IN_X / 2 - GLAND_PAD_T
+_pad_top = GLAND_Z + 10.0
+body = body.union(
+    cq.Workplane("XZ")
+    .polyline([
+        (_pad_in, Z_FLOOR),
+        (_pad_in, _pad_top - GLAND_PAD_T),
+        (_pad_out, _pad_top),
+        (_pad_out, Z_FLOOR),
+    ])
+    .close()
+    .extrude(GLAND_PAD_W)
+    .translate((0.0, GLAND_PAD_W / 2.0, 0.0))
+)
+body = body.cut(
+    cq.Workplane("YZ").circle(GLAND_HOLE / 2).extrude(20.0)
+    .translate((IN_X / 2 - GLAND_PAD_T - 1.0, 0.0, GLAND_Z))
+)
+
 # The roof edge gets a chamfer, not a round. This part prints roof-down, so
 # that edge is the first layer: a fillet there starts as a knife edge with a
 # horizontal tangent and each layer steps outward over air. A 45 degree break
@@ -379,8 +465,60 @@ for sx in (-1, 1):
              (CELL_X + sx * (CELL_T + 0.4 + RIB) / 2, 0, FLOOR_T))
     )
 
+# Columns for the charger tray, each with a fillet at the root: 43 mm of 7 mm
+# column is slender, and the joint to the plate is where it would snap while
+# somebody is threading a screw into the top.
+for (px, py, pd) in POSTS:
+    floor = floor.union(_cyl(pd, POST_TOP - FLOOR_T, (px, py, FLOOR_T)))
+    if pd >= POST_FOOT_MIN:
+        floor = floor.union(_cyl(pd + 4.0, 2.0, (px, py, FLOOR_T)))
+    floor = floor.cut(
+        _cyl(POST_PILOT, POST_PILOT_H, (px, py, POST_TOP - POST_PILOT_H))
+    )
+
 display(floor)
 _export(floor, "terrasse_floor")
+
+# ---------------------------------------------------------------------------
+# Charger tray
+# ---------------------------------------------------------------------------
+# A shelf over the two boards, carrying the solar charger in the 13 mm the
+# ESP's 37 mm leaves under the roof. Separate part for the same reason the
+# floor is one: it has to be fitted after the boards are in, and it could not
+# be printed attached to either of the others.
+#
+# The charger is held by two cable ties rather than screwed. The board's
+# mounting holes are not in this model -- nothing here has measured them -- and
+# ties are what the cell already uses, for the same reason: they do not care
+# about a dimension nobody has checked.
+TRAY_X0, TRAY_X1 = -37.5, 17.5   # 1.5 mm clear of the cell lane at x = 19
+TRAY_Y0, TRAY_Y1 = -31.0, 33.5
+TIE_W, TIE_L = 3.0, 8.0
+
+tray = _box(TRAY_X1 - TRAY_X0, TRAY_Y1 - TRAY_Y0, TRAY_T,
+            ((TRAY_X0 + TRAY_X1) / 2, (TRAY_Y0 + TRAY_Y1) / 2, POST_TOP))
+
+# Keep the chimney open. The vent chamber runs floor slots at the -X/-Y corner
+# up to outlets high in both walls, and a shelf laid over its mouth would turn
+# a draught into a pocket.
+tray = tray.cut(
+    _box(CH_X0 + CH_X - TRAY_X0, CH_Y0 + CH_Y - TRAY_Y0, TRAY_T,
+         ((TRAY_X0 + CH_X0 + CH_X) / 2, (TRAY_Y0 + CH_Y0 + CH_Y) / 2, POST_TOP))
+)
+
+# Screw holes over the three columns, and a seat so the head does not stand
+# proud into the charger.
+for (px, py, _pd) in POSTS:
+    tray = tray.cut(_cyl(3.4, TRAY_T, (px, py, POST_TOP)))
+    tray = tray.cut(_cyl(6.2, 1.2, (px, py, POST_TOP + TRAY_T - 1.2)))
+
+# Cable-tie slots, a pair either side of the board's footprint.
+for tx in (CHARGER_AT[0] - CHARGER_X / 2 - 3.0, CHARGER_AT[0] + CHARGER_X / 2 + 3.0):
+    for ty in (CHARGER_AT[1] - 18.0, CHARGER_AT[1] + 18.0):
+        tray = tray.cut(_box(TIE_W, TIE_L, TRAY_T, (tx, ty, POST_TOP)))
+
+display(tray)
+_export(tray, "terrasse_charger_tray")
 
 print("terrasse body  %.1f cm3   floor %.1f cm3" % (
     body.val().Volume() / 1000.0, floor.val().Volume() / 1000.0))

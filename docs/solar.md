@@ -297,26 +297,57 @@ ordered on 2026-09-08.**
 
 ## Mechanical
 
-**The gland goes through the floor or a low side wall — never the roof.** The
+**The gland goes low in the +X wall — never the roof.** Drawn 2026-09-18:
+an M8 clearance hole at z = 18, through a 4 mm pad on the inside face whose top
+edge is ramped at 45° so it prints without support. The +X wall is the one that
+can take it: the 9 mm between the cell lane and that wall is a clear chase from
+the floor all the way up to the tray, where the other three have a board, the
+vent chamber or a corner post behind them.
+
+The reasoning it follows, which predates the drawing: The
 enclosure is a cup opening downward precisely so that its only joint faces the
 ground; [`models.py`](../models.py) states it as a requirement ("no seam and no
 penetration in the roof"). A gland in the top would give up the one property the
 whole shape exists to provide. Enter low, with a drip loop below the box.
 
-**The board does not fit in the box as it stands.** The Soldered charger is
-54 × 38 mm, and the terrasse enclosure has no spare volume at all: the interior
-is 80 × 70 × 55, and [`models.py`](../models.py) records that a packing search
-put the smallest interior taking the existing four parts at 76 × 66 × 52. There
-was never room for a fifth. Two ways out, and the cable gland means
-[`models.py`](../models.py) has to be re-run either way:
+**The board does not fit on the floor, and it does not have to.** The Soldered
+charger is 54 × 38 mm, and the terrasse enclosure has no spare floor at all: the
+interior is 80 × 70 × 55, and a packing search put the smallest interior taking
+the existing four parts at 76 × 66 × 52. There was never room for a fifth beside
+them — but there is room *above* them. The two boards stand 37 mm off an 8 mm
+deck, which leaves a 13 mm band under the roof across 47 × 69 mm of plan area,
+and a 54 × 38 board lies in it comfortably.
 
-1. **Reprint a taller body.** One enclosure, one weatherproofing problem. The
-   `wohnzimmer` box has already been through this.
-2. **Put the charger in its own pod at the panel.** Now permitted by the wiring
-   note above — but it is a second enclosure that has to survive the same rain,
-   and the existing one is already solved.
+**Drawn 2026-09-18** (`models.py`, `cad-models/terrasse_charger_tray.*`):
 
-The first is the cheaper mistake to make.
+- A **tray** over the two boards, 55 × 64.5 × 2.5, notched at the −X/−Y corner
+  so the vent chimney keeps its mouth. The charger is held by two cable ties
+  rather than screws — its mounting holes are not in the model because nobody
+  has measured them, and ties are what the cell already uses for the same
+  reason.
+- **Three columns** up from the floor plate, not four. The +X/−Y corner is the
+  ESP's, and the only gap there is the 2 mm between it and the cell lane; three
+  points carry a 20 g board and are statically determinate. They stand in the
+  pockets the existing parts leave — one 9 mm column where there is 25 mm of
+  clear floor, and two 5 mm ones in gaps exactly 7 mm wide, with a millimetre
+  either side. Those two get no foot: a foot is something a board has to be
+  threaded past during assembly.
+- Everything rises from the **floor plate**, because that is the part that
+  prints anchor-down. A column standing free inside the body would begin
+  printing in mid-air, the body printing roof-down — which is the same
+  constraint that put every other mount on the floor.
+
+**The box grows by 4 mm**, and only because of the charger's own height. `ENV_Z`
+is now computed rather than fixed: `max(60, tray + CHARGER_H + clearance)`. At
+`CHARGER_H = 9.5` or less nothing changes and only the floor plate is reprinted;
+the 12 mm currently in the file is **an assumption and has to be measured on the
+populated board** before anything is printed.
+
+The alternative — a pod at the panel — stays rejected, and now for a better
+reason than tidiness: it would put the *cell* at the far end of the long
+outdoor cable instead of the panel. A panel is current-limited by physics
+(~550 mA into a short); a LiPo is not, and relying on its protection board for a
+cable that lies in the weather for years is the weaker of the two.
 
 **Mount the panel at 60–70° from horizontal, facing south.** Steeper than the
 summer optimum on purpose: the design case is December, and snow and leaves slide
