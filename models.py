@@ -20,12 +20,24 @@ except NameError:
 ## Terrasse — outdoor housing for the bird-scale node
 ## ===========================================================================
 ##
-## Three printed parts:
+## Four printed parts:
 ##
 ##   terrasse_body          walls + closed top. Open at the BOTTOM.
-##   terrasse_floor         bottom plate. Carries the anchor and every mount.
+##   terrasse_floor         bottom plate. Carries every mount, and nothing at
+##                          all on its underside -- see terrasse_anchor.
 ##   terrasse_charger_tray  shelf over the boards for the solar charger, added
 ##                          2026-09-18. Screws to three columns on the floor.
+##   terrasse_anchor        the pad the beam clamp bolts to, split off the floor
+##                          plate the same day so that plate prints flat.
+##
+## Print orientation, which is what several of the decisions in here are about:
+##
+##   body   ROOF DOWN     every feature vertical or stepping inward
+##   floor  PLATE DOWN    underside is one flat face, ribs and columns stand up
+##   tray   FLAT          either way
+##   anchor PAD DOWN      every face flat or vertical
+##
+## None of the four needs support.
 ##
 ## Sized from the measured envelopes, plugs included:
 ##
@@ -372,14 +384,13 @@ floor = (
     .cskHole(SCREW_CLEAR, SCREW_CSK, 90)
 )
 
-# Beam anchor: flange, then the pad that meets the clamp.
-floor = floor.union(_box(FLANGE_X, FLANGE_Y, FLANGE_H, (0, 0, -FLANGE_H)))
-floor = floor.union(_box(PAD_X, PAD_Y, PAD_H, (0, 0, -FLANGE_H - PAD_H)))
-# Boss inside the box, so the anchor screws run through 14 mm of material.
+# Boss inside the box, so the anchor screws run through 14 mm of material. The
+# pad and flange that used to hang below this plate are now their own part --
+# see `terrasse_anchor` -- which is what leaves this underside flat.
 floor = floor.union(_box(PAD_X, PAD_Y, NUT_BOSS_H, (0, 0, FLOOR_T)))
 
 anchor_pts = [(-ANCHOR_PITCH / 2, 0.0), (ANCHOR_PITCH / 2, 0.0)]
-anchor_z0 = -FLANGE_H - PAD_H
+anchor_z0 = 0.0
 for (px, py) in anchor_pts:
     floor = floor.cut(
         cq.Workplane("XY").circle(ANCHOR_HOLE / 2)
@@ -393,15 +404,16 @@ for (px, py) in anchor_pts:
         .translate((px, py, FLOOR_T + NUT_BOSS_H - NUT_T))
     )
 
-# Load-cell cable, with a collar underneath that sheds water off the lead.
-floor = floor.union(
-    cq.Workplane("XY").circle(5.0).extrude(4.0)
-    .translate((CABLE_XY[0], CABLE_XY[1], -4.0))
-)
+# Load-cell cable. The collar that used to hang below this hole and shed water
+# off the lead is gone with everything else on this face: it was belt and
+# braces over the drip loop, which is what actually keeps water out of a
+# downward hole, and which the panel lead needs anyway. A chamfer takes its
+# place, so the lead is not dragged over a printed edge.
 floor = floor.cut(
-    cq.Workplane("XY").circle(CABLE_D / 2).extrude(FLOOR_T + 4.0)
-    .translate((CABLE_XY[0], CABLE_XY[1], -4.0))
+    cq.Workplane("XY").circle(CABLE_D / 2).extrude(FLOOR_T)
+    .translate((CABLE_XY[0], CABLE_XY[1], 0))
 )
+floor = floor.faces("<Z").edges(cq.NearestToPointSelector((CABLE_XY[0], CABLE_XY[1], 0))).chamfer(1.0)
 
 # Condensate drain for the electronics volume.
 floor = floor.cut(
@@ -467,6 +479,35 @@ for (px, py, pd) in POSTS:
 
 display(floor)
 _export(floor, "terrasse_floor")
+
+# ---------------------------------------------------------------------------
+# Beam anchor
+# ---------------------------------------------------------------------------
+# The pad the bending-beam clamp bolts to, and the flange that spreads its load
+# into the floor plate. Both were part of that plate until 2026-09-18, and they
+# are separate now for one reason: they were the only things on its underside,
+# and while they were there the plate could not be printed without support. Laid
+# anchor-down, an 84 x 74 plate steps out over a 33 x 18 flange -- a 25 mm
+# horizontal overhang the whole way round.
+#
+# The load path does not change. The same two M4 screws run from under this pad,
+# through the plate, into the captive nuts in the boss inside the box; this part
+# is clamped between the screw heads and the plate rather than being the plate.
+# If anything the grain is better -- a flat pad printed flat has its layers
+# across the load, where a pad printed as a step on a plate had them along it.
+#
+# Print it pad-down. Every face is then flat or vertical.
+anchor = _box(PAD_X, PAD_Y, PAD_H, (0, 0, 0))
+anchor = anchor.union(_box(FLANGE_X, FLANGE_Y, FLANGE_H, (0, 0, PAD_H)))
+for (px, py) in anchor_pts:
+    anchor = anchor.cut(
+        cq.Workplane("XY").circle(ANCHOR_HOLE / 2).extrude(PAD_H + FLANGE_H)
+        .translate((px, py, 0))
+    )
+anchor = anchor.edges("|Z").fillet(2.0)
+
+display(anchor)
+_export(anchor, "terrasse_anchor")
 
 # ---------------------------------------------------------------------------
 # Charger tray

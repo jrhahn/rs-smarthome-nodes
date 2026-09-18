@@ -241,9 +241,9 @@ Python bindings), so the shell pins the wheels and installs them into
 tracked, so printing a part does not require the toolchain at all — `.stl` to
 slice, `.step` to open in CAD.
 
-### `terrasse_body` + `terrasse_floor`
+### `terrasse_body` + `terrasse_floor` + `terrasse_charger_tray` + `terrasse_anchor`
 
-An **88 × 78 × 60 mm** box for the bird scale, in two parts. The size is not a
+An **88 × 78 × 71 mm** box for the bird scale, in four parts. The size is not a
 choice — it comes from the measured envelopes, plugs included:
 
 | | | | |
@@ -254,8 +254,9 @@ choice — it comes from the measured envelopes, plugs included:
 That is 128 cm³ with clearance. The first version of this box had a 98 cm³
 interior, so no amount of rearranging would have done it; a grid packing search
 puts the smallest interior that takes all four at 76 × 66 × 52, and only with
-everything stood on end. This one is 80 × 70 × 55, which leaves room for the
-mounts themselves.
+everything stood on end. This one is 80 × 70 × 66, which leaves room for the
+mounts themselves — and, since 2026-09-18, for a fifth part the floor could
+never have held: the solar charger, on a shelf above the other two boards.
 
 The design follows from it hanging outdoors in the rain:
 
@@ -290,9 +291,18 @@ The design follows from it hanging outdoors in the rain:
   being melted into it. Warm the inserts properly and do not lean on them; if
   one splits, the way out is a reprinted floor with the holes further in, which
   buys 3.5 mm.
-- **The load hangs off a pad on the underside of the floor**, matching the
-  clamp's 25 × 12 face and its screw pitch, with captive nuts reachable from
-  inside the box.
+- **The load hangs off a pad** matching the clamp's 25 × 12 face and its screw
+  pitch, with captive nuts reachable from inside the box. That pad is
+  `terrasse_anchor`, its own part since 2026-09-18 and clamped under the plate
+  by the same two M4 screws. It was part of the plate until then, and it was
+  the only thing on that face: while it was there the plate could not be
+  printed without support, because an 84 × 74 plate laid anchor-down steps out
+  over a 33 × 18 flange. Now **no part of this box needs support** — body roof
+  down, floor plate down, anchor pad down.
+- **The solar charger sits on a tray over the two boards**, on three columns
+  rising from the floor plate, and the panel lead comes in through the floor.
+  Both are why the box is 71 mm tall rather than 60. See
+  [`docs/solar.md`](docs/solar.md).
 
 ### `terrasse_beam_spacer` + `terrasse_beam_hanger`
 
