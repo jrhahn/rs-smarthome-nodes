@@ -91,6 +91,16 @@ except NameError:
 # 9.5 mm it fits under the existing roof and only the floor plate is reprinted.
 # Beyond that ENV_Z follows it automatically, and the body is reprinted too.
 CHARGER_X, CHARGER_Y = 38.0, 54.0
+# Mounting holes, read off the manufacturer's PCB file: four Ø3.2 at 48 x 32,
+# i.e. 3 mm in from each edge of the 54 x 38 board. The 48 runs along its long
+# side, so on the tray that is the Y spacing.
+CHARGER_HOLES = (32.0, 48.0)     # x pitch, y pitch
+# The board stands on four sockets rather than flat on the tray, which is what
+# lets an M3 insert live in them -- 2.5 mm of tray never could -- and which the
+# board needs anyway: its screw terminals' solder tails stand proud underneath,
+# so a board laid flat would rest on its own joints.
+CHARGER_BOSS_D, CHARGER_BOSS_H = 8.0, 4.5
+CHARGER_BORE, CHARGER_BORE_H = 3.5, 5.0
 # Measured 2026-09-18 on the populated board, 2 mm of headroom already in it.
 # It does not fit the 13 mm band the boards leave under the old roof, so this
 # number is what raises the box: 60 -> 71 mm.
@@ -108,7 +118,7 @@ TRAY_TOP = POST_TOP + TRAY_T
 ENV_X, ENV_Y = 88.0, 78.0
 
 WALL = 2.0        # side and roof wall
-ENV_Z = max(60.0, math.ceil(TRAY_TOP + CHARGER_H + 0.5 + WALL))
+ENV_Z = max(60.0, math.ceil(TRAY_TOP + CHARGER_BOSS_H + CHARGER_H + 0.5 + WALL))
 FLOOR_T = 3.0     # floor plate
 EAVE = 2.0        # how far the drip edge stands proud of the wall
 EAVE_H = 5.0      # height of the drip-edge band
@@ -536,13 +546,11 @@ _export(anchor, "terrasse_anchor")
 # floor is one: it has to be fitted after the boards are in, and it could not
 # be printed attached to either of the others.
 #
-# The charger is held by two cable ties rather than screwed. The board's
-# mounting holes are not in this model -- nothing here has measured them -- and
-# ties are what the cell already uses, for the same reason: they do not care
-# about a dimension nobody has checked.
+# The charger is screwed down through its own four mounting holes -- 48 x 32,
+# Ø3.2, read off the manufacturer's PCB file -- into M3 inserts in four sockets.
+# It was held by cable ties while that pattern was unknown.
 TRAY_X0, TRAY_X1 = -37.5, 17.5   # 1.5 mm clear of the cell lane at x = 19
 TRAY_Y0, TRAY_Y1 = -31.0, 33.5
-TIE_W, TIE_L = 3.0, 8.0
 
 tray = _box(TRAY_X1 - TRAY_X0, TRAY_Y1 - TRAY_Y0, TRAY_T,
             ((TRAY_X0 + TRAY_X1) / 2, (TRAY_Y0 + TRAY_Y1) / 2, POST_TOP))
@@ -567,10 +575,18 @@ for (px, py, _pd) in POSTS:
 # under it.
 tray = tray.cut(_cyl(10.0, TRAY_T, (-33.0, 1.0, POST_TOP)))
 
-# Cable-tie slots, a pair either side of the board's footprint.
-for tx in (CHARGER_AT[0] - CHARGER_X / 2 - 3.0, CHARGER_AT[0] + CHARGER_X / 2 + 3.0):
-    for ty in (CHARGER_AT[1] - 18.0, CHARGER_AT[1] + 18.0):
-        tray = tray.cut(_box(TIE_W, TIE_L, TRAY_T, (tx, ty, POST_TOP)))
+# The charger's own mounting holes. Cable ties stood here until the board was
+# in hand and its pattern could be read off the manufacturer's PCB file rather
+# than guessed; screws through a known pattern beat ties over an unknown one.
+for sx in (-1, 1):
+    for sy in (-1, 1):
+        at = (CHARGER_AT[0] + sx * CHARGER_HOLES[0] / 2,
+              CHARGER_AT[1] + sy * CHARGER_HOLES[1] / 2)
+        tray = tray.union(_cyl(CHARGER_BOSS_D, CHARGER_BOSS_H,
+                               (at[0], at[1], POST_TOP + TRAY_T)))
+        tray = tray.cut(_cyl(
+            CHARGER_BORE, CHARGER_BORE_H,
+            (at[0], at[1], POST_TOP + TRAY_T + CHARGER_BOSS_H - CHARGER_BORE_H)))
 
 display(tray)
 _export(tray, "terrasse_charger_tray")

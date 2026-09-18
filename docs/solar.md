@@ -415,10 +415,14 @@ and a 54 × 38 board lies in it comfortably.
 **Drawn 2026-09-18** (`models.py`, `cad-models/terrasse_charger_tray.*`):
 
 - A **tray** over the two boards, 55 × 64.5 × 2.5, notched at the −X/−Y corner
-  so the vent chimney keeps its mouth. The charger is held by two cable ties
-  rather than screws — its mounting holes are not in the model because nobody
-  has measured them, and ties are what the cell already uses for the same
-  reason.
+  so the vent chimney keeps its mouth. The charger screws to it through its own
+  mounting holes — **48 × 32, Ø3.2**, read off the manufacturer's PCB file
+  rather than measured — into M3 inserts in four **4.5 mm sockets**. Cable ties
+  held it while that pattern was unknown.
+
+  The sockets are not only there for the inserts, which 2.5 mm of tray could
+  never hold: the board's screw terminals leave solder tails standing proud
+  underneath, so a board laid flat would rest on its own joints.
 - **Three columns** up from the floor plate, not four. The +X/−Y corner is the
   ESP's, and the only gap there is the 2 mm between it and the cell lane; three
   points carry a 20 g board and are statically determinate. Each is bored
@@ -446,7 +450,15 @@ and a 54 × 38 board lies in it comfortably.
   printing in mid-air, the body printing roof-down — which is the same
   constraint that put every other mount on the floor.
 
-**The box grows from 60 mm to 71 mm**, and only because of the charger's own
+**The box grows from 60 mm to 76 mm**, in three steps that are worth keeping
+apart: 71 for the charger lying on a tray over the boards, and another 5 for
+standing it on sockets so it can be screwed down and so its solder tails clear.
+Screwing it down with plain nuts under the tray would have cost 2 mm instead of
+5 — the nuts sit over the ESP, which needs the tray 2 mm higher — at the price
+of no inserts and a board resting on its terminals. If the height ever has to
+come back, that is the trade to revisit.
+
+The figures below are the first of those steps, and only because of the charger's own
 height. `ENV_Z` is computed rather than fixed — `max(60, tray + CHARGER_H +
 clearance)` — so it is one measured number that decides it, and the number came
 back **20 mm** on the populated board (measured 2026-09-18, with 2 mm of
