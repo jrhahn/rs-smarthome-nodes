@@ -370,14 +370,35 @@ ordered on 2026-09-08.**
 
 ## Mechanical
 
-**The gland goes low in the +X wall — never the roof.** Drawn 2026-09-18:
-an M8 clearance hole at z = 18, through a 4 mm pad on the inside face whose top
-edge is ramped at 45° so it prints without support. The +X wall is the one that
-can take it: the 9 mm between the cell lane and that wall is a clear chase from
-the floor all the way up to the tray, where the other three have a board, the
-vent chamber or a corner post behind them.
+**The gland goes through the floor — never the roof.** Drawn into a side wall
+first, and moved on 2026-09-18 for a reason that is not the obvious one.
 
-The reasoning it follows, which predates the drawing: The
+Water is the obvious one, and it does favour the floor: a hole that faces down
+cannot be run into, which is why the load-cell cable and the condensate drain
+already leave that way. But the argument that settles it is **disassembly**. A
+gland in the wall holds the cable captive on the *body*, while the charger it
+feeds stands on columns belonging to the *floor plate*. Opening the box would
+then pull those two apart against a tethered cable, and the panel leads would
+have to come off the charger every single time. Through the floor, cable,
+charger and beam anchor all stay with the same part, and the body lifts off
+clean.
+
+**The position was searched for, not chosen**: an M8 nut needs 13 mm of clear
+floor inside, and a sweep over the plan against the boards, their rib frames,
+the cell lane, the vent chamber, the anchor pad, the load-cell cable, the drain,
+the corner posts and the three tray columns leaves **exactly one pocket, about
+2 mm across, at (−24, +1)**. That is the whole of the freedom there is on this
+floor, and it is worth knowing before anything else is added to it.
+
+Below the plate the beam hanger passes through the same plan position, but
+28.7 mm down; an M8 gland's ~15 mm body clears it by about 9 mm. **A longer
+gland, or a drip loop pulled up tight, would not** — leave the loop slack and
+hanging free of the beam.
+
+The cable then rises to the tray and through a 10 mm pass-through at its −X
+edge, beside the charger rather than under it.
+
+The reasoning all of this follows, which predates the drawing: The
 enclosure is a cup opening downward precisely so that its only joint faces the
 ground; [`models.py`](../models.py) states it as a requirement ("no seam and no
 penetration in the roof"). A gland in the top would give up the one property the

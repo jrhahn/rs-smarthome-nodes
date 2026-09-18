@@ -189,16 +189,21 @@ NUT_BOSS_H = 5.0                 # boss inside the box carrying the nuts
 # ESP's 42 mm depth is the one footprint that cannot avoid the centre.
 DECK_Z = FLOOR_T + NUT_BOSS_H    # 8
 
-# Panel lead, in through a side wall. Low, and emphatically not in the roof:
-# this box is a cup opening downward so that its only joint faces the ground,
-# and a penetration up top would give away the single property the whole shape
-# exists to provide. It enters the +X wall, where the 9 mm between the cell lane
-# and the wall is a clear chase all the way up to the charger tray -- the other
-# three walls have a board, the vent chamber or a corner post behind them.
-GLAND_HOLE = 8.2                 # M8 gland; PG7 wants 12.5 and the same pad
-GLAND_Z = 18.0                   # centre height, below everything it passes
-GLAND_PAD_T = 4.0                # local wall thickening, inside face
-GLAND_PAD_W = 16.0
+# Panel lead, in through the FLOOR. Not the roof, which would give away the one
+# property this shape exists for -- and not a side wall either, which is where
+# this started and was wrong for a reason that has nothing to do with water:
+# the gland would have held the cable captive on the *body* while the charger it
+# feeds stands on the *floor plate*, so every opening of the box would pull the
+# two apart against a tethered cable. Through the floor, cable, charger and
+# anchor all stay with the same part and the body lifts off clean.
+#
+# The position is not a choice. A search over the plan for somewhere a 13 mm
+# boss clears the boards, their ribs, the cell lane, the vent chamber, the
+# anchor pad, the load-cell cable, the drain, the corner posts and the tray
+# columns leaves exactly one pocket, 2 mm across, at (-24, 1).
+GLAND_HOLE = 8.2                 # M8 gland; the 3 mm floor suits its panel range
+GLAND_XY = (-24.0, 1.0)
+GLAND_SEAT = 13.0                # flat the nut needs inside, kept clear of ribs
 
 CABLE_D, CABLE_XY = 6.0, (-34.0, 20.0)   # load-cell cable, up through the floor
 DRAIN_D, DRAIN_XY = 3.0, (-34.0, 0.0)    # condensate drain
@@ -343,31 +348,6 @@ for (px, py) in BOSS_XY:
 rib_x = HX711[3] - (HX711[0] + RIB) / 2
 body = body.cut(_box(RIB + 0.6, 14.0, BOSS_H, (rib_x, 30.0, Z_FLOOR)))
 
-# Gland pad and hole. The pad is a vertical rib on the inside face, chamfered
-# at its top edge: printing roof-down, the pad's first layer would otherwise be
-# a 4 mm ledge hanging off the wall in mid-air, and a 45 degree ramp turns that
-# into a feature that grows downward at a printable angle. The bore itself is
-# horizontal, so its crown is an 8 mm bridge -- short enough to span cleanly,
-# and it is a clearance hole for a gland's thread, not a fit.
-_pad_out, _pad_in = IN_X / 2, IN_X / 2 - GLAND_PAD_T
-_pad_top = GLAND_Z + 10.0
-body = body.union(
-    cq.Workplane("XZ")
-    .polyline([
-        (_pad_in, Z_FLOOR),
-        (_pad_in, _pad_top - GLAND_PAD_T),
-        (_pad_out, _pad_top),
-        (_pad_out, Z_FLOOR),
-    ])
-    .close()
-    .extrude(GLAND_PAD_W)
-    .translate((0.0, GLAND_PAD_W / 2.0, 0.0))
-)
-body = body.cut(
-    cq.Workplane("YZ").circle(GLAND_HOLE / 2).extrude(20.0)
-    .translate((IN_X / 2 - GLAND_PAD_T - 1.0, 0.0, GLAND_Z))
-)
-
 # The roof edge gets a chamfer, not a round. This part prints roof-down, so
 # that edge is the first layer: a fillet there starts as a knife edge with a
 # horizontal tangent and each layer steps outward over air. A 45 degree break
@@ -468,6 +448,12 @@ for sx in (-1, 1):
              (CELL_X + sx * (CELL_T + 0.4 + RIB) / 2, 0, FLOOR_T))
     )
 
+# Panel lead. A plain bore: the gland is fitted from below -- the weather side,
+# where its flange and gasket belong -- and its nut lands on the inside face,
+# which is why the search above insisted on 13 mm of clear floor rather than
+# just the hole.
+floor = floor.cut(_cyl(GLAND_HOLE, FLOOR_T, (GLAND_XY[0], GLAND_XY[1], 0)))
+
 # Columns for the charger tray, each with a fillet at the root: 43 mm of 7 mm
 # column is slender, and the joint to the plate is where it would snap while
 # somebody is threading a screw into the top.
@@ -514,6 +500,12 @@ tray = tray.cut(
 for (px, py, _pd) in POSTS:
     tray = tray.cut(_cyl(3.4, TRAY_T, (px, py, POST_TOP)))
     tray = tray.cut(_cyl(6.2, 1.2, (px, py, POST_TOP + TRAY_T - 1.2)))
+
+# Pass-through for the panel lead, which now comes up from the floor and would
+# otherwise meet the underside of this plate. Placed off the charger's own
+# footprint, on the -X side, so the cable arrives beside the board rather than
+# under it.
+tray = tray.cut(_cyl(10.0, TRAY_T, (-33.0, 1.0, POST_TOP)))
 
 # Cable-tie slots, a pair either side of the board's footprint.
 for tx in (CHARGER_AT[0] - CHARGER_X / 2 - 3.0, CHARGER_AT[0] + CHARGER_X / 2 + 3.0):
