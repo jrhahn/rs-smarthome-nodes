@@ -1663,7 +1663,47 @@ WU_CAP_BORE = WU_OD + WU_CAP_FIT             # 71.4, now just the bay bore
 WU_CAP_WALL = 2.5
 WU_CAP_OD = WU_CAP_BORE + 2 * WU_CAP_WALL    # 76.4
 WU_PLATE = 3.0
-WU_BAY = 20.0
+WU_BAY = 30.0
+
+# The bay is 30 and not 20 because the ESP32-CAM keeps its MB carrier board.
+# That board is what makes this practical: the camera board plugs into it on
+# its own headers, so only the carrier has to be held, and it brings the micro
+# USB socket that feeds the thing for good. Measured on the bench, both boards
+# together and without the camera module: 16.8 mm.
+#
+#   lens plate back      43.0
+#   lens holder          43.0 .. 48.5
+#   module PCB           48.5 .. 52.5
+#   board stack          52.5 .. 69.3   <- 16.8, measured
+#   hold-down bar        69.3 .. 72.3
+#
+# Depth was the tight dimension when this part wanted 62 mm of barrel. It is
+# not any more: 73 of the 90 mm available, and 17 to spare.
+WU_MB_L, WU_MB_W = 40.0, 27.0    # carrier outline, measured
+WU_STACK = 16.8                  # both boards, no camera module, measured
+
+# Retention, v2. The cable tie it replaces never had anything to pull against:
+# the slot sat 14 mm up the bay and the board ends around 54, so it crossed
+# behind the board without touching it. Tape was the result.
+#
+# Neither board has a mounting hole -- not a clone quirk, the AI-Thinker
+# outline has none at all, it is meant to sit on a header. So nothing here
+# screws THROUGH the board. The camera stack locates it from the front, two
+# posts and a bar press it back onto that, and the board is merely clamped.
+#
+# Posts on +/-X, because -Y is where the USB has to come out. R 30 is what the
+# 71.4 bore allows while leaving the bar short enough to go in: 68 mm between
+# a 71.4 wall.
+WU_POST_R, WU_POST_D = 30.0, 8.0
+WU_BAR_L, WU_BAR_W, WU_BAR_T = 68.0, 12.0, 3.0
+
+# USB window. A notch open to the back edge, not a hole: printed bay-upward it
+# then needs no bridge, and a micro USB plug is ~10 mm long against 8.7 mm of
+# radial room inside the wall -- a neat cut-out would have been a slot the plug
+# could not reach through. +/-30 deg is loose on purpose, since which of the
+# three flange positions ends up pointing down is not something the CAD gets to
+# decide. Nothing optical is at stake: this is all behind the lens plate.
+WU_USB_X, WU_USB_Z0 = 18.0, 56.0
 WU_LENS_D = 14.0                             # clears the cone with room to spare
 
 # The flange. Three lugs at 120 deg, on a bolt circle just outside both bodies
@@ -1686,16 +1726,17 @@ WU_MOD_L = 5.5
 WU_MOD_PCB = 11.0
 WU_BOSS = 16.0
 
+# Derived here and not up with the other retention numbers, because both of
+# these need WU_MOD_L, which is a camera dimension and belongs with the camera.
+WU_BOARD_Z = WU_WORK + WU_PLATE + WU_MOD_L + 4.0     # 52.5, front of the stack
+WU_POST_H = WU_STACK + WU_MOD_L + 4.0                # plate to the back of it
+
 # Board retention, v1: a cable tie, not a screw pattern. The ESP32-CAM clones
 # do not agree on where their mounting holes are, and a tie takes any of them
 # while leaving the card edge clear.
-WU_TIE_W, WU_TIE_T = 4.2, 2.2
-WU_TIE_Z = WU_WORK + WU_PLATE + 14.0         # 14 up the bay, wherever the bay is
 
 # Flat USB cable in. A slot, not a gland: the cable is ~1.5 mm thick, and a
 # round gland would have wanted a bend radius the shaft has not got.
-WU_SLOT_W, WU_SLOT_H = 12.0, 3.0
-WU_SLOT_Z = WU_WORK + WU_PLATE + 2.0        # just behind the lens plate
 
 
 def _lugs():
@@ -1891,22 +1932,43 @@ wu_cap = wu_cap.cut(
     _box(WU_MOD_PCB, WU_MOD_PCB, 4.0, (0, 0, WU_WORK + WU_PLATE + WU_MOD_L))
 )
 
-for sy in (-1, 1):
-    wu_cap = wu_cap.cut(
-        _box(WU_TIE_W, 3 * WU_CAP_WALL, WU_TIE_T,
-             (0, sy * WU_CAP_BORE / 2, WU_TIE_Z))
+# Two posts and the bar that goes on them.
+for sx in (-1, 1):
+    wu_cap = wu_cap.union(
+        _cyl(WU_POST_D, WU_POST_H, (sx * WU_POST_R, 0, WU_WORK + WU_PLATE))
     )
+for sx in (-1, 1):
+    wu_cap = wu_cap.cut(
+        _cyl(WU_PILOT, WU_POST_H + 1,
+             (sx * WU_POST_R, 0, WU_WORK + WU_PLATE - 0.5))
+    )
+
+# USB window, open to the back edge.
 wu_cap = wu_cap.cut(
-    _box(3 * WU_CAP_WALL, WU_SLOT_W, WU_SLOT_H,
-         (WU_CAP_BORE / 2, 0, WU_SLOT_Z))
+    _box(2 * WU_USB_X, WU_CAP_OD, WU_BAY,
+         (0, -WU_CAP_OD / 2 - 20.0, WU_USB_Z0))
 )
 
 
 display(wu_cap)
 _export(wu_cap, "wasserzaehler_cap")
 
+
+# ---------------------------------------------------------------------------
+# wasserzaehler_bar -- what actually holds the board down
+# ---------------------------------------------------------------------------
+# A flat strip across the two posts. It is a separate part because it has to
+# come off to get the board out, and it prints flat with nothing overhead.
+wu_bar = _box(WU_BAR_L, WU_BAR_W, WU_BAR_T).edges("|Z").fillet(3.0)
+for sx in (-1, 1):
+    wu_bar = wu_bar.cut(_cyl(WU_CLEAR, WU_BAR_T + 2, (sx * WU_POST_R, 0, -1)))
+
+display(wu_bar)
+_export(wu_bar, "wasserzaehler_bar")
+
 print("wasserzaehler tube %.1f cm3  strap %.1f cm3  ring %.1f cm3  cap %.1f cm3" % (
     wu_tube.val().Volume() / 1000.0,
     wu_strap.val().Volume() / 1000.0,
     wu_ring.val().Volume() / 1000.0,
     wu_cap.val().Volume() / 1000.0))
+print("wasserzaehler bar %.1f cm3" % (wu_bar.val().Volume() / 1000.0,))
