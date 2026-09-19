@@ -1716,6 +1716,19 @@ WU_LUG_D = 10.0                              # 3.25 mm of wall around a heat-set
 WU_LUG_H = 10.0                              # tube-side boss, takes the insert
 WU_LUG_A0 = 90.0                             # first lug at +Y, clear of the clamp ears
 
+# And a channel through the bay wall over each lug, or the screws cannot be
+# fitted at all. The bolt circle is R 39 and the cap wall runs to R 38.2, so a
+# 5.5 mm M3 head spans R 36.25 to 41.75 and buries 2 mm of itself in the wall;
+# a driver shaft is no better. Moving the circle out instead would have taken
+# the cap to 94 mm and wanted 16 mm bosses on the barrel to reach it -- wider
+# than the clamp, to solve something a 9 mm slot solves.
+#
+# Full height, because the driver comes in along the axis and a head-sized
+# pocket would still leave the shaft against the wall. Three 13 deg gaps in a
+# 71.4 bore, all of it behind the lens plate: nothing optical, and the bay is
+# already open at the back and notched for the USB.
+WU_LUG_ACCESS = 9.0
+
 # The camera module rides on a ribbon, so it is located by the cap and not by
 # the board. Nominal, from the OV2640 module that ships with these boards --
 # 8.5 mm square lens holder on a PCB about the same. NOT measured: the module
@@ -1941,6 +1954,12 @@ for sx in (-1, 1):
     wu_cap = wu_cap.cut(
         _cyl(WU_PILOT, WU_POST_H + 1,
              (sx * WU_POST_R, 0, WU_WORK + WU_PLATE - 0.5))
+    )
+
+# Screw access: one channel per lug, through the wall, all the way up.
+for _x, _y in _lugs():
+    wu_cap = wu_cap.cut(
+        _cyl(WU_LUG_ACCESS, WU_BAY + 2, (_x, _y, WU_WORK + WU_PLATE))
     )
 
 # USB window, open to the back edge.
