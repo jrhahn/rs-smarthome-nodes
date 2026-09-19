@@ -1474,6 +1474,21 @@ print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
 ## concentric-by-construction clamping surface, so the tube goes on like a lens
 ## hood and needs no alignment feature at all.
 ##
+## And the pipe runs VERTICALLY (confirmed at the meter, 2026-09-19). The
+## capsule therefore stands upright and its dial looks horizontally out of the
+## shaft, which puts the axis of this tube horizontal as well. Nothing in the
+## assembly is held down by gravity: the board hangs off the back of a lying
+## tube, the LED ring stands on edge in its seat. Both need positive retention
+## and neither gets it from being put down carefully. Anything below that reads
+## as "it drops in" means "it is captured", never "it rests there".
+##
+## It also settles what "up" means, which is not a question this file can
+## answer. Up in the picture is a rotation about the tube axis, decided by
+## where the clamp lands on the capsule -- not by +Y, not by any axis here. A
+## seat offset meant to centre the window has to be derived from a photograph
+## taken in the mounted position, and until there is one, the seat belongs on
+## the axis.
+##
 ##   capsule outer diameter       64.0   caliper
 ##   mirror frame to dial face    90.0   folding rule
 ##   reading window (bezel)       37 x 23
