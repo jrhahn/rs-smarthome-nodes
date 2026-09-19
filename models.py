@@ -1671,19 +1671,6 @@ WU_MOD_L = 5.5
 WU_MOD_PCB = 11.0
 WU_BOSS = 16.0
 
-# The seat sits 0.7 mm off the tube axis, towards the strap. The window is not
-# centred on the capsule, so a camera centred on the capsule does not look at
-# the middle of what it is reading -- this takes that out. It moves the pocket,
-# the PCB relief, the boss and the lens hole together: shifting the hole alone
-# would only restake the aperture in front of a camera that had not moved, and
-# the frame would land exactly where it landed before.
-#
-# Small, and deliberately so. At 40 mm the frame is ~53 mm wide and the window
-# 37 mm, so there are only ~8 mm of lateral slack in the first place; 0.7 mm is
-# a correction, not an adjustment range. If the second board wants a different
-# figure, this is the one number to change.
-WU_CAM_DY = 0.7
-
 # Board retention, v1: a cable tie, not a screw pattern. The ESP32-CAM clones
 # do not agree on where their mounting holes are, and a tie takes any of them
 # while leaving the card edge clear.
@@ -1873,21 +1860,20 @@ wu_cap = _cyl(WU_CAP_OD, WU_PLATE + WU_BAY, (0, 0, WU_WORK))
 for _x, _y in _lugs():
     wu_cap = wu_cap.union(_cyl(WU_LUG_D, WU_PLATE, (_x, _y, WU_WORK)))
 wu_cap = wu_cap.cut(_cyl(WU_CAP_BORE, WU_BAY + 1, (0, 0, WU_WORK + WU_PLATE)))
-wu_cap = wu_cap.cut(_cyl(WU_LENS_D, WU_PLATE + 2, (0, WU_CAM_DY, WU_WORK - 1)))
+wu_cap = wu_cap.cut(_cyl(WU_LENS_D, WU_PLATE + 2, (0, 0, WU_WORK - 1)))
 for _x, _y in _lugs():
     wu_cap = wu_cap.cut(_cyl(WU_CLEAR, WU_PLATE + 2, (_x, _y, WU_WORK - 1)))
 
 # Camera boss, standing off the back of the lens plate: a square pocket for the
 # lens holder, then a wider relief so the module's own PCB has somewhere to sit.
 wu_cap = wu_cap.union(
-    _box(WU_BOSS, WU_BOSS, WU_MOD_L + 3.0, (0, WU_CAM_DY, WU_WORK + WU_PLATE))
+    _box(WU_BOSS, WU_BOSS, WU_MOD_L + 3.0, (0, 0, WU_WORK + WU_PLATE))
 )
 wu_cap = wu_cap.cut(
-    _box(WU_MOD_SQ, WU_MOD_SQ, WU_MOD_L, (0, WU_CAM_DY, WU_WORK + WU_PLATE))
+    _box(WU_MOD_SQ, WU_MOD_SQ, WU_MOD_L, (0, 0, WU_WORK + WU_PLATE))
 )
 wu_cap = wu_cap.cut(
-    _box(WU_MOD_PCB, WU_MOD_PCB, 4.0,
-         (0, WU_CAM_DY, WU_WORK + WU_PLATE + WU_MOD_L))
+    _box(WU_MOD_PCB, WU_MOD_PCB, 4.0, (0, 0, WU_WORK + WU_PLATE + WU_MOD_L))
 )
 
 for sy in (-1, 1):
