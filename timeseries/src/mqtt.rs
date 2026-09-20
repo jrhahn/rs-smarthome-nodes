@@ -60,17 +60,35 @@ pub enum Parsed<'a> {
 /// The node id `smarthome/provision/<mac>` would otherwise look like.
 const PROVISION: &str = "provision";
 
+/// The sequence name in `<node>/config/<key>`, which is a knob and not a
+/// reading. It is the one four-segment shape that must stay ignored.
+const CONFIG: &str = "config";
+
 /// Work out what a topic is, without allocating.
 pub fn classify<'a>(namespace: &str, discovery_prefix: &str, topic: &'a str) -> Parsed<'a> {
     let parts: Vec<&str> = topic.split('/').collect();
 
     if parts.first() == Some(&namespace) {
-        // Exactly three segments. Four means `config/<key>`, which is a
-        // setting; anything else is not a shape the firmware publishes.
-        if parts.len() != 3 {
-            return Parsed::Ignored;
-        }
-        let (node, key) = (parts[1], parts[2]);
+        // Three segments is this fleet's own shape, `<node>/<key>`.
+        //
+        // Four is one of two things. `config/<key>` is a knob Home Assistant
+        // writes, and stays ignored. Everything else is a meter: the water
+        // meters run jomjol's AI-on-the-edge firmware, which puts the name of
+        // its number sequence between the node and the field and so arrives as
+        // `<node>/main/value`. Those are readings and belong in the table.
+        //
+        // The sequence name is dropped rather than folded into the sensor id.
+        // There is one sequence per device -- a second would be a second dial
+        // on the same meter, which neither of these has -- and `value` sits
+        // better beside `air_temperature` and `co2` than `main_value` would.
+        // Non-numeric siblings like `main/json` cost nothing: they fail to
+        // parse downstream and are counted as skipped, which is what that
+        // path is for.
+        let (node, key) = match parts.len() {
+            3 => (parts[1], parts[2]),
+            4 if parts[2] != CONFIG => (parts[1], parts[3]),
+            _ => return Parsed::Ignored,
+        };
         if node.is_empty() || key.is_empty() || node == PROVISION {
             return Parsed::Ignored;
         }
@@ -369,6 +387,39 @@ mod tests {
                 node: "schlafzimmer",
                 sensor: "scd41_temperature"
             }
+        );
+    }
+
+    #[test]
+    fn a_meters_sequence_name_is_dropped() {
+        // AI-on-the-edge publishes `<node>/<sequence>/<field>`. The field is
+        // the sensor; the sequence name carries nothing this table needs.
+        assert_eq!(
+            classify_default("smarthome/wasserzaehler_warm/main/value"),
+            Parsed::Reading {
+                node: "wasserzaehler_warm",
+                sensor: "value"
+            }
+        );
+        assert_eq!(
+            classify_default("smarthome/wasserzaehler_kalt/main/rate_per_time_unit"),
+            Parsed::Reading {
+                node: "wasserzaehler_kalt",
+                sensor: "rate_per_time_unit"
+            }
+        );
+        // The meter's own three-segment topics keep working unchanged.
+        assert_eq!(
+            classify_default("smarthome/wasserzaehler_warm/wifiRSSI"),
+            Parsed::Reading {
+                node: "wasserzaehler_warm",
+                sensor: "wifiRSSI"
+            }
+        );
+        // Five segments are still nothing we publish.
+        assert_eq!(
+            classify_default("smarthome/wasserzaehler_warm/main/value/extra"),
+            Parsed::Ignored
         );
     }
 
