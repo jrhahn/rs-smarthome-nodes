@@ -1759,13 +1759,26 @@ WU_BOSS = 16.0
 # not against an axis, because "up" is a rotation about the tube and this file
 # has no opinion about it; the notch is the one feature that fixes the clock.
 #
-# 5 and not the 10 that was asked for, because the barrel bore sets a ceiling.
-# The frame is ~53 mm at the dial, so the view reaches 26.5 mm each side of the
-# camera axis; the bore stops at 31. At 5 mm of offset the far edge lands on
-# 31.5 and grazes it, at 10 it would reach 36.5 and lose five millimetres of
-# picture to the tube wall -- on exactly the side being aimed at. Past this,
-# the barrel has to be opened too, and both tubes are printed.
-WU_CAM_DY = 5.0
+# 10 mm, measured at the meter. An earlier note here put the ceiling at 5 and
+# was wrong: it applied the frame's LONG half-width, 26.4 mm, to an offset that
+# runs across the register and therefore along the SHORT one, 19.8. Against the
+# 31 mm bore that is a different sum -- the far edge lands at 29.8 and still
+# clears, where the bad arithmetic had it losing five millimetres of picture.
+#
+# What does grow is corner cut-off, and it is not new: a 52.8 x 39.6 frame has
+# its corners 33 mm from the axis with no offset at all, already outside the
+# bore, which is the slight darkening visible in every picture from meter 1.
+# At 10 mm the far corners reach 39.8. The register sits mid-frame and never
+# goes near them.
+#
+#   offset   far edge   far corners   (bore stops at 31)
+#      0       19.8        33.0
+#      5       24.8        36.3
+#     10       29.8        39.8
+#
+# The edge stays inside up to about 11 mm. Beyond that the barrel would have to
+# be opened as well, and both tubes are printed.
+WU_CAM_DY = 10.0
 
 # Derived here and not up with the other retention numbers, because both of
 # these need WU_MOD_L, which is a camera dimension and belongs with the camera.
