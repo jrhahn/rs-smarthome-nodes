@@ -1622,6 +1622,23 @@ WU_EAR_X = 40.0                  # centre; the 10 mm ear overlaps the barrel by
 WU_EAR_W = 10.0                  # 0.5 mm so it unions instead of touching
 WU_EAR_Y = 9.0
 WU_EAR_Z0, WU_EAR_H = -22.0, 20.0
+
+# The strap's ears are not the tube's. Two differences, both measured on the
+# printed part rather than guessed.
+#
+# They run the FULL clamp length instead of being inset 2 mm at each end. The
+# strap prints standing on its end face, so an inset ear begins 2 mm above the
+# bed over thin air: 176 mm2 of ceiling, which was all the support this part
+# ever asked for.
+#
+# And they reach INWARD past the barrel surface instead of stopping at it. A
+# 10 mm box against a 71 mm cylinder touches only along a sliver near y = 0 --
+# by y = 9.4 the cylinder has fallen away to x = 34.2 while the box face stands
+# at 35, so the ear hung off a thread of material with a gap along the top.
+# Reaching to 33 puts the box inside the solid, and the 64 mm clamp bore, cut
+# afterwards, trims it back flush with the rest of the ring.
+WU_EAR_IN = 33.0                             # inner edge, inside the 71 surface
+WU_EAR_OUT = WU_EAR_X + WU_EAR_W / 2         # 45, outer edge unchanged
 WU_EAR_TAPER = 7.0               # 45 deg on the outer face; see the ear union
 WU_EAR_TIP = 3.0                 # what is left of the 10 mm at the tip
 WU_SCREW_Z = -12.0
@@ -1636,16 +1653,6 @@ WU_SEAT_Z0, WU_SEAT_Z1 = 14.0, 22.0
 WU_SEAT_LEAD = 3.5               # 45 deg lead-in; see the seat cut
 WU_WIRE_D = 3.2
 WU_WIRE_Z = 18.0
-
-WU_RING_OD = 68.6                # 0.4 into the 69 seat
-WU_RING_ID = 52.0                # sight line, not a fit -- see above
-WU_RING_T = 6.0
-WU_LED_D = 5.2                   # 5 mm LEDs, pointing back at the dial.
-                                 # Diffused wide-angle ones: a clear narrow-beam
-                                 # LED 12 mm from the glass paints a spot, not a
-                                 # wash, and six spots is six new highlights.
-WU_LED_R = 30.0
-WU_LED_N = 6
 
 # Cap. It bolts to the barrel's end face through three lugs; that face is what
 # sets the working distance, as it did before.
@@ -1902,8 +1909,9 @@ wu_strap = wu_strap.cut(
 )
 for sx in (-1, 1):
     wu_strap = wu_strap.union(
-        _box(WU_EAR_W, WU_EAR_Y, WU_EAR_H,
-             (sx * WU_EAR_X, WU_EAR_Y / 2 + WU_SPLIT, WU_EAR_Z0))
+        _box(WU_EAR_OUT - WU_EAR_IN, WU_EAR_Y, WU_CLAMP_L,
+             (sx * (WU_EAR_OUT + WU_EAR_IN) / 2,
+              WU_EAR_Y / 2 + WU_SPLIT, WU_Z0))
     )
 wu_strap = wu_strap.cut(_cyl(WU_CLAMP_BORE, WU_CLAMP_L + 2, (0, 0, WU_Z0 - 1)))
 for sx in (-1, 1):
@@ -1916,19 +1924,17 @@ display(wu_strap)
 _export(wu_strap, "wasserzaehler_strap")
 
 # ---------------------------------------------------------------------------
-# LED ring
+# The LED ring is gone
 # ---------------------------------------------------------------------------
-wu_ring = _cyl(WU_RING_OD, WU_RING_T)
-wu_ring = wu_ring.cut(_cyl(WU_RING_ID, WU_RING_T + 2, (0, 0, -1)))
-for i in range(WU_LED_N):
-    a = math.radians(360.0 * i / WU_LED_N)
-    wu_ring = wu_ring.cut(
-        _cyl(WU_LED_D, WU_RING_T + 2,
-             (WU_LED_R * math.cos(a), WU_LED_R * math.sin(a), -1))
-    )
-
-display(wu_ring)
-_export(wu_ring, "wasserzaehler_ring")
+# It carried six 5 mm LEDs to light the dial from 60 deg off axis, on the
+# assumption that the board's own flash could not do the job. It can: at
+# LEDIntensity near 1 it lights the dial in a closed shaft better than room
+# light does, and the specular lobe the ring existed to dodge never appeared at
+# 40 mm. See nixos-private/docs/zaehler.md.
+#
+# Its seat and the band that carries it stay in the barrel, unused. Both tubes
+# are printed already, and reshaping the barrel would scrap them to delete a
+# groove that costs nothing.
 
 # ---------------------------------------------------------------------------
 # Cap
@@ -1993,9 +1999,8 @@ for sx in (-1, 1):
 display(wu_bar)
 _export(wu_bar, "wasserzaehler_bar")
 
-print("wasserzaehler tube %.1f cm3  strap %.1f cm3  ring %.1f cm3  cap %.1f cm3" % (
+print("wasserzaehler tube %.1f cm3  strap %.1f cm3  cap %.1f cm3" % (
     wu_tube.val().Volume() / 1000.0,
     wu_strap.val().Volume() / 1000.0,
-    wu_ring.val().Volume() / 1000.0,
     wu_cap.val().Volume() / 1000.0))
 print("wasserzaehler bar %.1f cm3" % (wu_bar.val().Volume() / 1000.0,))
