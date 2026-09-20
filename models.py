@@ -1754,6 +1754,19 @@ WU_MOD_L = 5.5
 WU_MOD_PCB = 11.0
 WU_BOSS = 16.0
 
+# The seat sits 5 mm off the tube axis, towards +Y -- that is, away from the
+# USB notch, which is the wide opening at -Y. Defined against that notch and
+# not against an axis, because "up" is a rotation about the tube and this file
+# has no opinion about it; the notch is the one feature that fixes the clock.
+#
+# 5 and not the 10 that was asked for, because the barrel bore sets a ceiling.
+# The frame is ~53 mm at the dial, so the view reaches 26.5 mm each side of the
+# camera axis; the bore stops at 31. At 5 mm of offset the far edge lands on
+# 31.5 and grazes it, at 10 it would reach 36.5 and lose five millimetres of
+# picture to the tube wall -- on exactly the side being aimed at. Past this,
+# the barrel has to be opened too, and both tubes are printed.
+WU_CAM_DY = 5.0
+
 # Derived here and not up with the other retention numbers, because both of
 # these need WU_MOD_L, which is a camera dimension and belongs with the camera.
 WU_BOARD_Z = WU_WORK + WU_PLATE + WU_MOD_L + 4.0     # 52.5, front of the stack
@@ -1943,20 +1956,21 @@ wu_cap = _cyl(WU_CAP_OD, WU_PLATE + WU_BAY, (0, 0, WU_WORK))
 for _x, _y in _lugs():
     wu_cap = wu_cap.union(_cyl(WU_LUG_D, WU_PLATE, (_x, _y, WU_WORK)))
 wu_cap = wu_cap.cut(_cyl(WU_CAP_BORE, WU_BAY + 1, (0, 0, WU_WORK + WU_PLATE)))
-wu_cap = wu_cap.cut(_cyl(WU_LENS_D, WU_PLATE + 2, (0, 0, WU_WORK - 1)))
+wu_cap = wu_cap.cut(_cyl(WU_LENS_D, WU_PLATE + 2, (0, WU_CAM_DY, WU_WORK - 1)))
 for _x, _y in _lugs():
     wu_cap = wu_cap.cut(_cyl(WU_CLEAR, WU_PLATE + 2, (_x, _y, WU_WORK - 1)))
 
 # Camera boss, standing off the back of the lens plate: a square pocket for the
 # lens holder, then a wider relief so the module's own PCB has somewhere to sit.
 wu_cap = wu_cap.union(
-    _box(WU_BOSS, WU_BOSS, WU_MOD_L + 3.0, (0, 0, WU_WORK + WU_PLATE))
+    _box(WU_BOSS, WU_BOSS, WU_MOD_L + 3.0, (0, WU_CAM_DY, WU_WORK + WU_PLATE))
 )
 wu_cap = wu_cap.cut(
-    _box(WU_MOD_SQ, WU_MOD_SQ, WU_MOD_L, (0, 0, WU_WORK + WU_PLATE))
+    _box(WU_MOD_SQ, WU_MOD_SQ, WU_MOD_L, (0, WU_CAM_DY, WU_WORK + WU_PLATE))
 )
 wu_cap = wu_cap.cut(
-    _box(WU_MOD_PCB, WU_MOD_PCB, 4.0, (0, 0, WU_WORK + WU_PLATE + WU_MOD_L))
+    _box(WU_MOD_PCB, WU_MOD_PCB, 4.0,
+         (0, WU_CAM_DY, WU_WORK + WU_PLATE + WU_MOD_L))
 )
 
 # Two posts and the bar that goes on them.
