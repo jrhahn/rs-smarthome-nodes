@@ -1610,6 +1610,14 @@ WU_SPLIT = 0.4                   # each half stops this far short of y = 0
 # cutting it -- but it holds because it is restated, not because it is imported.
 WU_CLEAR, WU_PILOT = 3.4, 3.5
 
+# The strap's two holes get their own, wider figure. 3.4 is an M3 clearance
+# that assumes the hole lands where the model put it; on the strap it has to
+# line up with an insert in the other half across a printed parting line, and
+# that is one tolerance stack too many. Its own constant rather than opening
+# WU_CLEAR, which the cap lugs and the bar also use and which is fine there --
+# those meet a boss on the same part.
+WU_STRAP_CLEAR = WU_CLEAR + 0.5              # 3.9
+
 WU_EAR_X = 40.0                  # centre; the 10 mm ear overlaps the barrel by
 WU_EAR_W = 10.0                  # 0.5 mm so it unions instead of touching
 WU_EAR_Y = 9.0
@@ -1900,7 +1908,7 @@ for sx in (-1, 1):
 wu_strap = wu_strap.cut(_cyl(WU_CLAMP_BORE, WU_CLAMP_L + 2, (0, 0, WU_Z0 - 1)))
 for sx in (-1, 1):
     wu_strap = wu_strap.cut(
-        _along_y(WU_CLEAR, WU_EAR_Y + 2,
+        _along_y(WU_STRAP_CLEAR, WU_EAR_Y + 2,
                  (sx * WU_EAR_X, WU_SPLIT - 1, WU_SCREW_Z))
     )
 
