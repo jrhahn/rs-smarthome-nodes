@@ -242,6 +242,13 @@ pub async fn run(settings: Settings, shared: Shared, tx: mpsc::Sender<Record>) {
 
     let (client, mut eventloop) = AsyncClient::new(options, 256);
     let readings_filter = format!("{}/+/+", settings.mqtt.namespace);
+    // And one level deeper, for the meters: AI-on-the-edge puts the name of its
+    // number sequence between the node and the field, so a reading arrives as
+    // `<node>/main/value`. classify() knows that shape; without this filter it
+    // would never see it, because `+/+` stops one level short. `config/<key>`
+    // has the same depth and is subscribed to as a side effect -- classify()
+    // drops it, which is where that decision belongs.
+    let meter_filter = format!("{}/+/+/+", settings.mqtt.namespace);
     let discovery_filter = format!("{}/sensor/+/+/config", settings.mqtt.discovery_prefix);
 
     loop {
@@ -251,7 +258,7 @@ pub async fn run(settings: Settings, shared: Shared, tx: mpsc::Sender<Record>) {
                     broker = %format!("{}:{}", settings.mqtt.host, settings.mqtt.port),
                     "connected to the broker"
                 );
-                for filter in [&readings_filter, &discovery_filter] {
+                for filter in [&readings_filter, &meter_filter, &discovery_filter] {
                     if let Err(e) = client.subscribe(filter, QoS::AtLeastOnce).await {
                         warn!(filter, error = %e, "subscribe failed");
                     } else {
