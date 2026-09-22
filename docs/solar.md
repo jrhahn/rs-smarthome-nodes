@@ -7,6 +7,10 @@
 > When it *is* built, the record goes in
 > [`commissioning.md`](commissioning.md), not here.
 
+A second solar build borrows this page's parts list and its December-yield
+arithmetic: [`solarleuchte.md`](solarleuchte.md), a bought garden light whose
+controller is being replaced because it has nowhere to keep a setting.
+
 ## Why bother
 
 The node's average draw is **~10 mA**, measured 2026-09-16 and three times the
