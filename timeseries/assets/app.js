@@ -25,8 +25,62 @@ const REFRESH_MS = 30000;
 // moves depending on who opens it makes two screenshots of the same reading
 // disagree. Day before month, which is what everyone reading this expects.
 const LOCALE = "en-GB";
-const num = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 2 });
-const num1 = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 1 });
+
+// How many decimals a reading deserves is a property of the series, not of the
+// dashboard. Two was right while everything here measured temperature and
+// humidity. A water meter counts in litres and publishes `8.115` m³, where the
+// only digit that moves in a day is the third one -- rounding it away turns a
+// leak into a flat line, which is exactly the thing the meter was fitted to see.
+//
+// So the precision is read off the readings themselves, per series, and never
+// guessed. `last_value` is a raw measurement, so the digits it carries are the
+// digits the sensor produced; the sparkline's points are rollup means, whose
+// decimals describe how an average came out and not how finely anything was
+// measured. Only the former feeds this.
+//
+// It is a high-water mark because one reading proves nothing on its own: a water
+// meter standing at `8.12` says the value needed two digits, not that the series
+// does. The mark only ever grows, so a tile stops flickering between widths.
+const MIN_DECIMALS = 2;
+const MAX_DECIMALS = 6;
+const seenDecimals = new Map();
+const formatters = new Map();
+
+/// The decimals a number carries once floating-point noise is off it.
+/// `49.724999999999994` is the mean of two-decimal readings, not a fifteen-digit
+/// measurement, and twelve significant digits is enough to tell those apart
+/// without touching a value that is genuinely precise.
+function decimalsOf(value) {
+  if (!Number.isFinite(value)) return 0;
+  const text = String(Number(value.toPrecision(12)));
+  if (text.includes("e")) return 0;
+  const dot = text.indexOf(".");
+  return dot < 0 ? 0 : text.length - dot - 1;
+}
+
+function formatterWith(decimals) {
+  const d = Math.min(MAX_DECIMALS, Math.max(MIN_DECIMALS, decimals));
+  let f = formatters.get(d);
+  if (!f) {
+    f = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: d });
+    formatters.set(d, f);
+  }
+  return f;
+}
+
+/// The formatter for one channel, remembering the most precise reading it has
+/// shown. Everything on a tile -- the value, its range, the chart axis, the
+/// tooltip, the CSV table -- goes through the same one, so the numbers on one
+/// screen cannot disagree about how precise they are.
+function formatterFor(c) {
+  if (!c) return num;
+  const key = `${c.node}/${c.sensor}`;
+  const seen = Math.max(seenDecimals.get(key) ?? 0, decimalsOf(c.last_value));
+  seenDecimals.set(key, seen);
+  return formatterWith(seen);
+}
+
+const num = formatterWith(MIN_DECIMALS);
 
 const state = {
   range: "24h",
@@ -158,7 +212,8 @@ function span(c) {
     lo = Math.min(lo, v);
     hi = Math.max(hi, v);
   }
-  return `${num1.format(lo)} – ${num1.format(hi)}`;
+  const f = formatterFor(c);
+  return `${f.format(lo)} – ${f.format(hi)}`;
 }
 
 function ago(ms) {
@@ -314,7 +369,7 @@ function renderOverview() {
       parts.push(
         `<button class="tile" data-node="${esc(c.node)}" data-sensor="${esc(c.sensor)}">` +
           `<span class="label">${esc(label(c))}</span>` +
-          `<span class="value">${esc(num.format(c.last_value ?? NaN).replace("NaN", "—"))}` +
+          `<span class="value">${esc(formatterFor(c).format(c.last_value ?? NaN).replace("NaN", "—"))}` +
           (c.unit ? `<span>${esc(c.unit)}</span>` : "") +
           `</span>` +
           `<canvas></canvas>` +
@@ -420,11 +475,12 @@ function renderDetail() {
   }
   const stat = (name, value) =>
     `<div><dt>${name}</dt><dd>${esc(value)}</dd></div>`;
+  const f = formatterFor(c);
   dom.stats.innerHTML =
-    stat("min", withUnit(lo, c.unit)) +
-    stat("mean", withUnit(sum / s.points.length, c.unit)) +
-    stat("max", withUnit(hi, c.unit)) +
-    stat("latest", withUnit(s.points[s.points.length - 1].av, c.unit)) +
+    stat("min", withUnit(lo, c.unit, f)) +
+    stat("mean", withUnit(sum / s.points.length, c.unit, f)) +
+    stat("max", withUnit(hi, c.unit, f)) +
+    stat("latest", withUnit(s.points[s.points.length - 1].av, c.unit, f)) +
     stat("points", `${s.points.length} of ${s.bucket}`);
 
   // The range strip shows no pressed button while a zoom is active, which is
@@ -436,8 +492,8 @@ function renderDetail() {
   dom.table.innerHTML = s.points
     .map(
       (p) =>
-        `<tr><td>${esc(new Date(p.t).toLocaleString(LOCALE))}</td><td>${esc(num1.format(p.lo))}</td>` +
-        `<td>${esc(num1.format(p.av))}</td><td>${esc(num1.format(p.hi))}</td></tr>`,
+        `<tr><td>${esc(new Date(p.t).toLocaleString(LOCALE))}</td><td>${esc(f.format(p.lo))}</td>` +
+        `<td>${esc(f.format(p.av))}</td><td>${esc(f.format(p.hi))}</td></tr>`,
     )
     .join("");
 
@@ -586,7 +642,7 @@ function drawChart() {
     ctx.moveTo(plot.x, y);
     ctx.lineTo(plot.x + plot.w, y);
     ctx.stroke();
-    ctx.fillText(num.format(tick), plot.x - 8, y);
+    ctx.fillText(formatterFor(channel()).format(tick), plot.x - 8, y);
   }
 
   ctx.textBaseline = "top";
@@ -786,13 +842,13 @@ dom.chart.addEventListener("mousemove", (event) => {
       }
       if (!best) return "";
       return `<br /><span style="color:var(--text-muted)">${esc(shiftLabel(e.shift))} ${esc(
-        withUnit(best.av, c.unit, num1),
+        withUnit(best.av, c.unit, formatterFor(c)),
       )}</span>`;
     })
     .join("");
   dom.tooltip.innerHTML =
-    `<strong>${esc(withUnit(nearest.av, c.unit))}</strong><br />` +
-    `min ${esc(num1.format(nearest.lo))} · max ${esc(num1.format(nearest.hi))}<br />` +
+    `<strong>${esc(withUnit(nearest.av, c.unit, formatterFor(c)))}</strong><br />` +
+    `min ${esc(formatterFor(c).format(nearest.lo))} · max ${esc(formatterFor(c).format(nearest.hi))}<br />` +
     `<span style="color:var(--text-muted)">${esc(new Date(nearest.t).toLocaleString(LOCALE))}</span>` +
     earlier +
     (note ? `<br /><span style="color:var(--text-secondary)">${esc(note.note)}</span>` : "");
