@@ -46,10 +46,19 @@ const WIFI_OFFSET: u32 = 0xB000;
 
 /// `"BIRD"` little-endian — marks an initialised blob.
 const MAGIC: u32 = 0x4449_5242;
-/// Bump when the on-flash layout changes; an old version reverts to defaults.
-const VERSION: u8 = 5;
-/// Serialised length: magic(4) + version(1) + pad(3) + ten 4-byte fields + crc(4).
-const BLOB_LEN: usize = 4 + 4 + 4 * 10 + 4;
+/// Bump when the on-flash layout changes. A version this code does not know
+/// reverts to defaults; the one version it does know how to read comes through
+/// [`Config::from_bytes`]'s migration instead — see [`V5_LEN`].
+const VERSION: u8 = 6;
+/// Serialised length: magic(4) + version(1) + pad(3) + twelve 4-byte fields + crc(4).
+const BLOB_LEN: usize = 4 + 4 + 4 * 12 + 4;
+/// Where version 5 ended: the same header and the first ten fields, then its own
+/// CRC. Kept so a board that has been running since before the temperature
+/// compensation existed keeps its calibration across the upgrade. `offset` and
+/// `scale_factor` are measured against a known weight on a still scale, and
+/// dropping them to defaults would turn every reading into plausible nonsense
+/// until someone noticed and redid the procedure.
+const V5_LEN: usize = 4 + 4 + 4 * 10 + 4;
 
 /// All runtime-tunable settings. `f32` calibration fields are compared bitwise
 /// for change detection, which is exactly what we want (a re-sent identical
@@ -94,7 +103,42 @@ pub struct Config {
     /// rather than of the sensor; `0` switches the correction off. Only
     /// consulted on a node whose SDS011 slot is compensated.
     pub sds011_kappa_centi: u32,
+    /// How far the scale's zero moves with air temperature, in hundredths of a
+    /// gram per kelvin. `0` — the default — switches the correction off.
+    ///
+    /// Signed, because which way the zero goes depends on how the mount is
+    /// built, and on the terrace node it goes *down* as it cools. Tunable at
+    /// all for the same reason as the SDS011's κ: the figure is a property of
+    /// *this* mount rather than of the load cell. On a 1 kg cell the terrace
+    /// node measured about 10 g/K, some twenty times a decent cell's own
+    /// zero-TC spec, which is what says the strain is in the printed clamps
+    /// and not in the steel.
+    pub temp_coeff_centi: i32,
+    /// Air temperature at the last tare, in tenths of a degree, or
+    /// [`TARE_TEMP_UNKNOWN`] if no tare has recorded one.
+    ///
+    /// The correction needs an anchor, and the tare is the only moment the
+    /// node knows the zero is right. Storing the temperature *of that moment*
+    /// beside `offset` makes the pair describe one physical state, the same
+    /// argument that made `retare` re-anchor the presence baseline. It also
+    /// makes the feature roll out safely: until a tare has happened under the
+    /// new firmware there is no anchor, and the correction stays off however
+    /// the coefficient is set.
+    pub tare_temp_tenths: i32,
 }
+
+/// `tare_temp_tenths` when no tare has recorded a temperature.
+///
+/// A sentinel rather than an `Option` because the blob stores fixed-width
+/// fields, and `i32::MIN` is -214 748 364.8 °C — outside anything the SHT31 can
+/// report by a wide margin, and outside anything that could arrive from a
+/// half-written sector that still passed the CRC.
+pub const TARE_TEMP_UNKNOWN: i32 = i32::MIN;
+
+/// The largest zero drift the correction will accept, in hundredths of a gram
+/// per kelvin. Generous — the terrace mount sits at a tenth of it — but finite,
+/// so a mistyped slider cannot turn a few degrees into kilograms.
+pub const MAX_TEMP_COEFF_CENTI: i32 = 20_000;
 
 impl Config {
     /// Factory defaults, used on first boot or a corrupt sector. Chosen to match
@@ -120,6 +164,11 @@ impl Config {
         // constant's own note on why this is a starting point, not a
         // calibration.
         sds011_kappa_centi: sds011::KAPPA_CENTI_DEFAULT,
+        // Off. The coefficient belongs to one physical mount, so there is no
+        // sensible fleet-wide value to guess at, and a wrong one is worse than
+        // none: it would move a zero that was not drifting.
+        temp_coeff_centi: 0,
+        tare_temp_tenths: TARE_TEMP_UNKNOWN,
     };
 
     /// The presence threshold expressed in raw HX711 ticks, i.e. what `main`
@@ -183,6 +232,48 @@ impl Config {
         }
         self.tare_token = token;
         true
+    }
+
+    /// How many raw ticks of the current reading are the mount expanding rather
+    /// than something landing on it — the number to subtract before anything
+    /// else looks at the sample.
+    ///
+    /// Returned in *ticks* rather than grams so the correction lands upstream of
+    /// everything: the gram conversion in [`Config::write_grams`], the presence
+    /// comparison in [`crate::presence::decide`], and the tare baseline that
+    /// tracks between visits all work in raw ticks, and correcting each of them
+    /// separately would be three chances to disagree. Subtracting once, at the
+    /// point the sample is read, keeps them describing the same scale.
+    ///
+    /// Zero — i.e. no correction at all — whenever the answer would be a guess:
+    /// no coefficient set, no tare anchor recorded, no air reading this round,
+    /// or a calibration that cannot be trusted to convert grams to ticks. A
+    /// missing SHT31 reading is the ordinary one of those: the sensor is on the
+    /// same board and does fail, and a correction against air from some other
+    /// hour would be worse than leaving the sample alone.
+    pub fn drift_ticks(&self, air_tenths: Option<i32>) -> i32 {
+        let Some(air) = air_tenths else { return 0 };
+        if self.temp_coeff_centi == 0 || self.tare_temp_tenths == TARE_TEMP_UNKNOWN {
+            return 0;
+        }
+        if !self.scale_factor.is_finite() || self.scale_factor <= 0.0 {
+            return 0;
+        }
+        let kelvin = (air - self.tare_temp_tenths) as f32 / 10.0;
+        let grams = kelvin * (self.temp_coeff_centi as f32 / 100.0);
+        let ticks = grams * self.scale_factor;
+        if !ticks.is_finite() {
+            return 0;
+        }
+        // Saturating rather than wrapping: `as i32` on an out-of-range float is
+        // already saturating in Rust, and the clamp on the coefficient means it
+        // takes an absurd calibration to get here at all.
+        let rounded = if ticks >= 0.0 {
+            ticks + 0.5
+        } else {
+            ticks - 0.5
+        };
+        rounded as i32
     }
 
     /// Convert a raw HX711 reading to grams using the stored calibration, and
@@ -281,6 +372,20 @@ impl Config {
                     }
                 }
             }
+            // Home Assistant sends grams per kelvin ("9.9"), signed; the blob
+            // wants hundredths. Clamped rather than dropped, same argument as
+            // the two above. Note that `0` is a real setting here and not a
+            // rejected value: it is how the correction is switched off without
+            // losing the tare anchor beside it.
+            "temp_coeff" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    if v.is_finite() {
+                        let centi = (v * 100.0) as i32;
+                        self.temp_coeff_centi =
+                            centi.clamp(-MAX_TEMP_COEFF_CENTI, MAX_TEMP_COEFF_CENTI);
+                    }
+                }
+            }
             "deep_sleep" => match value {
                 "1" | "true" | "on" | "ON" => self.deep_sleep = true,
                 "0" | "false" | "off" | "OFF" => self.deep_sleep = false,
@@ -307,18 +412,17 @@ impl Config {
         b[36..40].copy_from_slice(&self.heartbeat_secs.to_le_bytes());
         b[40..44].copy_from_slice(&self.scd41_offset_centi.to_le_bytes());
         b[44..48].copy_from_slice(&self.sds011_kappa_centi.to_le_bytes());
-        let crc = crc32(&b[0..48]);
-        b[48..52].copy_from_slice(&crc.to_le_bytes());
+        b[48..52].copy_from_slice(&self.temp_coeff_centi.to_le_bytes());
+        b[52..56].copy_from_slice(&self.tare_temp_tenths.to_le_bytes());
+        let crc = crc32(&b[0..56]);
+        b[56..60].copy_from_slice(&crc.to_le_bytes());
         b
     }
 
-    fn from_bytes(b: &[u8; BLOB_LEN]) -> Option<Config> {
-        if u32::from_le_bytes(b[0..4].try_into().ok()?) != MAGIC || b[4] != VERSION {
-            return None;
-        }
-        if u32::from_le_bytes(b[48..52].try_into().ok()?) != crc32(&b[0..48]) {
-            return None;
-        }
+    /// The ten fields versions 5 and 6 share, on top of whatever defaults the
+    /// caller starts from. Split out so the migration and the current decoder
+    /// read the same bytes the same way rather than drifting apart.
+    fn common_from_bytes(b: &[u8; BLOB_LEN], rest: Config) -> Option<Config> {
         Some(Config {
             offset: i32::from_le_bytes(b[8..12].try_into().ok()?),
             scale_factor: f32::from_le_bytes(b[12..16].try_into().ok()?),
@@ -331,7 +435,49 @@ impl Config {
             scd41_offset_centi: i32::from_le_bytes(b[40..44].try_into().ok()?),
             sds011_kappa_centi: u32::from_le_bytes(b[44..48].try_into().ok()?)
                 .min(sds011::MAX_KAPPA_CENTI),
+            ..rest
         })
+    }
+
+    fn from_bytes(b: &[u8; BLOB_LEN]) -> Option<Config> {
+        if u32::from_le_bytes(b[0..4].try_into().ok()?) != MAGIC {
+            return None;
+        }
+        match b[4] {
+            VERSION => {
+                if u32::from_le_bytes(b[56..60].try_into().ok()?) != crc32(&b[0..56]) {
+                    return None;
+                }
+                Config::common_from_bytes(
+                    b,
+                    Config {
+                        temp_coeff_centi: i32::from_le_bytes(b[48..52].try_into().ok()?)
+                            .clamp(-MAX_TEMP_COEFF_CENTI, MAX_TEMP_COEFF_CENTI),
+                        tare_temp_tenths: i32::from_le_bytes(b[52..56].try_into().ok()?),
+                        ..Config::DEFAULT
+                    },
+                )
+            }
+            // Version 5 in the sector, version 6 in the firmware: the board has
+            // just been flashed with this change. Everything version 5 stored is
+            // still at the same offset, so the calibration is read back and only
+            // the two new fields fall to their defaults — which is "correction
+            // off", so the node behaves exactly as it did until someone sets a
+            // coefficient and tares.
+            //
+            // The CRC is checked over version 5's own range, at version 5's own
+            // position. The eight bytes past it are whatever the erase left, and
+            // they are never read.
+            5 => {
+                if u32::from_le_bytes(b[V5_LEN - 4..V5_LEN].try_into().ok()?)
+                    != crc32(&b[0..V5_LEN - 4])
+                {
+                    return None;
+                }
+                Config::common_from_bytes(b, Config::DEFAULT)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -587,7 +733,32 @@ mod tests {
             heartbeat_secs: 1234,
             scd41_offset_centi: 245,
             sds011_kappa_centi: 62,
+            temp_coeff_centi: -990,
+            tare_temp_tenths: 191,
         }
+    }
+
+    /// The same settings as [`sample`], serialised the way version 5 wrote
+    /// them: ten fields and a CRC at byte 48, with the two bytes ranges version
+    /// 6 added left as the flash erase leaves them.
+    fn v5_bytes(cfg: Config) -> [u8; BLOB_LEN] {
+        let mut b = [0xFFu8; BLOB_LEN];
+        b[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        b[4] = 5;
+        b[5..8].copy_from_slice(&[0, 0, 0]);
+        b[8..12].copy_from_slice(&cfg.offset.to_le_bytes());
+        b[12..16].copy_from_slice(&cfg.scale_factor.to_le_bytes());
+        b[16..20].copy_from_slice(&cfg.threshold_grams.to_le_bytes());
+        b[20..24].copy_from_slice(&cfg.idle_secs.to_le_bytes());
+        b[24..28].copy_from_slice(&cfg.active_secs.to_le_bytes());
+        b[28..32].copy_from_slice(&cfg.tare_token.to_le_bytes());
+        b[32..36].copy_from_slice(&(cfg.deep_sleep as u32).to_le_bytes());
+        b[36..40].copy_from_slice(&cfg.heartbeat_secs.to_le_bytes());
+        b[40..44].copy_from_slice(&cfg.scd41_offset_centi.to_le_bytes());
+        b[44..48].copy_from_slice(&cfg.sds011_kappa_centi.to_le_bytes());
+        let crc = crc32(&b[0..48]);
+        b[48..52].copy_from_slice(&crc.to_le_bytes());
+        b
     }
 
     // --- Config blob --------------------------------------------------------
@@ -642,6 +813,176 @@ mod tests {
             b[..kept].copy_from_slice(&good[..kept]);
             assert!(Config::from_bytes(&b).is_none(), "accepted {kept} bytes");
         }
+    }
+
+    #[test]
+    fn a_version_5_sector_keeps_its_calibration() {
+        // The upgrade this migration exists for: a board that has been weighing
+        // birds since before the correction existed must come up with the same
+        // zero and the same factor, not with the defaults.
+        let old = sample();
+        let decoded = Config::from_bytes(&v5_bytes(old)).expect("version 5 is readable");
+        assert_eq!(decoded.offset, old.offset);
+        assert_eq!(decoded.scale_factor, old.scale_factor);
+        assert_eq!(decoded.threshold_grams, old.threshold_grams);
+        assert_eq!(decoded.heartbeat_secs, old.heartbeat_secs);
+        assert_eq!(decoded.scd41_offset_centi, old.scd41_offset_centi);
+        assert_eq!(decoded.sds011_kappa_centi, old.sds011_kappa_centi);
+    }
+
+    #[test]
+    fn a_migrated_sector_comes_up_with_the_correction_off() {
+        // The safe half of the migration. There is no anchor temperature in a
+        // version 5 blob and no honest way to invent one, so the node must
+        // behave exactly as it did until someone tares under the new firmware.
+        let decoded = Config::from_bytes(&v5_bytes(sample())).expect("version 5 is readable");
+        assert_eq!(decoded.temp_coeff_centi, 0);
+        assert_eq!(decoded.tare_temp_tenths, TARE_TEMP_UNKNOWN);
+        assert_eq!(decoded.drift_ticks(Some(250)), 0);
+    }
+
+    #[test]
+    fn a_corrupt_version_5_sector_is_still_rejected() {
+        // The migration must not become a hole in the CRC: the old blob is
+        // checked over the old range, at the old position.
+        let good = v5_bytes(sample());
+        for byte in 0..V5_LEN {
+            for bit in 0..8 {
+                let mut b = good;
+                b[byte] ^= 1 << bit;
+                assert!(
+                    Config::from_bytes(&b).is_none(),
+                    "bit {bit} of byte {byte} decoded despite corruption"
+                );
+            }
+        }
+    }
+
+    // --- Temperature compensation -------------------------------------------
+
+    #[test]
+    fn no_coefficient_means_no_correction() {
+        let cfg = Config {
+            temp_coeff_centi: 0,
+            tare_temp_tenths: 190,
+            ..Config::DEFAULT
+        };
+        assert_eq!(cfg.drift_ticks(Some(120)), 0);
+    }
+
+    #[test]
+    fn no_anchor_means_no_correction() {
+        // The coefficient alone is not enough: without the temperature the zero
+        // was taken at, "how far has it drifted" has no answer.
+        let cfg = Config {
+            temp_coeff_centi: 990,
+            tare_temp_tenths: TARE_TEMP_UNKNOWN,
+            ..Config::DEFAULT
+        };
+        assert_eq!(cfg.drift_ticks(Some(120)), 0);
+    }
+
+    #[test]
+    fn a_silent_sensor_means_no_correction() {
+        // Rather than the last figure, or a guess at room temperature. The SHT31
+        // sits on the same board as the load cell and does fail; air from
+        // another hour would move the zero for no reason.
+        let cfg = Config {
+            temp_coeff_centi: 990,
+            tare_temp_tenths: 190,
+            ..Config::DEFAULT
+        };
+        assert_eq!(cfg.drift_ticks(None), 0);
+    }
+
+    #[test]
+    fn cooling_below_the_tare_temperature_adds_back_what_it_took() {
+        // The terrace numbers: tared at 19.0 °C, 9.9 g/K, 420 ticks/g. At
+        // 12.2 °C the mount has taken 6.8 K * 9.9 g/K = 67.3 g off the reading,
+        // which is very nearly the -67.0 g the node published that night.
+        let cfg = Config {
+            temp_coeff_centi: 990,
+            tare_temp_tenths: 190,
+            scale_factor: 420.0,
+            ..Config::DEFAULT
+        };
+        let ticks = cfg.drift_ticks(Some(122));
+        let grams = ticks as f32 / cfg.scale_factor;
+        assert!(
+            (grams + 67.3).abs() < 0.2,
+            "expected about -67.3 g of drift, got {grams} g"
+        );
+        // Subtracting a negative drift is what puts the zero back where it was.
+        let raw = 1_000_000;
+        assert!(raw - ticks > raw);
+    }
+
+    #[test]
+    fn at_the_tare_temperature_nothing_moves() {
+        let cfg = Config {
+            temp_coeff_centi: 990,
+            tare_temp_tenths: 190,
+            ..Config::DEFAULT
+        };
+        assert_eq!(cfg.drift_ticks(Some(190)), 0);
+    }
+
+    #[test]
+    fn the_correction_is_symmetric_about_the_anchor() {
+        // One coefficient, both directions — which is the whole claim the
+        // measured warming and cooling branches supported (8.6 g/K against
+        // 9.9 g/K). If they had disagreed this would be the wrong model.
+        let cfg = Config {
+            temp_coeff_centi: 990,
+            tare_temp_tenths: 190,
+            ..Config::DEFAULT
+        };
+        for delta in [1i32, 25, 68, 150] {
+            assert_eq!(
+                cfg.drift_ticks(Some(190 + delta)),
+                -cfg.drift_ticks(Some(190 - delta)),
+                "delta {delta}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_calibration_disables_the_correction() {
+        // `write_grams` falls back to the default factor here, but this one must
+        // not: a correction computed from a factor we do not believe would be a
+        // silent, confident lie, while no correction is just the old behaviour.
+        for bad in [0.0f32, -420.0, f32::NAN, f32::INFINITY] {
+            let cfg = Config {
+                temp_coeff_centi: 990,
+                tare_temp_tenths: 190,
+                scale_factor: bad,
+                ..Config::DEFAULT
+            };
+            assert_eq!(cfg.drift_ticks(Some(120)), 0, "factor {bad}");
+        }
+    }
+
+    #[test]
+    fn an_absurd_coefficient_is_clamped_rather_than_obeyed() {
+        let mut cfg = Config::DEFAULT;
+        assert!(cfg.apply("temp_coeff", "100000"));
+        assert_eq!(cfg.temp_coeff_centi, MAX_TEMP_COEFF_CENTI);
+        assert!(cfg.apply("temp_coeff", "-100000"));
+        assert_eq!(cfg.temp_coeff_centi, -MAX_TEMP_COEFF_CENTI);
+    }
+
+    #[test]
+    fn a_negative_coefficient_survives_the_round_trip() {
+        // The terrace mount drifts *down* as it cools, and a sign lost in the
+        // blob would double the error instead of removing it.
+        let cfg = Config {
+            temp_coeff_centi: -990,
+            tare_temp_tenths: -55,
+            ..Config::DEFAULT
+        };
+        let decoded = Config::from_bytes(&cfg.to_bytes()).expect("valid blob");
+        assert_eq!(decoded.temp_coeff_centi, -990);
+        assert_eq!(decoded.tare_temp_tenths, -55);
     }
 
     // --- Config::apply ------------------------------------------------------

@@ -61,7 +61,7 @@ use crate::sensors::{scale, scd41, sds011, sgp41, sht31, EntityDescriptor};
 /// rather than a missing sensor, and it earned its keep here.
 pub const MAX_ENTITIES: usize = 16;
 /// Upper bound on command entities (the calibration and tuning knobs).
-pub const MAX_CONTROLS: usize = 12;
+pub const MAX_CONTROLS: usize = 13;
 
 /// Room for one discovery payload. The longest today is ~390 B (a `number`
 /// control on a node with a last will and a long name); the headroom is for the
@@ -486,6 +486,28 @@ const SCALE_CONTROLS: &[Control] = &[
     },
 ];
 
+/// The knob for a scale whose mount moves with the weather, which needs a
+/// thermometer on the same board to be worth anything — hence its own group
+/// rather than a sixth entry in [`SCALE_CONTROLS`]. An indoor node would get a
+/// control that could only ever read zero.
+///
+/// Grams per kelvin, signed, because which way a printed mount pulls depends on
+/// how it was printed: the terrace node's zero goes *down* as it cools, at about
+/// 9.9 g/K. `0` switches the correction off, and the range is wide enough to
+/// hold a mount ten times worse than that one without being wide enough for a
+/// mistyped number to turn a cold night into kilograms.
+///
+/// Setting it is only half the job — the correction also needs a tare to anchor
+/// it (see [`crate::config::Config::tare_temp_tenths`]), which is why the button
+/// sits on the same card.
+const SCALE_TEMP_CONTROLS: &[Control] = &[Control {
+    component: "number",
+    key: "temp_coeff",
+    name: "Temperaturgang",
+    reads_back: true,
+    spec: "\"min\":-100,\"max\":100,\"step\":0.1,\"unit_of_meas\":\"g/K\",\"mode\":\"box\",",
+}];
+
 /// Knobs that only exist on a node carrying an SCD41.
 ///
 /// The offset is a *calibration*, read off a comparison against a trusted
@@ -567,6 +589,11 @@ pub fn controls(node: &NodeConfig) -> Vec<&'static Control, MAX_CONTROLS> {
     for control in REANNOUNCE_CONTROLS
         .iter()
         .chain(SCALE_CONTROLS.iter().filter(|_| node.scale.enabled))
+        .chain(
+            SCALE_TEMP_CONTROLS
+                .iter()
+                .filter(|_| node.scale.enabled && node.sht31.enabled),
+        )
         .chain(SCD41_CONTROLS.iter().filter(|_| node.scd41.enabled))
         .chain(SDS011_CONTROLS.iter().filter(|_| node.sds011.compensated))
         .chain(BATTERY_CONTROLS.iter().filter(|_| node.power.is_battery()))
@@ -643,6 +670,7 @@ const _: () = {
     assert!(
         REANNOUNCE_CONTROLS.len()
             + SCALE_CONTROLS.len()
+            + SCALE_TEMP_CONTROLS.len()
             + SCD41_CONTROLS.len()
             + SDS011_CONTROLS.len()
             + BATTERY_CONTROLS.len()
@@ -1271,6 +1299,55 @@ mod tests {
         let bedroom = crate::node::by_name("schlafzimmer").unwrap();
         let keys: Vec<&str> = controls(&bedroom).iter().map(|c| c.key).collect();
         assert_eq!(keys, vec!["reannounce", "scd41_temp_offset"]);
+    }
+
+    #[test]
+    fn every_settable_control_is_a_key_the_config_understands() {
+        // The seam this guards is a pair of string literals in different files:
+        // the `key` announced here becomes the config topic Home Assistant
+        // writes to, and `Config::apply` matches on it. A typo in either one
+        // produces a control that looks perfectly healthy in Home Assistant and
+        // silently does nothing, which is the hardest kind of broken to notice.
+        //
+        // Buttons are excluded: a press is acted on by `main`, not stored, and
+        // `apply` deliberately does not know about `tare` (see its doc comment).
+        let populated = a_fully_populated_node();
+        for control in controls(&populated) {
+            if control.component == "button" {
+                continue;
+            }
+            // Two values, because `apply` reports whether anything *changed*
+            // and one of them is bound to be what the field already holds —
+            // `deep_sleep` starts out on, `temp_coeff` starts out at zero. An
+            // unknown key changes nothing whatever it is sent.
+            let moved = ["0", "1"].iter().any(|v| {
+                let mut cfg = Config::DEFAULT;
+                cfg.apply(control.key, v)
+            });
+            assert!(moved, "{} is announced but not settable", control.key);
+        }
+    }
+
+    #[test]
+    fn the_temperature_coefficient_needs_a_thermometer_on_the_same_board() {
+        // A scale with no SHT31 has nothing to measure drift against, so the
+        // knob would be a control that can only ever read zero. `terrasse` is
+        // the node this was built for and carries both.
+        for (name, node) in FLEET {
+            let keys: Vec<&str> = controls(node).iter().map(|c| c.key).collect();
+            assert_eq!(
+                keys.contains(&"temp_coeff"),
+                node.scale.enabled && node.sht31.enabled,
+                "{name}"
+            );
+        }
+        let blind_scale = NodeConfig {
+            sht31: Slot::off(),
+            ..a_fully_populated_node()
+        };
+        let keys: Vec<&str> = controls(&blind_scale).iter().map(|c| c.key).collect();
+        assert!(keys.contains(&"tare"), "still a scale");
+        assert!(!keys.contains(&"temp_coeff"));
     }
 
     #[test]

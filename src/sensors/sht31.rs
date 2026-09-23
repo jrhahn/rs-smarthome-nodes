@@ -150,6 +150,25 @@ impl<I2C: I2cBus> Sht31<I2C> {
         self.last_t_tenths
     }
 
+    /// Take a reading and return only the temperature, in tenths of a degree.
+    ///
+    /// For a caller that needs the air *before* the publishing round starts —
+    /// the scale's temperature compensation reads it on every wake, including
+    /// the cheap ones where [`Sensor::measure`] never runs, because the
+    /// correction has to be in place before the presence logic looks at the
+    /// sample (see [`crate::config::Config::drift_ticks`]).
+    ///
+    /// Goes through `measure` rather than around it so it inherits the
+    /// reset-and-retry that makes this sensor reliable outdoors; the formatted
+    /// readings it builds are dropped, which costs a stack `Vec` and no bus
+    /// traffic. On a publish round the sensor is therefore read twice, a few
+    /// milliseconds apart — deliberate, so the number Home Assistant sees is
+    /// still `measure`'s own and not one borrowed from earlier in the cycle.
+    pub async fn measure_temperature_tenths(&mut self) -> Option<i32> {
+        let _ = self.measure().await;
+        self.last_t_tenths
+    }
+
     /// Put the sensor back into a known state, and wait out the datasheet's
     /// recovery time.
     ///

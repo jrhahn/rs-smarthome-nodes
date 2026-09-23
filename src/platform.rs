@@ -241,6 +241,19 @@ impl Sensors {
         }
     }
 
+    /// This round's air temperature in tenths of a degree, measured now, or
+    /// `None` on a node with no SHT31 or one that did not answer.
+    ///
+    /// Sits apart from [`Sensors::measure_all`] because its caller is on the
+    /// other side of the cycle: the scale's temperature compensation needs a
+    /// figure before the presence logic runs, on every wake, while `measure_all`
+    /// only happens on the rounds that publish. Keeping the two separate is what
+    /// lets the cheap wakes have their correction without dragging the SDS011's
+    /// fan and the SCD41's warm-up along with it.
+    pub async fn air_temperature_tenths(&mut self) -> Option<i32> {
+        self.sht31.as_mut()?.measure_temperature_tenths().await
+    }
+
     /// Hand the SCD41 its temperature offset (hundredths of °C) from the live
     /// config. A no-op on a node without one, and cheap enough to call every
     /// round — the driver only touches the bus when the value actually changed.

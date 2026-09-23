@@ -465,7 +465,8 @@ on / has just left the scale) and persists them. Changes therefore apply with a
 | `offset`            | raw HX711 value at 0 g (tare zero) | with load cell |
 | `scale_factor`      | raw ticks per gram | with load cell |
 | `threshold`         | grams that count as "a bird landed" | with load cell |
-| `tare` (button)     | re-zero: takes a burst of fresh readings on the empty feeder and adopts their median as `offset` *and* as the presence baseline | with load cell |
+| `tare` (button)     | re-zero: takes a burst of fresh readings on the empty feeder and adopts their median as `offset` *and* as the presence baseline, and records the air temperature as the correction's anchor | with load cell |
+| `temp_coeff`        | grams the zero moves per kelvin, signed; `0` disables the correction (default) | with load cell **and** SHT31 |
 | `idle_interval`     | deep-sleep seconds while empty | battery |
 | `active_interval`   | deep-sleep seconds for a load that outlasted its awake visit window (snow, a twig) — a normal visit is watched awake and never uses this | battery |
 | `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) | battery |
@@ -489,6 +490,51 @@ that never settle are refused outright rather than guessed at. See
 On a blank flash the firmware falls back to built-in defaults
 (`src/config.rs` — `offset` mid-scale, `scale_factor` 420, `threshold` 10 g,
 2 s / 10 s idle/active intervals, 600 s heartbeat).
+
+**Correcting the thermal zero drift (`temp_coeff`):**
+
+An outdoor scale's zero moves with the weather, and on the terrace node it moves
+far more than the load cell can account for: about **9.9 g/K**, roughly 1 % of
+full scale per kelvin on a 1 kg cell and some twenty times a decent cell's own
+zero-TC spec. That is the printed clamps straining against the steel beam, not
+the strain gauges. Ten kelvin between a September afternoon and the following
+dawn is a hundred grams — five times a blue tit.
+
+It is not only an accuracy problem. `presence::drift_band` only absorbs creep up
+to `threshold / 4`, so a thermal ramp of tens of grams lands in
+`Decision::Unexplained`, where the baseline is deliberately frozen. The node then
+never recovers its zero on its own; it sits there until someone tares it.
+
+The correction subtracts `(air − tare_temp) × temp_coeff` from the **raw ticks**,
+once, at the moment the sample is read — upstream of the gram conversion, the
+presence comparison and the drift-tracked baseline alike, so all three keep
+describing the same scale. It needs two things and does nothing without both:
+
+1. **A coefficient.** Let the node sit through a temperature swing with nothing
+   on it, then divide the published grams by the kelvin between them. Sign
+   included — the terrace zero goes *down* as it cools, so its coefficient is
+   negative. Enter it in the *Temperaturgang* number.
+2. **An anchor.** The correction measures drift from the temperature the zero was
+   taken at, and only a tare records one. So **set the coefficient first, then
+   tare** — until a tare has happened under firmware that knows about the anchor,
+   `tare_temp_tenths` is unset and the correction stays off however the
+   coefficient reads.
+
+Both live in the config blob beside `offset`. Flashing this firmware onto a board
+that predates them keeps its existing calibration — the blob migrates from
+version 5 rather than reverting to defaults — and comes up with the correction
+off, so nothing changes until someone opts in.
+
+The air comes from the node's own SHT31, read on **every** wake, including the
+cheap idle ones where no other sensor is sampled: the correction has to be in
+place before the presence logic looks at the sample. One I²C transaction against
+a boot that costs two seconds. A round where the sensor says nothing is left
+uncorrected rather than corrected against air from another hour.
+
+One caveat the measurements so far do not settle: the SHT31 reads *air*, while
+the beam and its clamps lag it. Warming and cooling branches measured 8.6 and
+9.9 g/K, close enough that one coefficient is the right model, but a coefficient
+fitted during a fast transient will come out too large.
 
 **Calibrating `scale_factor`:**
 1. **Tare** with the pan empty (sets `offset`). The empty-pan raw value is also

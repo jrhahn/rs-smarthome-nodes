@@ -524,7 +524,12 @@ async fn run_battery(
             enter_deep_sleep(lpwr, cfg.idle_interval());
         }
     };
-    info!("HX711 raw reading: {}", raw);
+    let drift = drift_ticks(board, &cfg).await;
+    let raw = raw.saturating_sub(drift);
+    info!(
+        "HX711 raw reading: {} (thermal correction {} ticks)",
+        raw, drift
+    );
 
     // First boot: establish the tare baseline and go back to sleep.
     if !state::is_initialised() {
@@ -551,7 +556,7 @@ async fn run_battery(
             // between samples. This is what turns one arbitrary conversion per
             // active interval into a settled median, and one Wi-Fi connect per
             // active interval into one per visit.
-            let visit = watch_visit(board, raw, baseline, &cfg).await;
+            let visit = watch_visit(board, raw, baseline, drift, &cfg).await;
             state::set_bird_present(visit.still_loaded);
 
             // Counted here rather than on the rising edge, because the edge
@@ -730,7 +735,21 @@ struct Visit {
 ///
 /// `first` — the reading that tripped the threshold — is deliberately not part
 /// of the median; see [`presence::Window`].
-async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Config) -> Visit {
+///
+/// `drift` is this wake's temperature correction in raw ticks, already
+/// subtracted from `first` by the caller. It has to be subtracted here too, from
+/// every sample taken inside the loop: the comparison below is against
+/// `baseline`, which lives in corrected ticks, and mixing the two spaces would
+/// move the departure threshold by however far the mount had expanded.
+/// Re-measuring the air per sample would be the wrong kind of exact — a visit
+/// lasts seconds, and nothing thermal happens in seconds.
+async fn watch_visit(
+    board: &mut Board<'_>,
+    first: i32,
+    baseline: i32,
+    drift: i32,
+    cfg: &Config,
+) -> Visit {
     let threshold = cfg.threshold_ticks();
     let started = Instant::now();
     let settled_at = started + VISIT_SETTLE;
@@ -763,6 +782,7 @@ async fn watch_visit(board: &mut Board<'_>, first: i32, baseline: i32, cfg: &Con
             still_loaded = false;
             break;
         };
+        let raw = raw.saturating_sub(drift);
 
         if raw.saturating_sub(baseline) >= threshold {
             below = 0;
@@ -825,6 +845,13 @@ async fn run_awake(
         // Track presence/drift when this node has a load cell, so a mains-powered
         // scale behaves like the battery one minus the sleeping.
         let raw = read_scale(board).await;
+        // Corrected here rather than at the comparison, exactly as the sleeping
+        // path does it: `collect_samples` below converts this very number to
+        // grams, and a mains scale that reported a different weight from a
+        // battery one in the same weather would be the kind of difference
+        // nobody finds for months.
+        let drift = drift_ticks(board, &cfg).await;
+        let raw = raw.map(|raw| raw.saturating_sub(drift));
         if let Some(raw) = raw {
             if !state::is_initialised() {
                 state::set_baseline(raw);
@@ -1028,6 +1055,30 @@ async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
     scale.read(HX711_TIMEOUT).await
 }
 
+/// This wake's thermal correction, in raw HX711 ticks.
+///
+/// Reads the air itself rather than taking a figure from the caller, because the
+/// rounds that need it most are the cheap ones where no sensor is sampled at all
+/// — the idle wakes that carry the presence logic between publishes. The SHT31
+/// costs one I²C transaction against a boot that costs two seconds, so reading
+/// it every wake is cheaper than the RTC-RAM cache that would avoid it, and it
+/// cannot go stale.
+///
+/// Skipped entirely — no bus traffic, no measurement — when no coefficient is
+/// set, which is every node in the fleet until someone sets one. The correction
+/// is opt-in per mount (see [`Config::temp_coeff_centi`]), so it must cost
+/// nothing at all on a node that has not opted in.
+async fn drift_ticks(board: &mut Board<'_>, cfg: &Config) -> i32 {
+    if cfg.temp_coeff_centi == 0 {
+        return 0;
+    }
+    let air = board.sensors.air_temperature_tenths().await;
+    if air.is_none() {
+        warn!("no air temperature this round; leaving the weight uncorrected");
+    }
+    cfg.drift_ticks(air)
+}
+
 /// Measure everything this node has and format the readings for MQTT.
 ///
 /// Called on publish cycles only, so the DS18B20's 750 ms conversion and the
@@ -1221,6 +1272,14 @@ async fn publish(
 /// * it re-anchors the **presence baseline** to the same number. The gram zero
 ///   and the presence reference describe one physical state, and letting them
 ///   disagree is what stranded the node in `Unexplained` in the first place.
+/// * it records the **air temperature** the zero was taken at, which is what the
+///   thermal correction measures drift against. Same argument as the baseline
+///   one line up: the zero, the presence reference and the temperature describe
+///   one physical state, and the correction means nothing if they were captured
+///   at different ones. Note that the samples below are read *uncorrected* on
+///   purpose — at the anchor temperature the correction is zero by
+///   construction, so applying it here would be both a no-op and a chance to
+///   get the sign wrong.
 async fn retare(board: &mut Board<'_>, cfg: Config) -> Config {
     let Some(scale) = board.scale.as_mut() else {
         warn!("tare requested on a node with no load cell");
@@ -1262,6 +1321,29 @@ async fn retare(board: &mut Board<'_>, cfg: Config) -> Config {
         return cfg;
     };
 
+    // After the readings, not before: the anchor has to describe the air the
+    // zero was actually measured in, and taring takes a few seconds. A sensor
+    // that says nothing leaves the previous anchor alone rather than clearing
+    // it — a node that has been compensating correctly for weeks should not lose
+    // that because the SHT31 missed one transaction, and the new zero is still
+    // the better zero.
+    let tare_temp_tenths = match board.sensors.air_temperature_tenths().await {
+        Some(tenths) => {
+            info!("tare: anchored at {} tenths of a degree", tenths);
+            tenths
+        }
+        None => {
+            if cfg.temp_coeff_centi != 0 {
+                warn!(
+                    "tare: no air temperature, so the thermal anchor stays where it was. \
+                     The correction now measures drift from the old zero's weather — \
+                     tare again once the SHT31 answers."
+                );
+            }
+            cfg.tare_temp_tenths
+        }
+    };
+
     info!(
         "tare: zero {} -> {} (median of {}), presence baseline re-anchored",
         cfg.offset,
@@ -1273,6 +1355,7 @@ async fn retare(board: &mut Board<'_>, cfg: Config) -> Config {
     state::set_present_rounds(0);
     Config {
         offset: zero,
+        tare_temp_tenths,
         ..cfg
     }
 }

@@ -208,6 +208,31 @@ Three attempts rather than one because the failure this protects against is a
 bad *image*, not a bad afternoon: a router reboot should not roll back a working
 update.
 
+### What a rollback does *not* undo: the config blob
+
+A/B applies to the two application slots. The three sectors in the table above
+are shared, so anything the new image writes there survives the rollback — and
+one of them has a version number in it.
+
+The blob at `0x9000` went to **version 6** when the scale's temperature
+correction was added (`temp_coeff`, and the tare temperature that anchors it).
+Version 6 reads a version 5 sector and keeps everything in it, because throwing
+away a load-cell calibration nobody can reproduce from memory is not an
+acceptable cost of an upgrade. The reverse does not hold: version 5 sees an
+unknown version and falls back to defaults.
+
+In practice that is narrower than it sounds, because the new image only writes
+the blob when a setting actually changes — flash writes are slow and finite-wear,
+so `persist_if_changed` earns its name. A node that updates, fails to publish
+three times and rolls back never touched its config, and comes back up on the
+old image with its version 5 sector intact.
+
+The window is between the first config change under the new image and the
+rollback. It is small, nothing automatic reaches into it, and the way to stay out
+of it is not to move a slider on a node whose update has not confirmed yet.
+Worth knowing rather than worth engineering around: the alternative is teaching
+every future version to write the oldest layout it might be rolled back to.
+
 ## The nodes that sleep
 
 A duty-cycled or battery node is awake for seconds, which is not a download. The
