@@ -127,6 +127,62 @@ taring inherit every problem the baseline had:
 The firmware accepts any finite `threshold ≥ 0` over MQTT; the 500 g maximum is
 only the Home Assistant slider's.
 
+**Checking whether a tare worked, without being fooled twice.** Both mistakes
+below were made on 2026-09-24 and each produced a confident wrong answer.
+
+The round that *consumes* the press still carries the old zero. `publish()`
+sends the samples first and only then re-zeroes:
+
+```rust
+let drained = connect_and_publish(...).await;
+let updated = if drained.tare { retare(board, drained.cfg).await } else { drained.cfg };
+```
+
+So the reading that arrives alongside the press being cleared is the pre-tare
+one, and reading it as "still not zero, so it was refused" is wrong. **Check the
+round after that.**
+
+And a refused tare is silent from outside. The retained press is cleared whether
+or not the readings settled, so a press made while the feeder swings is spent
+for nothing; only the serial log says why. `TARE_MAX_SPREAD` is 2000 ticks,
+which at `terrasse`'s 1862.8 ticks/g is **1.07 g** across the sixteen samples —
+tight enough that a feeder still moving will not pass. Wait until consecutive
+published weights agree to a few grams over half an hour; by then the 1.6 s
+window is easily still enough.
+
+### The zero moves with temperature, and the coefficient is positive
+
+Measured on `terrasse` across three days and both directions:
+
+| When | Direction | Coefficient |
+| --- | --- | --- |
+| 2026-09-22 evening | cooling | 9.9 g/K |
+| 2026-09-23 morning | warming | 8.6 g/K |
+| 2026-09-24 midday | cooling | 8.6 g/K |
+
+Both branches agree to 15 %, which is what says a single linear factor is the
+right model and hysteresis is not worth carrying. `temp_coeff` was set to
+**8.6** on 2026-09-24 at 15:00, against a tare anchor of 17.5 °C taken at 13:32.
+
+**The sign is the part to get right**, and it is *not* the direction the zero
+drifts. This mount's zero falls as it cools, but the coefficient describes the
+correction that cancels that, and `drift_ticks` subtracts:
+
+```
+kelvin = air − tare_temp          → negative when cooling
+drift  = kelvin × coeff × scale   → negative for a positive coeff
+raw − drift                      → adds back what the cooling took
+```
+
+A negative coefficient would double the error instead of removing it, and
+nothing in the published numbers would say so until a cold night.
+
+**Fit it from two quiet points hours apart, not from a transient.** The SHT31
+measures air and settles in seconds; the beam and its PLA clamps lag it. Bringing
+the node from 22 °C indoors to 16.6 °C outdoors, the air stopped falling at
+12:26 while the weight kept moving for another forty minutes — 7.0 g, then 4.6,
+2.8, 1.6. A coefficient fitted inside that window comes out far too large.
+
 ### The socket is wired with the colours crossed, and that is correct
 
 On this pigtail, **black goes to `B+` and red to `B−`.**

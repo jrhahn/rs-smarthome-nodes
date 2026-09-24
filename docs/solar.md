@@ -357,6 +357,104 @@ cell then end in different connectors** and cannot be swapped. Both on JST-PH
 would eventually put 22 V across a 3.7 V cell, and "eventually" is a spring
 evening with the box open for the third time.
 
+### Solder the battery path; plug contacts brown the node out
+
+Measured on `terrasse`, 2026-09-22/23. The node was rebuilt with the charger in
+the box and hung outside at 18:15. From that minute it **brownout-reset on every
+single wake** — `reset_reason 15` — and managed two successful publishes in
+sixteen hours. The cell was at 3.95 V and 74 %, so it was not a flat battery.
+
+The path from the cell to the XIAO ran through a pin header with Dupont jumper
+wires, used as a distribution point. That was the whole fault. Soldering it
+ended it: the node then ran a full night, ten hours, `reset_count` unchanged at 1.
+
+**Why a few plug contacts are enough**, when the same wire is not:
+
+| Element | Contribution at 350 mA |
+| --- | --- |
+| Cell, 2000 mAh pouch at 0.175 C | ~50 mV |
+| Protection board, <10 mΩ | ~4 mV |
+| Jumper wire, 26 AWG, 40 cm loop | ~19 mV |
+| **4–6 Dupont contacts, 50–200 mΩ each** | **400–1800 mV** |
+
+Copper cross-section is not the issue at a third of an amp — the *contacts* are.
+And the margin they eat into is thin by construction: the XIAO's 3V3 regulator
+needs roughly 300–400 mV of headroom at the Wi-Fi burst current, so a cell
+between 3.6 and 4.1 V leaves only a couple of hundred millivolts for everything
+else in series. One bad ohm spends all of it.
+
+**What made it diagnosable**, after four wrong suspects (panel, cell, protection
+board, charger), was that the USB path does not go through those contacts.
+"Works on the cable, fails on the cell" mapped exactly onto "jumper run out of
+the circuit / in it". If a node browns out only on battery, that is the first
+thing to check — and `reset_reason` is what says brownout rather than a break:
+`15` is a supply that collapsed under load, `1` is a supply that went away
+entirely.
+
+Note also what the *absence* of resets does not prove. A protection board that
+cuts leaves the node with no power at all, so it publishes nothing and its
+counter cannot move; silence and health look identical in that field. The RTC
+counters are the tell — a visit count that falls back to 0 means the cell was
+disconnected, because that memory survives deep sleep but not a real power loss.
+
+### Bulk capacitance on `P+`/`P−` trips the protection board
+
+The obvious hardening for the above — a bulk capacitor at the XIAO — is not
+available on this pack, and the reason is worth writing down before someone
+buys one.
+
+An empty capacitor is a short circuit at the instant of connection. It pulls the
+protected node to 0 V for a few microseconds, and this protection board reads
+that as a load short and latches off. Measured on the bench: 100 µF and 11 µF
+behave identically, and so does the CN3791 module's own capacitance — which
+includes a **220 µF input electrolytic** (`C3`) the cell can reach through the
+inductor and the high-side body diode. Series resistance in the charger leg did
+not fix it either, at 2.5 Ω (1.6 A inrush) or 5 Ω (0.8 A).
+
+The board recovers by itself once the load is removed, and reconnecting while
+the capacitors still hold charge works every time. So it is an *assembly*
+property, not an operating one: once everything is connected the capacitors stay
+charged from the cell and nothing happens again.
+
+Two ways to live with it:
+
+* **Pre-charge on connection.** A resistor of 100 Ω–1 kΩ held across the joint
+  for a second, then the solid connection. Zero parts in the build.
+* **Panel first, then cell**, in daylight. The charger raises its own output to
+  4.2 V from the panel, so there is no step left when the cell arrives. Untested
+  as of writing — the one attempt was after dark, where the panel lights the
+  board's LED but cannot deliver charge current, which is not the same thing.
+
+What this costs is the *self-healing* property: if the battery connection ever
+opens briefly in service, the capacitors drain and the reconnection latches the
+board off until someone climbs up to it. Soldered joints make that unlikely
+rather than impossible, and it is the argument for the firmware Wi-Fi TX power
+cap instead — about 90 mV of the same margin, over the air, no hardware.
+
+### First charge, measured
+
+2026-09-24, and worth recording because the charger spent a day under suspicion
+for a fault that turned out to be the protection board's inrush behaviour.
+
+```
+12:30   3.99 V   198 W/m², overcast     ← the day's low
+13:40   4.01 V
+14:00   4.04 V   157 W/m²
+15:00   4.04 V   520 W/m², 46 % cloud
+```
+
+The cell fell all morning under a closed cloud deck and turned upward within the
+hour the sun broke through. So the whole chain works as designed — panel, MPPT,
+the 1 Ω `R8`, `P+`/`P−`, cell — and a dark panel is simply a charger that cannot
+charge, not a broken one.
+
+**Do not judge the charger at night.** An 18 V panel under weak light still
+delivers most of its open-circuit voltage, so the module powers up and its LED
+lights while it can move no charge at all. That looks exactly like a working
+charger, and — worse — exactly like a *failed* one if you conclude from a flat
+battery curve instead. The honest night-time test is an ohmmeter across the
+disconnected module; the honest daylight test is the battery curve.
+
 ## Parts
 
 | # | Part | Spec | Source | ~Price |
