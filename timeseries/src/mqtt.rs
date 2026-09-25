@@ -126,6 +126,34 @@ pub fn parse_value(payload: &[u8]) -> Option<f64> {
     value.is_finite().then_some(value)
 }
 
+/// The most decimals worth carrying off a payload. The dashboard clamps to the
+/// same number, and past it a reading is noise rather than resolution.
+const MAX_DECIMALS: u8 = 6;
+
+/// How many decimals the publisher *wrote*, as opposed to how many the number
+/// needs.
+///
+/// `8.230` and `8.23` parse to the same `f64`, and by the time anything
+/// downstream sees it the trailing zero is gone -- but that zero is the only
+/// evidence that the meter resolves litres and not tens of litres. A water meter
+/// standing on a round hundredth is otherwise indistinguishable from a
+/// two-decimal sensor, and the digit that gets rounded away is the one that
+/// moves in a day. So the width is read off the text here, which is the last
+/// place the text exists.
+///
+/// An exponent form carries no such claim -- `8.23e0` is a machine's spelling,
+/// not a meter's -- and counts as none.
+fn decimals_in(text: &str) -> u8 {
+    let text = text.trim();
+    if text.contains(['e', 'E']) {
+        return 0;
+    }
+    match text.split_once('.') {
+        Some((_, fraction)) => fraction.len().min(MAX_DECIMALS as usize) as u8,
+        None => 0,
+    }
+}
+
 /// What a reading's payload turned out to say.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Measurement {
@@ -133,6 +161,8 @@ pub struct Measurement {
     /// When the node says the sensor produced it, if it said. `None` for a node
     /// that has not been reflashed yet, and for one whose time sync failed.
     pub at: Option<Micros>,
+    /// The decimals the payload was written with; see [`decimals_in`].
+    pub decimals: u8,
 }
 
 /// The plausible window for a node-supplied timestamp, in milliseconds:
@@ -166,20 +196,38 @@ pub fn parse_measurement(payload: &[u8]) -> Option<Measurement> {
     // The bare form first: it is what every node sent until this change, it is
     // unambiguous, and it costs one parse rather than a JSON walk.
     if let Some(value) = parse_value(payload) {
-        return Some(Measurement { value, at: None });
+        let decimals = std::str::from_utf8(payload).map(decimals_in).unwrap_or(0);
+        return Some(Measurement {
+            value,
+            at: None,
+            decimals,
+        });
     }
 
     let json: serde_json::Value = serde_json::from_slice(payload).ok()?;
-    let value = json.get("v").and_then(serde_json::Value::as_f64)?;
+    let Some(serde_json::Value::Number(number)) = json.get("v") else {
+        return None;
+    };
+    let value = number.as_f64()?;
     if !value.is_finite() {
         return None;
     }
+    // Only the bare form can prove a trailing zero. A JSON payload has already
+    // been through serde by this point, so `{"v":8.230}` is indistinguishable
+    // from `{"v":8.23}` here, and the width such a node claims is whatever its
+    // value needs. Nothing publishes a meter as JSON today; if anything ever
+    // does, the dashboard still reads the digits off the number itself.
+    let decimals = decimals_in(&number.to_string());
     let at = json
         .get("t")
         .and_then(serde_json::Value::as_i64)
         .filter(|ms| (SANE_FROM_MS..SANE_UNTIL_MS).contains(ms))
         .map(|ms| ms * 1_000);
-    Some(Measurement { value, at })
+    Some(Measurement {
+        value,
+        at,
+        decimals,
+    })
 }
 
 /// The availability payloads, as `discovery::PAYLOAD_ONLINE` / `_OFFLINE`.
@@ -327,6 +375,7 @@ async fn handle(
                 at,
             };
             shared.observe(&reading);
+            shared.observe_precision(node, sensor, measurement.decimals);
             if tx.send(Record::Reading(reading)).await.is_err() {
                 warn!("writer is gone; dropping a reading");
             }
@@ -543,6 +592,46 @@ mod tests {
         let unstamped = parse_measurement(br#"{"v":412}"#).unwrap();
         assert_eq!(unstamped.value, 412.0);
         assert_eq!(unstamped.at, None);
+    }
+
+    #[test]
+    fn a_trailing_zero_survives_as_a_width() {
+        // The whole point: `8.230` and `8.23` are the same f64, and only the
+        // text says the meter resolves litres. A cold-water meter that stands
+        // still for a day publishes the former every round, so the width is
+        // there to be read even when the value never moves.
+        assert_eq!(parse_measurement(b"8.230").unwrap().decimals, 3);
+        assert_eq!(parse_measurement(b"8.23").unwrap().decimals, 2);
+        assert_eq!(parse_measurement(b"8.000").unwrap().decimals, 3);
+        assert_eq!(parse_measurement(b" 2.198 ").unwrap().decimals, 3);
+    }
+
+    #[test]
+    fn a_width_is_only_claimed_where_one_was_written() {
+        // An integer payload says nothing about decimals, and neither does a
+        // machine's exponent spelling -- both are "no claim" rather than "zero
+        // decimals", and `observe_precision` ignores them on that basis.
+        assert_eq!(parse_measurement(b"412").unwrap().decimals, 0);
+        assert_eq!(parse_measurement(b"8.23e0").unwrap().decimals, 0);
+
+        // Capped: a payload with forty decimals is a bug upstream, and this
+        // number ends up as a formatter width.
+        let absurd = format!("1.{}", "0".repeat(40));
+        assert_eq!(
+            parse_measurement(absurd.as_bytes()).unwrap().decimals,
+            MAX_DECIMALS
+        );
+    }
+
+    #[test]
+    fn json_can_only_claim_the_width_its_value_needs() {
+        // serde has already turned the token into a f64 by the time this runs,
+        // so a trailing zero in the JSON form is unrecoverable. Documented
+        // rather than worked around: nothing publishes a meter as JSON, and the
+        // dashboard still counts the digits off the number as a fallback.
+        assert_eq!(parse_measurement(br#"{"v":8.230}"#).unwrap().decimals, 2);
+        assert_eq!(parse_measurement(br#"{"v":21.5}"#).unwrap().decimals, 1);
+        assert_eq!(parse_measurement(br#"{"v":412}"#).unwrap().decimals, 0);
     }
 
     #[test]

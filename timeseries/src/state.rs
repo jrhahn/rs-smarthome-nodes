@@ -80,6 +80,8 @@ pub struct StatsSnapshot {
 struct Inner {
     meta: HashMap<(String, String), ChannelMeta>,
     live: HashMap<(String, String), (f64, i64)>,
+    /// How widely each channel is published; see [`Shared::observe_precision`].
+    precision: HashMap<(String, String), u8>,
     online: HashMap<String, bool>,
     views: Vec<String>,
 }
@@ -134,6 +136,38 @@ impl Shared {
         self.write()
             .live
             .insert((r.node.clone(), r.sensor.clone()), (r.value, r.at / 1_000));
+    }
+
+    /// Remember how many decimals a channel is published with.
+    ///
+    /// A high-water mark, and deliberately so. One payload proves only what it
+    /// shows: a meter reading `8.230` proves three decimals, and the next round
+    /// landing on `8.24` proves two -- taking the maximum stops a tile changing
+    /// width between refreshes. Zero is not a claim at all (an integer payload,
+    /// or an exponent form), so it is not recorded and cannot pull a channel
+    /// back down.
+    ///
+    /// Like everything else here this is re-learned after a restart, from the
+    /// next reading on each channel rather than from a stored width.
+    pub fn observe_precision(&self, node: &str, sensor: &str, decimals: u8) {
+        if decimals == 0 {
+            return;
+        }
+        let mut inner = self.write();
+        let seen = inner
+            .precision
+            .entry((node.to_string(), sensor.to_string()))
+            .or_insert(0);
+        *seen = (*seen).max(decimals);
+    }
+
+    /// The widest a channel has been published since startup, if it has been
+    /// seen at all.
+    pub fn precision(&self, node: &str, sensor: &str) -> Option<u8> {
+        self.read()
+            .precision
+            .get(&(node.to_string(), sensor.to_string()))
+            .copied()
     }
 
     pub fn set_meta(&self, node: &str, sensor: &str, meta: ChannelMeta) {
@@ -232,6 +266,29 @@ mod tests {
         // Milliseconds, not microseconds: what the API hands the browser.
         assert_eq!(s.live("bad", "humidity").unwrap().1, 1_700_000_000_000);
         assert_eq!(s.stats().snapshot().readings, 3);
+    }
+
+    #[test]
+    fn a_channels_width_is_a_high_water_mark() {
+        let shared = Shared::new();
+        assert_eq!(shared.precision("wasserzaehler_kalt", "value"), None);
+
+        // Three decimals proven, then a round that happens to land on two: the
+        // meter did not get coarser, the reading just ended in a digit that is
+        // not zero. A tile that narrowed here would flicker between refreshes.
+        shared.observe_precision("wasserzaehler_kalt", "value", 3);
+        shared.observe_precision("wasserzaehler_kalt", "value", 2);
+        assert_eq!(shared.precision("wasserzaehler_kalt", "value"), Some(3));
+
+        // Zero is "no claim" -- an integer payload or an exponent form -- and
+        // must not be mistaken for "no decimals".
+        shared.observe_precision("wasserzaehler_kalt", "value", 0);
+        assert_eq!(shared.precision("wasserzaehler_kalt", "value"), Some(3));
+        shared.observe_precision("terrasse", "uptime", 0);
+        assert_eq!(shared.precision("terrasse", "uptime"), None);
+
+        // And it is per channel, not per node.
+        assert_eq!(shared.precision("wasserzaehler_warm", "value"), None);
     }
 
     #[test]

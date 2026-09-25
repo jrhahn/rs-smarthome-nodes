@@ -101,6 +101,15 @@ pub struct Channel {
     pub last_at_ms: Option<i64>,
     /// `null` until the node's availability topic has been seen.
     pub online: Option<bool>,
+    /// How many decimals this channel is published with, if a reading has been
+    /// seen since startup.
+    ///
+    /// The dashboard formats to this rather than counting the digits in
+    /// `last_value`, because a `f64` no longer has the publisher's trailing
+    /// zeros: `8.230` m³ arrives here as `8.23`, and a meter parked on a round
+    /// hundredth would otherwise be drawn as a two-decimal sensor for as long as
+    /// it stood there.
+    pub decimals: Option<u8>,
 }
 
 #[cfg(test)]

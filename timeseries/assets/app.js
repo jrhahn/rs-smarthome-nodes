@@ -72,10 +72,21 @@ function formatterWith(decimals) {
 /// shown. Everything on a tile -- the value, its range, the chart axis, the
 /// tooltip, the CSV table -- goes through the same one, so the numbers on one
 /// screen cannot disagree about how precise they are.
+///
+/// `c.decimals` is the authority where the server has it: that width was counted
+/// off the MQTT payload's own text, before the number became a `f64`. Counting
+/// the digits here can only ever see what survived that, and a trailing zero
+/// does not -- a water meter parked on `8.230` reaches this as `8.23` and would
+/// otherwise be drawn to two decimals for as long as it stood still, which is
+/// exactly when the third digit matters most.
 function formatterFor(c) {
   if (!c) return num;
   const key = `${c.node}/${c.sensor}`;
-  const seen = Math.max(seenDecimals.get(key) ?? 0, decimalsOf(c.last_value));
+  const seen = Math.max(
+    seenDecimals.get(key) ?? 0,
+    c.decimals ?? 0,
+    decimalsOf(c.last_value),
+  );
   seenDecimals.set(key, seen);
   return formatterWith(seen);
 }

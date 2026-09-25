@@ -162,6 +162,7 @@ async fn channels(State(app): State<App>) -> ApiResult<Json<Vec<Channel>>> {
                     .shared
                     .online(&node)
                     .or_else(|| status.iter().find(|(n, _)| *n == node).map(|(_, o)| *o)),
+                decimals: app.shared.precision(&node, &sensor),
                 node,
                 sensor,
                 last_value,
@@ -249,6 +250,9 @@ struct OverviewChannel {
     last_value: Option<f64>,
     last_at_ms: Option<i64>,
     online: Option<bool>,
+    /// As on [`Channel`]: the publisher's decimal width, which `last_value` has
+    /// already lost.
+    decimals: Option<u8>,
     /// `[[t_ms, mean], ...]`, thin enough to draw as a sparkline.
     points: Vec<(i64, f64)>,
 }
@@ -302,6 +306,7 @@ async fn overview(
                     .shared
                     .online(&node)
                     .or_else(|| status.iter().find(|(n, _)| *n == node).map(|(_, o)| *o)),
+                decimals: app.shared.precision(&node, &sensor),
                 points: shapes
                     .iter()
                     .find(|(k, _)| k.0 == node && k.1 == sensor)
