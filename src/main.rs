@@ -41,7 +41,7 @@ use esp_hal::{
     clock::CpuClock,
     delay::Delay,
     efuse::Efuse,
-    gpio::{Input, Level, Output, OutputOpenDrain, Pull},
+    gpio::{GpioPin, Input, Level, Output, OutputOpenDrain, Pull},
     peripherals::{LPWR, RADIO_CLK, RNG, TIMG1, WIFI},
     reset::software_reset,
     rng::Rng,
@@ -57,6 +57,7 @@ use esp_wifi::{
     },
     EspWifiController,
 };
+use embedded_hal::delay::DelayNs as _;
 use log::{info, warn};
 use rust_mqtt::{
     client::{client::MqttClient, client_config::ClientConfig},
@@ -403,6 +404,11 @@ async fn main(spawner: Spawner) {
     // `DT` is pulled up so a *disconnected* amp reads permanently "not ready"
     // and times out cleanly instead of returning floating garbage.
     let scale = node.scale.enabled.then(|| {
+        // Before the pin is configured, not after: `park_scale` latched this
+        // pad on the way into deep sleep, and a latched pad ignores whatever
+        // the GPIO peripheral tries to drive. Configuring first and releasing
+        // afterwards would leave the driver clocking a line that cannot move.
+        release_scale_pad();
         let dt = Input::new(peripherals.GPIO3, Pull::Up);
         let sck = Output::new(peripherals.GPIO2, Level::Low);
         Hx711::new(dt, sck, Delay::new())
@@ -544,7 +550,17 @@ async fn run_battery(
     let baseline = state::baseline();
     let was_present = state::bird_present();
 
-    match presence::decide(raw, baseline, was_present, cfg.threshold_ticks()) {
+    let decision = presence::decide(raw, baseline, was_present, cfg.threshold_ticks());
+    // Kept here rather than in each of the five arms: the streak is about the
+    // *sequence* of verdicts, not about any one of them, and a reset that has
+    // to be repeated in four places is a reset that will be forgotten in the
+    // fifth. See `presence::UNEXPLAINED_ADOPT_AFTER_SECS`.
+    state::set_unexplained_rounds(match decision {
+        presence::Decision::Unexplained { .. } => state::unexplained_rounds().saturating_add(1),
+        _ => 0,
+    });
+
+    match decision {
         presence::Decision::Arrived { delta } => {
             info!(
                 "bird arrived: raw={} baseline={} delta={}",
@@ -681,6 +697,22 @@ async fn run_battery(
         // Something is on the cell that is neither creep nor a visit. The
         // baseline is left alone on purpose (see `presence::drift_band`), and
         // saying so is the point: this used to be absorbed in silence.
+        //
+        // Left alone *for a while*, though. Freezing with no way out is what
+        // stranded this node for thirty-two hours on 2026-09-24; past
+        // `UNEXPLAINED_ADOPT_AFTER_SECS` the reading is the new empty state and
+        // the baseline has to follow it, or nothing will ever be counted again.
+        presence::Decision::Unexplained { delta } if baseline_is_stranded(&cfg) => {
+            warn!(
+                "{} ticks on the scale, unchanged for over {} s: adopting it as the new \
+                 baseline. Something shifted the zero — a calibration, a remount, a load that \
+                 slid off — and a frozen baseline would have made every visitor invisible.",
+                delta,
+                presence::UNEXPLAINED_ADOPT_AFTER_SECS
+            );
+            state::set_baseline(raw);
+            state::set_unexplained_rounds(0);
+        }
         presence::Decision::Unexplained { delta } => warn!(
             "{} ticks on the scale: too much for creep, too little for a visit. Baseline left \
              alone; lower `threshold` if a bird this light should count.",
@@ -864,6 +896,12 @@ async fn run_awake(
             let baseline = state::baseline();
             let was_present = state::bird_present();
             let decision = presence::decide(raw, baseline, was_present, cfg.threshold_ticks());
+            state::set_unexplained_rounds(match decision {
+                presence::Decision::Unexplained { .. } => {
+                    state::unexplained_rounds().saturating_add(1)
+                }
+                _ => 0,
+            });
             info!(
                 "HX711 raw={} baseline={} decision={:?}",
                 raw, baseline, decision
@@ -879,11 +917,23 @@ async fn run_awake(
                 }
                 presence::Decision::Unexplained { delta } => {
                     state::set_bird_present(false);
-                    warn!(
-                        "{} ticks on the scale: too much for creep, too little for a visit. \
-                         Baseline left alone; lower `threshold` if a bird this light should count.",
-                        delta
-                    );
+                    if baseline_is_stranded(&cfg) {
+                        warn!(
+                            "{} ticks on the scale, unchanged for over {} s: adopting it as the \
+                             new baseline.",
+                            delta,
+                            presence::UNEXPLAINED_ADOPT_AFTER_SECS
+                        );
+                        state::set_baseline(raw);
+                        state::set_unexplained_rounds(0);
+                    } else {
+                        warn!(
+                            "{} ticks on the scale: too much for creep, too little for a visit. \
+                             Baseline left alone; lower `threshold` if a bird this light should \
+                             count.",
+                            delta
+                        );
+                    }
                 }
             }
         } else if node.scale.enabled {
@@ -1011,6 +1061,20 @@ fn presence_is_stuck(cfg: &Config) -> bool {
     state::present_rounds() >= limit
 }
 
+/// Whether the baseline has been frozen long enough to be the problem rather
+/// than the caution.
+///
+/// Counted against the *idle* cadence, not the active one: an unexplained
+/// reading is by definition not a presence, so the node is polling cheaply
+/// while this accumulates. Using `active_secs` here would make the bound depend
+/// on a setting the node is not currently using -- and on the terrace, where
+/// idle is 5 s and active 10 s, would have doubled a ten-minute wait into
+/// twenty for no reason anyone could have found later.
+fn baseline_is_stranded(cfg: &Config) -> bool {
+    let limit = presence::rounds_for(presence::UNEXPLAINED_ADOPT_AFTER_SECS, cfg.idle_secs);
+    state::unexplained_rounds() >= limit
+}
+
 /// How long a sleeping node without a load cell stays down between publishes.
 ///
 /// Every wake-up it takes is already a full publish with a Wi-Fi connect in it,
@@ -1046,13 +1110,31 @@ fn sample_period_secs(cfg: &Config) -> u64 {
     }
 }
 
-/// One clean HX711 reading, or `None` if this node has no load cell or the amp
-/// stayed silent. The first sample after power-up settles the internal filter,
-/// so it is discarded.
+/// One settled HX711 reading, or `None` if this node has no load cell or the
+/// amp stayed silent.
+///
+/// The chip is switched off between wakes now (see [`park_scale`]), so this
+/// starts from a cold converter rather than a paused one and has to discard
+/// [`hx711::SETTLING_READS`] conversions instead of the single one that
+/// sufficed while it ran continuously. That is the price of the power-down, and
+/// it is worth paying: the amplifier and its bridge draw ~4.5 mA around the
+/// clock, about half this node's entire budget, against roughly 0.3 s of extra
+/// awake time per wake.
+///
+/// The discarded conversions are not merely noisy. The converter's digital
+/// filter comes up with no history, so an early sample is wrong by an amount
+/// nothing downstream could recognise as a settling artefact -- it would arrive
+/// in `presence::decide` as a step, and become a phantom visitor or a stranded
+/// baseline.
 async fn read_scale(board: &mut Board<'_>) -> Option<i32> {
     let scale = board.scale.as_mut()?;
-    let _ = scale.read(HX711_TIMEOUT).await;
-    scale.read(HX711_TIMEOUT).await
+    scale.power_up();
+    let mut last = None;
+    for _ in 0..hx711::SETTLING_READS {
+        last = scale.read(HX711_TIMEOUT).await;
+        last?;
+    }
+    last
 }
 
 /// This wake's thermal correction, in raw HX711 ticks.
@@ -1633,10 +1715,61 @@ async fn sync_time(stack: &'static WifiStack) -> Option<u64> {
 /// Enter RTC-timer deep sleep for `interval`. Never returns — the chip resets
 /// on wake and re-runs `main`.
 fn enter_deep_sleep(lpwr: LPWR, interval: CoreDuration) -> ! {
+    park_scale();
     info!("Entering deep sleep for {:?}", interval);
     let mut rtc = Rtc::new(lpwr);
     let wake = TimerWakeupSource::new(interval);
     rtc.sleep_deep(&[&wake]);
+}
+
+/// Put the HX711 to sleep and make the pad keep it there.
+///
+/// Two halves, and neither works alone. Holding `PD_SCK` high for more than
+/// 60 µs latches the chip into its ~0.3 µA power-down -- but on the ESP32-C3 a
+/// digital pad loses its level in deep sleep, so the chip would wake up with
+/// the MCU and draw its 1.5 mA plus the bridge's 3 mA through every one of the
+/// five seconds this node spends asleep. Latching the pad in
+/// `RTC_CNTL.PAD_HOLD` is what carries the level across, because that register
+/// and the pad it drives live in the RTC domain, which stays powered.
+///
+/// `SCK` is `GPIO2`, which on this chip is `RTC_GPIO2` -- one of the six pads
+/// that can be held at all. That is not a coincidence to rely on quietly: the
+/// pin assignment in `main` was made for the HX711's bit-banging, and this
+/// optimisation only exists because it happened to land on a holdable pad.
+///
+/// Stealing the pin is sound *here specifically* because the caller never
+/// returns: this runs on the last line before `sleep_deep`, so nothing can
+/// observe the duplicate handle. The `Board`'s own `Output` is not reachable
+/// from `enter_deep_sleep`, and threading it through twelve call sites to
+/// borrow it properly would put the whole mechanism at the mercy of whoever
+/// adds the thirteenth.
+///
+/// The matching release is in `main`, before the pins are configured. Without
+/// it the pad stays latched and the driver clocks a line that cannot move --
+/// which reads exactly like a dead amplifier.
+fn park_scale() {
+    if !node::active().scale.enabled {
+        return;
+    }
+    // `Level::High` is the power-down itself: the chip latches once `PD_SCK`
+    // has been high for 60 µs. Dropping the handle afterwards changes nothing —
+    // `Output` has no `Drop` — and the latch below outlives it regardless.
+    let _sck = Output::new(unsafe { GpioPin::<2>::steal() }, Level::High);
+    Delay::new().delay_us(hx711::POWER_DOWN_US);
+    unsafe { &*LPWR::PTR }
+        .pad_hold()
+        .modify(|_, w| w.gpio_pin2_hold().set_bit());
+}
+
+/// Let go of the pad `park_scale` latched, so the pins can be configured.
+///
+/// Unconditional and first: a board that has just been flashed with this
+/// firmware may still be holding a pad from a previous boot, and a board that
+/// never held one loses nothing by clearing a bit that is already clear.
+fn release_scale_pad() {
+    unsafe { &*LPWR::PTR }
+        .pad_hold()
+        .modify(|_, w| w.gpio_pin2_hold().clear_bit());
 }
 
 /// Block (async) until the interface reports link-up and DHCP has yielded an

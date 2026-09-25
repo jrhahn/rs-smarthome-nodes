@@ -44,8 +44,17 @@ static mut IDLE_WAKES: u32 = 0;
 #[ram(rtc_fast, persistent)]
 static mut PRESENT_ROUNDS: u32 = 0;
 
+/// Consecutive rounds the reading has sat in `Decision::Unexplained`, for the
+/// recovery bound in [`crate::presence::UNEXPLAINED_ADOPT_AFTER_SECS`]. Reset
+/// by every other verdict, so it only ever counts one uninterrupted stretch —
+/// the same discipline as [`PRESENT_ROUNDS`], and for the same reason: an
+/// occasional odd reading between quiet ones is not a stuck baseline.
+#[ram(rtc_fast, persistent)]
+static mut UNEXPLAINED_ROUNDS: u32 = 0;
+
 /// Digest of the discovery messages last successfully announced from this
 /// board; see [`crate::discovery::announcement_tag`]. Zero means "nothing".
+
 #[ram(rtc_fast, persistent)]
 static mut DISCOVERY_TAG: u32 = 0;
 
@@ -166,6 +175,17 @@ pub fn present_rounds() -> u32 {
 pub fn set_present_rounds(value: u32) {
     unsafe { core::ptr::addr_of_mut!(PRESENT_ROUNDS).write(value) }
 }
+
+/// How many consecutive rounds the reading has been unexplained.
+pub fn unexplained_rounds() -> u32 {
+    unsafe { core::ptr::addr_of!(UNEXPLAINED_ROUNDS).read() }
+}
+
+/// Replace the unexplained-streak counter.
+pub fn set_unexplained_rounds(value: u32) {
+    unsafe { core::ptr::addr_of_mut!(UNEXPLAINED_ROUNDS).write(value) }
+}
+
 
 /// Visits counted since the last full power loss, or zero if the stored pair
 /// does not agree -- which is what leftover RTC memory looks like.

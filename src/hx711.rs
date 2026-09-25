@@ -21,7 +21,21 @@ use embedded_hal::digital::{InputPin, OutputPin};
 
 /// Holding `PD_SCK` high for longer than 60 µs latches the HX711 into
 /// power-down (datasheet). Use a comfortable margin.
-const POWER_DOWN_US: u32 = 80;
+pub const POWER_DOWN_US: u32 = 80;
+
+/// Conversions to throw away after the chip has been powered up again.
+///
+/// The datasheet gives the output settling time as **400 ms at 10 SPS**, i.e.
+/// four conversions: the converter's digital filter starts with no history and
+/// its first outputs are not merely noisy but wrong. One discard is enough
+/// after a mere *pause* — the filter is still primed — which is what this
+/// driver's callers did while the chip was never switched off. A real
+/// power-down is a different event and needs the full four.
+///
+/// Getting this wrong is expensive in a way that would not look like a
+/// settling problem: an unsettled reading lands in `presence::decide` as a step
+/// of unknown size, which is either a phantom visitor or a frozen baseline.
+pub const SETTLING_READS: usize = 4;
 
 /// Gain / channel selection, encoded as the number of extra clock pulses that
 /// follow the 24 data pulses (25/26/27).
@@ -78,16 +92,19 @@ impl<DT: InputPin, SCK: OutputPin, D: DelayNs> Hx711<DT, SCK, D> {
     /// this chip rather than resuming (see the note in `main`'s `run_battery`),
     /// so there is currently no sleep on this board that both retains the pad
     /// and returns.
-    #[allow(dead_code)]
+    ///
+    /// Since 2026-09-25 `main` does hold the pad through deep sleep, by latching
+    /// it in `RTC_CNTL.PAD_HOLD` — see `park_scale` there. This method is the
+    /// half that puts the chip down; the latch is the half that keeps it there
+    /// while the GPIO peripheral is unpowered.
     pub fn power_down(&mut self) {
         let _ = self.sck.set_low();
         let _ = self.sck.set_high();
         self.delay.delay_us(POWER_DOWN_US);
     }
 
-    /// Wake the HX711 from power-down. The next conversion needs the internal
-    /// filter to settle, so the first `read` afterwards should be discarded.
-    #[allow(dead_code)]
+    /// Wake the HX711 from power-down. The next conversions need the internal
+    /// filter to settle: discard [`SETTLING_READS`] of them, not one.
     pub fn power_up(&mut self) {
         let _ = self.sck.set_low();
     }

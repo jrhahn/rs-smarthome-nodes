@@ -87,6 +87,35 @@ pub const STUCK_AFTER_SECS: u32 = 600;
 const _: () = assert!(STUCK_AFTER_SECS <= 3600, "not a bound on a night");
 const _: () = assert!(STUCK_AFTER_SECS >= 120, "a bird may legitimately linger");
 
+/// How long the baseline may stay frozen in [`Decision::Unexplained`] before
+/// `main` adopts the current reading instead.
+///
+/// The freezing is deliberate and stays: a delta too large for creep and too
+/// small for a visit is exactly the case where guessing is wrong, and absorbing
+/// it would quietly eat a light bird. What was missing is a way *out*. Without
+/// one the state is absorbing rather than transient -- every later round starts
+/// from the same stale baseline, so it stays outside the band, so it freezes
+/// again, for ever. The node then cannot see any visitor at all until someone
+/// tares it by hand.
+///
+/// That is not hypothetical. On 2026-09-24 the terrace node sat in it for
+/// **thirty-two hours** and counted nothing. The trigger was switching
+/// `temp_coeff` on: the baseline had spent the afternoon tracking a thermal
+/// ramp of 38 g, the correction removed that ramp in a single round, and the
+/// baseline was left 38 g away from a reading it could never rejoin. Anything
+/// that shifts the raw scale does this -- a new calibration, a remount, snow
+/// sliding off -- so the recovery has to be general rather than a special case
+/// for one setting.
+///
+/// The bound is the same argument as [`STUCK_AFTER_SECS`] and deliberately the
+/// same length: ten minutes of an unchanging in-between reading is evidence
+/// that it is the new empty state, not a visitor. A bird heavy enough to count
+/// never lands here anyway -- it is over the threshold, so it reads `Arrived`.
+/// Only something under the trigger weight can sit in this band, and that is
+/// something the node has already decided not to count.
+pub const UNEXPLAINED_ADOPT_AFTER_SECS: u32 = STUCK_AFTER_SECS;
+
+
 /// Whole rounds of `round_secs` needed to cover `secs`, at least one.
 ///
 /// Rounded up: the loop only wakes on its own cadence, so a budget between two
@@ -487,7 +516,56 @@ mod tests {
     }
 
     #[test]
+    fn a_stranded_baseline_never_frees_itself() {
+        // The failure the recovery exists for, reproduced: a step that shifts
+        // the raw scale leaves the baseline outside the band, and `decide`
+        // alone can never bring the two back together. Every later round starts
+        // from the same stale baseline and reaches the same verdict.
+        let baseline = 1000;
+        let step = drift_band(THRESHOLD) + 1; // just too big for creep
+        let raw = baseline - step; // and negative, so never a visit either
+
+        for round in 0..1000 {
+            match decide(raw, baseline, false, THRESHOLD) {
+                Decision::Unexplained { .. } => {}
+                other => panic!("round {round} escaped on its own: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_countable_visitor_is_never_in_the_unexplained_band() {
+        // What makes adopting the reading safe. The recovery absorbs whatever
+        // is on the cell, so it must be impossible for a bird the node would
+        // have counted to be sitting there: at or above the threshold every
+        // delta reads `Arrived`, never `Unexplained`.
+        for threshold in [1, 100, THRESHOLD, 46_570] {
+            for over in [0, 1, 500, 100_000] {
+                let delta = threshold + over;
+                assert!(
+                    matches!(
+                        decide(1000 + delta, 1000, false, threshold),
+                        Decision::Arrived { .. }
+                    ),
+                    "threshold {threshold}, delta {delta} must be a visit, not unexplained"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_recovery_bound_is_counted_in_whole_idle_rounds() {
+        // Ten minutes at the terrace's 5 s idle cadence, and the rounding is
+        // up: a budget between two multiples would otherwise be spent early.
+        assert_eq!(rounds_for(UNEXPLAINED_ADOPT_AFTER_SECS, 5), 120);
+        assert_eq!(rounds_for(UNEXPLAINED_ADOPT_AFTER_SECS, 7), 86);
+        // A zero cadence must not divide by zero; one round is the floor.
+        assert_eq!(rounds_for(UNEXPLAINED_ADOPT_AFTER_SECS, 0), 600);
+    }
+
+    #[test]
     fn the_drift_band_never_collapses_to_zero() {
+
         // A tiny threshold must not make every reading "creep" by making the
         // band round down to nothing.
         for threshold in [1, 2, 3, DRIFT_BAND_DIVISOR] {
