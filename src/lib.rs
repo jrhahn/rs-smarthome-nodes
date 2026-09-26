@@ -56,6 +56,8 @@ pub mod reset_reason;
 pub mod rssi;
 pub mod sensors;
 pub mod sha256;
+pub mod solar;
+
 pub mod wifi;
 
 #[cfg(feature = "drivers")]

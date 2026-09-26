@@ -68,6 +68,7 @@ use rust_mqtt::{
 use node::{NodeConfig, Provision};
 use rs_smarthome_nodes::{
     battery, clock, config, discovery, ds18b20, http, hx711, node, ntp, ota, platform, presence,
+    solar,
     reset_reason, rssi, sensors::scale, state, wifi, FW_VERSION,
 };
 
@@ -209,6 +210,14 @@ const REANNOUNCE_KEY: &str = "reannounce";
 /// press rather than a setting, so it is consumed rather than stored -- and
 /// unlike them it touches RTC RAM instead of the config blob.
 const RESET_VISITS_KEY: &str = "reset_visits";
+
+/// How long a wake-up costs on top of the interval it slept, in milliseconds.
+///
+/// Boot, four HX711 conversions and the sensor reads. Measured from the
+/// heartbeat spacing on 2026-09-26: 720 s across 120 idle wakes at a 5 s
+/// interval, so 6.0 s a cycle and 1.0 s of it awake. Only the coarse clock uses
+/// this, and only to bridge the minutes between two NTP syncs.
+const AWAKE_ESTIMATE_MS: u64 = 1000;
 
 /// Give up on a single HX711 conversion after this long. A disconnected sensor
 /// (with `DT` pulled up) never becomes ready, so this bounds the boot.
@@ -500,6 +509,15 @@ async fn run_battery(
     cfg: Config,
 ) -> ! {
     let node = node::active();
+    // One round length, decided once. Every "seconds to rounds" conversion
+    // below has to agree with the interval actually about to be slept, or the
+    // night cadence silently stretches all of them by its ratio.
+    //
+    // `sleep_idle` reads the clock again a second later and could in principle
+    // land on the other side of dusk. That costs one round at the other
+    // cadence, once a day, and is cheaper than threading this value through
+    // seven call sites to prevent it.
+    let wake_secs = cfg.wake_secs_at(state::clock_ms());
 
     // A node with no load cell has no presence logic to run: sample everything
     // it does have, publish, and go back to sleep.
@@ -520,14 +538,14 @@ async fn run_battery(
             // weight instead, which is a fault someone can see, and it keeps
             // the other sensors on the board publishing.
             let wakes = state::idle_wakes() + 1;
-            if wakes >= cfg.heartbeat_wakes() {
+            if wakes >= cfg.heartbeat_wakes_at(wake_secs) {
                 state::set_idle_wakes(0);
                 let mut samples = collect_samples(None, None, &cfg, board).await;
                 let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
-                enter_deep_sleep(lpwr, cfg.idle_interval());
+                sleep_idle(lpwr, &cfg);
             }
             state::set_idle_wakes(wakes);
-            enter_deep_sleep(lpwr, cfg.idle_interval());
+            sleep_idle(lpwr, &cfg);
         }
     };
     let drift = drift_ticks(board, &cfg).await;
@@ -542,7 +560,7 @@ async fn run_battery(
         state::set_baseline(raw);
         state::mark_initialised();
         info!("tared baseline = {}", raw);
-        enter_deep_sleep(lpwr, cfg.idle_interval());
+        sleep_idle(lpwr, &cfg);
     }
 
     // Presence decision. The classification itself lives in `presence`, where
@@ -597,7 +615,7 @@ async fn run_battery(
             // A fresh arrival starts a new stretch, whatever the last one did.
             state::set_present_rounds(0);
 
-            if presence_publish_allowed(&cfg) {
+            if presence_publish_allowed(wake_secs) {
                 let mut samples =
                     collect_samples(Some(visit.weight), Some(visit.millis), &cfg, board).await;
                 let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
@@ -660,7 +678,7 @@ async fn run_battery(
                 // No sleep here: from this point the round is an empty one, and
                 // falling through is what keeps the heartbeat running. Sleeping
                 // here instead made the node mute — see the tail.
-            } else if presence_publish_allowed(&cfg) {
+            } else if presence_publish_allowed(wake_secs) {
                 let mut samples = collect_samples(Some(raw), None, &cfg, board).await;
                 let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
                 state::set_idle_wakes(0);
@@ -678,11 +696,11 @@ async fn run_battery(
             );
             state::set_bird_present(false);
             state::set_present_rounds(0);
-            if presence_publish_allowed(&cfg) {
+            if presence_publish_allowed(wake_secs) {
                 let mut samples = collect_samples(Some(raw), None, &cfg, board).await;
                 let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
                 state::set_idle_wakes(0);
-                enter_deep_sleep(lpwr, cfg.idle_interval());
+                sleep_idle(lpwr, &cfg);
             }
             // Suppressed here means Home Assistant keeps the last weight until
             // the heartbeat. Worth it: a scale flapping fast enough to hit this
@@ -702,7 +720,7 @@ async fn run_battery(
         // stranded this node for thirty-two hours on 2026-09-24; past
         // `UNEXPLAINED_ADOPT_AFTER_SECS` the reading is the new empty state and
         // the baseline has to follow it, or nothing will ever be counted again.
-        presence::Decision::Unexplained { delta } if baseline_is_stranded(&cfg) => {
+        presence::Decision::Unexplained { delta } if baseline_is_stranded(wake_secs) => {
             warn!(
                 "{} ticks on the scale, unchanged for over {} s: adopting it as the new \
                  baseline. Something shifted the zero — a calibration, a remount, a load that \
@@ -733,16 +751,16 @@ async fn run_battery(
     // publish anyway, so Home Assistant keeps a fresh reading. The counter
     // lives in RTC RAM so it survives the deep-sleep cold boots between polls.
     let wakes = state::idle_wakes() + 1;
-    if wakes >= cfg.heartbeat_wakes() {
+    if wakes >= cfg.heartbeat_wakes_at(wake_secs) {
         info!("heartbeat: publishing periodic readings");
         state::set_idle_wakes(0);
         let mut samples = collect_samples(Some(raw), None, &cfg, board).await;
         let cfg = publish(spawner, radio, &mut samples, cfg, board).await;
-        enter_deep_sleep(lpwr, cfg.idle_interval());
+        sleep_idle(lpwr, &cfg);
     }
     state::set_idle_wakes(wakes);
 
-    enter_deep_sleep(lpwr, cfg.idle_interval());
+    sleep_idle(lpwr, &cfg);
 }
 
 /// What watching one visit through produced.
@@ -869,7 +887,7 @@ async fn run_awake(
         Ok(s) => s,
         Err(e) => {
             warn!("Wi-Fi bring-up failed ({}); falling back to deep sleep", e);
-            enter_deep_sleep(lpwr, cfg.idle_interval());
+            sleep_idle(lpwr, &cfg);
         }
     };
 
@@ -917,7 +935,10 @@ async fn run_awake(
                 }
                 presence::Decision::Unexplained { delta } => {
                     state::set_bird_present(false);
-                    if baseline_is_stranded(&cfg) {
+                    // The stay-awake loop has no night cadence to disagree
+                    // with: it never deep-sleeps, so its round is its own
+                    // sample interval.
+                    if baseline_is_stranded(cfg.idle_secs) {
                         warn!(
                             "{} ticks on the scale, unchanged for over {} s: adopting it as the \
                              new baseline.",
@@ -1043,9 +1064,11 @@ async fn wait_for_next_round(secs: u64, board: &mut Board<'_>) {
 /// USB; on the cell it would have been about 28 mAh an hour.
 ///
 /// [`state::idle_wakes`] already counts rounds since the last publish and is
-/// reset by every publish, so the limit needs no clock of its own.
-fn presence_publish_allowed(cfg: &Config) -> bool {
-    let gap = presence::rounds_for(presence::MIN_PUBLISH_GAP_SECS, cfg.idle_secs);
+/// reset by every publish, so the limit needs no clock of its own. It does need
+/// the *length* of those rounds, which since the night cadence exists is no
+/// longer always `idle_secs`.
+fn presence_publish_allowed(wake_secs: u32) -> bool {
+    let gap = presence::rounds_for(presence::MIN_PUBLISH_GAP_SECS, wake_secs);
     presence::may_publish(state::idle_wakes(), gap)
 }
 
@@ -1070,8 +1093,8 @@ fn presence_is_stuck(cfg: &Config) -> bool {
 /// on a setting the node is not currently using -- and on the terrace, where
 /// idle is 5 s and active 10 s, would have doubled a ten-minute wait into
 /// twenty for no reason anyone could have found later.
-fn baseline_is_stranded(cfg: &Config) -> bool {
-    let limit = presence::rounds_for(presence::UNEXPLAINED_ADOPT_AFTER_SECS, cfg.idle_secs);
+fn baseline_is_stranded(wake_secs: u32) -> bool {
+    let limit = presence::rounds_for(presence::UNEXPLAINED_ADOPT_AFTER_SECS, wake_secs);
     state::unexplained_rounds() >= limit
 }
 
@@ -1696,6 +1719,11 @@ async fn sync_time(stack: &'static WifiStack) -> Option<u64> {
     match ntp::query(stack, NTP_SERVER).await {
         Ok(millis) if clock::is_plausible(millis) => {
             info!("time synced: {} ms since the epoch", millis);
+            // Re-anchor the coarse clock while a trusted answer is in hand.
+            // This is the only writer, and it runs on every publish round, so
+            // what `state::advance_clock_ms` accrues in between never has to
+            // bridge more than one heartbeat.
+            state::set_clock_ms(millis);
             Some(millis)
         }
         // A server can answer correctly and still be answering about the wrong
@@ -1716,8 +1744,47 @@ async fn sync_time(stack: &'static WifiStack) -> Option<u64> {
 /// on wake and re-runs `main`.
 fn enter_deep_sleep(lpwr: LPWR, interval: CoreDuration) -> ! {
     park_scale();
+    sleep_for(Rtc::new(lpwr), interval)
+}
+
+/// Sleep the idle interval, which is the *night* one while it is dark.
+///
+/// Its own entry point rather than a flag on `enter_deep_sleep`, because only
+/// the idle cadence may be stretched: an active interval means a visitor is
+/// being watched, and a publish interval belongs to a node with no load cell at
+/// all. Deciding that from the duration passed in would have been a guess about
+/// intent; a separate function is the intent.
+///
+/// The clock is the coarse one in [`state::clock_ms`] -- re-anchored by every
+/// NTP sync and accruing sleep intervals in between -- and the window comes
+/// from [`solar`], so it follows the season with nothing to set twice a year.
+/// An unknown clock keeps the day cadence.
+fn sleep_idle(lpwr: LPWR, cfg: &Config) -> ! {
+    park_scale();
+    let now_ms = state::clock_ms();
+    let interval = cfg.idle_interval_at(now_ms);
+    if let Some(ms) = now_ms {
+        if interval != cfg.idle_interval() {
+            let (sunrise, sunset) = solar::sun(solar::day_of_year(ms));
+            info!(
+                "dark: {} min UTC, between sunset {} and sunrise {}",
+                solar::minute_of_day(ms),
+                sunset,
+                sunrise
+            );
+        }
+    }
+    sleep_for(Rtc::new(lpwr), interval)
+}
+
+fn sleep_for(mut rtc: Rtc<'static>, interval: CoreDuration) -> ! {
     info!("Entering deep sleep for {:?}", interval);
-    let mut rtc = Rtc::new(lpwr);
+    // Carried forward here rather than on waking, because here is where the
+    // length is known. `AWAKE_ESTIMATE_MS` covers the boot and the sampling
+    // that follow; it is measured rather than guessed -- the heartbeat spacing
+    // says the cycle runs 1.0 s longer than the interval asked for -- and a few
+    // percent of error on it only ever has one heartbeat to accumulate over.
+    state::advance_clock_ms(interval.as_millis() as u64 + AWAKE_ESTIMATE_MS);
     let wake = TimerWakeupSource::new(interval);
     rtc.sleep_deep(&[&wake]);
 }

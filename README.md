@@ -470,6 +470,9 @@ on / has just left the scale) and persists them. Changes therefore apply with a
 | `idle_interval`     | deep-sleep seconds while empty | battery |
 | `active_interval`   | deep-sleep seconds for a load that outlasted its awake visit window (snow, a twig) — a normal visit is watched awake and never uses this | battery |
 | `heartbeat_interval`| seconds between periodic temp + weight publishes with no visitor (default 600) | battery |
+| `night_interval`    | deep-sleep seconds between polls while it is dark, `0` to poll at `idle_interval` around the clock (default `0`) | battery |
+| `night_margin`      | minutes of daylight held clear at each end of the dark window (default 30) | battery |
+
 | `deep_sleep` (switch)  | `0` = stay awake with Wi-Fi up (bench testing on USB), `1` = sleep between rounds as the profile intends | any sleeping node |
 | `scd41_temp_offset` | °C the SCD41 subtracts for its own self-heating (default 4.0) | with SCD41 |
 | `sds011_kappa`      | κ for the PM humidity correction, `0` disables it (default 0.25) | with a compensated SDS011 |
@@ -491,7 +494,35 @@ On a blank flash the firmware falls back to built-in defaults
 (`src/config.rs` — `offset` mid-scale, `scale_factor` 420, `threshold` 10 g,
 2 s / 10 s idle/active intervals, 600 s heartbeat).
 
+**The night cadence (`night_interval`):**
+
+Birds do not feed in the dark, so every wake-up between dusk and dawn is the
+node confirming that nothing is happening. On `terrasse` that is some 5 400 of
+them a night, and the measured cost of a wake-up — boot, four HX711
+conversions, the sensor reads — is **1.0 s awake out of a 6.0 s cycle**. Setting
+`night_interval` to 300 s collapses those 5 400 into 72 and saves about **27 mAh
+a day, a fifth of the node's whole budget**, without losing a single visitor.
+
+The window is not configured. It is sunset to sunrise for the day, computed on
+the node from [`src/solar.rs`](src/solar.rs) — twenty-four points off the year's
+curve for this fixed location and a straight line between them, worst error two
+minutes. So it follows the season with nothing to edit twice a year, and there
+is no local-time-versus-UTC trap to fall into.
+
+`night_margin` is the one knob over it: how far inside the dark the window sits.
+The margin applies outward at both ends, because the two errors do not cost the
+same — opening too early loses visits that can never be recovered, closing too
+late costs a few minutes of polling.
+
+It needs the node to know roughly what time it is, which it learns from the NTP
+sync on every publish round and carries across deep sleep in RTC RAM (see
+[`state::clock_ms`](src/state.rs)). That clock is deliberately coarse and is
+never used for timestamps — `clock.rs` explains why a drifting clock makes a
+worse timestamp than none at all, and that argument is untouched. A node that
+has not synced since it last lost power simply polls at the day cadence.
+
 **Correcting the thermal zero drift (`temp_coeff`):**
+
 
 An outdoor scale's zero moves with the weather, and on the terrace node it moves
 far more than the load cell can account for: about **9.9 g/K**, roughly 1 % of

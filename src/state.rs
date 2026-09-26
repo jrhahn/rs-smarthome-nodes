@@ -52,8 +52,29 @@ static mut PRESENT_ROUNDS: u32 = 0;
 #[ram(rtc_fast, persistent)]
 static mut UNEXPLAINED_ROUNDS: u32 = 0;
 
+/// A coarse wall clock in milliseconds, kept across deep sleep as a pair of
+/// words because RTC RAM is addressed in `u32`.
+///
+/// Not read from any counter. It is *re-anchored* by every successful NTP sync
+/// -- which happens on every publish round, so at most ten minutes apart -- and
+/// between anchors it simply accrues the sleep intervals the node asked for.
+/// Bridging ten minutes that way is accurate to a few seconds, where reading
+/// the RTC counter would have meant reaching into esp-hal's clock internals for
+/// no better answer.
+///
+/// Zero means "never synced", and readers must treat it as unknown rather than
+/// as 1970. This is not a second timestamp source: `clock` explains why
+/// stamping a reading from a drifting clock is worse than not stamping it, and
+/// that argument stands. The only consumer is the night cadence, which asks an
+/// hour-wide question and tolerates minutes of error.
+#[ram(rtc_fast, persistent)]
+static mut CLOCK_MS_LO: u32 = 0;
+#[ram(rtc_fast, persistent)]
+static mut CLOCK_MS_HI: u32 = 0;
+
 /// Digest of the discovery messages last successfully announced from this
 /// board; see [`crate::discovery::announcement_tag`]. Zero means "nothing".
+
 
 #[ram(rtc_fast, persistent)]
 static mut DISCOVERY_TAG: u32 = 0;
@@ -176,6 +197,34 @@ pub fn set_present_rounds(value: u32) {
     unsafe { core::ptr::addr_of_mut!(PRESENT_ROUNDS).write(value) }
 }
 
+/// Anchor the coarse clock to a freshly synced wall time.
+pub fn set_clock_ms(millis: u64) {
+    unsafe {
+        core::ptr::addr_of_mut!(CLOCK_MS_LO).write(millis as u32);
+        core::ptr::addr_of_mut!(CLOCK_MS_HI).write((millis >> 32) as u32);
+    }
+}
+
+/// Carry the coarse clock forward by a stretch the node is about to spend, or
+/// just spent. A no-op while the clock is unknown -- advancing a zero would
+/// invent a time in 1970 and then keep it.
+pub fn advance_clock_ms(millis: u64) {
+    if let Some(now) = clock_ms() {
+        set_clock_ms(now.saturating_add(millis));
+    }
+}
+
+/// The coarse wall clock, or `None` if it was never set or has stopped being
+/// believable.
+pub fn clock_ms() -> Option<u64> {
+    let millis = unsafe {
+        (core::ptr::addr_of!(CLOCK_MS_HI).read() as u64) << 32
+            | core::ptr::addr_of!(CLOCK_MS_LO).read() as u64
+    };
+    crate::clock::is_plausible(millis).then_some(millis)
+}
+
+/// How many consecutive rounds the reading has been unexplained.
 /// How many consecutive rounds the reading has been unexplained.
 pub fn unexplained_rounds() -> u32 {
     unsafe { core::ptr::addr_of!(UNEXPLAINED_ROUNDS).read() }

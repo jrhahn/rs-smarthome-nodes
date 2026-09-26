@@ -61,7 +61,9 @@ use crate::sensors::{scale, scd41, sds011, sgp41, sht31, EntityDescriptor};
 /// rather than a missing sensor, and it earned its keep here.
 pub const MAX_ENTITIES: usize = 16;
 /// Upper bound on command entities (the calibration and tuning knobs).
-pub const MAX_CONTROLS: usize = 13;
+pub const MAX_CONTROLS: usize = 15;
+
+
 
 /// Room for one discovery payload. The longest today is ~390 B (a `number`
 /// control on a node with a last will and a long name); the headroom is for the
@@ -566,7 +568,29 @@ const BATTERY_CONTROLS: &[Control] = &[
         reads_back: true,
         spec: "\"min\":10,\"max\":86400,\"step\":10,\"unit_of_meas\":\"s\",\"mode\":\"box\",",
     },
+    // The night stretch. `0` is off, and is the default, so a node whose clock
+    // has never been set behaves exactly as it did before this existed.
+    Control {
+        component: "number",
+        key: "night_interval",
+        name: "Nacht-Intervall",
+        reads_back: true,
+        spec: "\"min\":0,\"max\":3600,\"step\":1,\"unit_of_meas\":\"s\",\"mode\":\"box\",",
+    },
+    // No hours to set: the window is sunset to sunrise for the day, from
+    // `solar`. This is how far inside the night it sits — which is the only
+    // part a person has an opinion about, and the only part that does not go
+    // stale as the season turns.
+    Control {
+        component: "number",
+        key: "night_margin",
+        name: "Nacht-Abstand zur Dämmerung",
+        reads_back: true,
+        spec: "\"min\":0,\"max\":180,\"step\":5,\"unit_of_meas\":\"min\",\"mode\":\"box\",",
+    },
 ];
+
+
 
 /// The knob every sleeping node gets, whatever it is powered from.
 ///

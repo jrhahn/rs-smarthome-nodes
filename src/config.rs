@@ -27,6 +27,7 @@ use esp_storage::FlashStorage;
 use heapless::String;
 
 use crate::sensors::{scd41, sds011};
+use crate::solar;
 
 /// Flash byte-offset of the config blob. Matches the `nvs` partition in
 /// espflash's default table; we only touch the first sector of it.
@@ -49,9 +50,12 @@ const MAGIC: u32 = 0x4449_5242;
 /// Bump when the on-flash layout changes. A version this code does not know
 /// reverts to defaults; the one version it does know how to read comes through
 /// [`Config::from_bytes`]'s migration instead — see [`V5_LEN`].
-const VERSION: u8 = 6;
-/// Serialised length: magic(4) + version(1) + pad(3) + twelve 4-byte fields + crc(4).
-const BLOB_LEN: usize = 4 + 4 + 4 * 12 + 4;
+const VERSION: u8 = 7;
+/// Serialised length: magic(4) + version(1) + pad(3) + fourteen 4-byte fields + crc(4).
+const BLOB_LEN: usize = 4 + 4 + 4 * 14 + 4;
+/// Where version 6 ended — the twelve fields up to the tare anchor.
+const V6_LEN: usize = 4 + 4 + 4 * 12 + 4;
+
 /// Where version 5 ended: the same header and the first ten fields, then its own
 /// CRC. Kept so a board that has been running since before the temperature
 /// compensation existed keeps its calibration across the upgrade. `offset` and
@@ -125,7 +129,28 @@ pub struct Config {
     /// new firmware there is no anchor, and the correction stays off however
     /// the coefficient is set.
     pub tare_temp_tenths: i32,
+    /// Deep-sleep seconds between polls during the night window, or `0` to poll
+    /// at the ordinary [`Config::idle_secs`] around the clock.
+    ///
+    /// The cheapest saving this node has left, because it costs nothing that
+    /// matters: birds do not feed in the dark, and every wake between dusk and
+    /// dawn is the node confirming that nothing is happening. At the measured
+    /// 6 s cycle and 1 s awake, a night at 5 s is some 5 400 wake-ups for no
+    /// information at all.
+    ///
+    /// It lengthens the *idle* cadence only. An active interval means a visitor
+    /// is being watched, which by definition is not the quiet night this is
+    /// about.
+    pub night_idle_secs: u32,
+    /// Daylight kept clear at each end of the night window, in minutes.
+    ///
+    /// The window itself is not stored: it is sunset and sunrise for the day,
+    /// from [`crate::solar`], so it follows the season without anyone editing
+    /// it twice a year. This is the one knob over it — how long after dusk the
+    /// node stops looking, and how long before dawn it starts again.
+    pub night_margin_min: u32,
 }
+
 
 /// `tare_temp_tenths` when no tare has recorded a temperature.
 ///
@@ -169,7 +194,16 @@ impl Config {
         // none: it would move a zero that was not drifting.
         temp_coeff_centi: 0,
         tare_temp_tenths: TARE_TEMP_UNKNOWN,
+        // Off, like every other opt-in here: a node whose clock has never
+        // been set must behave exactly as it did before this existed.
+        night_idle_secs: 0,
+        // Half an hour. Birds feed into dusk and start again before full
+        // light, so the window is the inside of the night rather than all of
+        // it; see `solar::is_night` for why the two errors do not cost the
+        // same.
+        night_margin_min: 30,
     };
+
 
     /// The presence threshold expressed in raw HX711 ticks, i.e. what `main`
     /// compares the load delta against. Clamped to at least 1 tick so a bad
@@ -183,7 +217,30 @@ impl Config {
         }
     }
 
+    /// The idle cadence for `hour`, which is the night one inside the window.
+    ///
+    /// `None` means the node does not know what time it is -- no successful NTP
+    /// sync since it last lost power -- and then it polls at the day cadence.
+    /// That is the safe direction to be wrong in: it costs current, where the
+    /// other way costs visitors.
+    pub fn idle_interval_at(&self, now_ms: Option<u64>) -> CoreDuration {
+        match now_ms {
+            Some(ms)
+                if self.night_idle_secs > 0
+                    && solar::is_night(
+                        solar::minute_of_day(ms),
+                        solar::day_of_year(ms),
+                        self.night_margin_min,
+                    ) =>
+            {
+                CoreDuration::from_secs(self.night_idle_secs.max(1) as u64)
+            }
+            _ => self.idle_interval(),
+        }
+    }
+
     pub fn idle_interval(&self) -> CoreDuration {
+
         CoreDuration::from_secs(self.idle_secs.max(1) as u64)
     }
 
@@ -203,8 +260,23 @@ impl Config {
     /// many empty-poll cycles, bring Wi-Fi up and publish temperature + weight
     /// even without a visitor. At least 1, so a misconfigured (tiny) interval
     /// still fires every cycle rather than never.
-    pub fn heartbeat_wakes(&self) -> u32 {
-        (self.heartbeat_secs / self.idle_secs.max(1)).max(1)
+    /// Whole wake-ups of `wake_secs` before the next heartbeat is due.
+    ///
+    /// Takes the interval rather than reading [`Config::idle_secs`], because
+    /// since the night cadence exists those two are not the same number. A
+    /// heartbeat counted in day-length rounds while the node sleeps night-length
+    /// ones stretches by exactly their ratio: 120 rounds is ten minutes at 5 s
+    /// and **ten hours** at 300 s. The node would go dark from dusk to dawn --
+    /// no temperature, no battery, no weight -- which is indistinguishable from
+    /// the outage this fleet spent two days chasing in September 2026.
+    pub fn heartbeat_wakes_at(&self, wake_secs: u32) -> u32 {
+        (self.heartbeat_secs / wake_secs.max(1)).max(1)
+    }
+
+    /// Seconds this round will sleep, night cadence included. The one number
+    /// every other "seconds to rounds" conversion in a round has to agree with.
+    pub fn wake_secs_at(&self, now_ms: Option<u64>) -> u32 {
+        self.idle_interval_at(now_ms).as_secs() as u32
     }
 
     /// Whether a `tare` payload is a fresh press rather than an echo of one
@@ -386,7 +458,23 @@ impl Config {
                     }
                 }
             }
+            // Seconds, like the other three intervals. `0` switches the night
+            // cadence off without disturbing the window beside it.
+            "night_interval" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.night_idle_secs = v;
+                }
+            }
+            // Minutes of daylight held clear either side of the dark window.
+            // `solar::is_night` clamps it too; doing it here as well means the
+            // stored value is the one the slider shows.
+            "night_margin" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.night_margin_min = v.min(180);
+                }
+            }
             "deep_sleep" => match value {
+
                 "1" | "true" | "on" | "ON" => self.deep_sleep = true,
                 "0" | "false" | "off" | "OFF" => self.deep_sleep = false,
                 _ => {}
@@ -414,10 +502,23 @@ impl Config {
         b[44..48].copy_from_slice(&self.sds011_kappa_centi.to_le_bytes());
         b[48..52].copy_from_slice(&self.temp_coeff_centi.to_le_bytes());
         b[52..56].copy_from_slice(&self.tare_temp_tenths.to_le_bytes());
-        let crc = crc32(&b[0..56]);
-        b[56..60].copy_from_slice(&crc.to_le_bytes());
+        b[56..60].copy_from_slice(&self.night_idle_secs.to_le_bytes());
+        b[60..64].copy_from_slice(&self.night_margin_min.to_le_bytes());
+        let crc = crc32(&b[0..64]);
+        b[64..68].copy_from_slice(&crc.to_le_bytes());
         b
     }
+
+    /// The two fields version 6 added on top of version 5's ten.
+    fn v6_extras(b: &[u8; BLOB_LEN], rest: Config) -> Option<Config> {
+        Some(Config {
+            temp_coeff_centi: i32::from_le_bytes(b[48..52].try_into().ok()?)
+                .clamp(-MAX_TEMP_COEFF_CENTI, MAX_TEMP_COEFF_CENTI),
+            tare_temp_tenths: i32::from_le_bytes(b[52..56].try_into().ok()?),
+            ..rest
+        })
+    }
+
 
     /// The ten fields versions 5 and 6 share, on top of whatever defaults the
     /// caller starts from. Split out so the migration and the current decoder
@@ -445,19 +546,28 @@ impl Config {
         }
         match b[4] {
             VERSION => {
-                if u32::from_le_bytes(b[56..60].try_into().ok()?) != crc32(&b[0..56]) {
+                if u32::from_le_bytes(b[64..68].try_into().ok()?) != crc32(&b[0..64]) {
                     return None;
                 }
-                Config::common_from_bytes(
-                    b,
-                    Config {
-                        temp_coeff_centi: i32::from_le_bytes(b[48..52].try_into().ok()?)
-                            .clamp(-MAX_TEMP_COEFF_CENTI, MAX_TEMP_COEFF_CENTI),
-                        tare_temp_tenths: i32::from_le_bytes(b[52..56].try_into().ok()?),
-                        ..Config::DEFAULT
-                    },
-                )
+                let rest = Config {
+                    night_idle_secs: u32::from_le_bytes(b[56..60].try_into().ok()?),
+                    night_margin_min: u32::from_le_bytes(b[60..64].try_into().ok()?).min(180),
+                    ..Config::DEFAULT
+                };
+                Config::common_from_bytes(b, Config::v6_extras(b, rest)?)
             }
+            // Version 6: everything it stored is still at the same offset, so
+            // the calibration *and* the thermal correction come through, and
+            // only the night cadence falls to its default -- which is off.
+            6 => {
+                if u32::from_le_bytes(b[V6_LEN - 4..V6_LEN].try_into().ok()?)
+                    != crc32(&b[0..V6_LEN - 4])
+                {
+                    return None;
+                }
+                Config::common_from_bytes(b, Config::v6_extras(b, Config::DEFAULT)?)
+            }
+
             // Version 5 in the sector, version 6 in the firmware: the board has
             // just been flashed with this change. Everything version 5 stored is
             // still at the same offset, so the calibration is read back and only
@@ -735,8 +845,23 @@ mod tests {
             sds011_kappa_centi: 62,
             temp_coeff_centi: -990,
             tare_temp_tenths: 191,
+            night_idle_secs: 300,
+            night_margin_min: 45,
         }
     }
+
+    /// [`sample`] as version 6 wrote it: twelve fields and a CRC at byte 56,
+    /// with the three ranges version 7 added left as the erase leaves them.
+    fn v6_bytes(cfg: Config) -> [u8; BLOB_LEN] {
+        let mut b = [0xFFu8; BLOB_LEN];
+        let v7 = cfg.to_bytes();
+        b[..V6_LEN - 4].copy_from_slice(&v7[..V6_LEN - 4]);
+        b[4] = 6;
+        let crc = crc32(&b[0..V6_LEN - 4]);
+        b[V6_LEN - 4..V6_LEN].copy_from_slice(&crc.to_le_bytes());
+        b
+    }
+
 
     /// The same settings as [`sample`], serialised the way version 5 wrote
     /// them: ten fields and a CRC at byte 48, with the two bytes ranges version
@@ -858,7 +983,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_version_6_sector_keeps_calibration_and_compensation() {
+        // The upgrade path that matters this time: a node that has been
+        // temperature-compensating for days must not lose its coefficient or,
+        // worse, its anchor — the pair is what makes the correction mean
+        // anything, and half of it would be silently wrong.
+        let old = sample();
+        let decoded = Config::from_bytes(&v6_bytes(old)).expect("version 6 is readable");
+        assert_eq!(decoded.offset, old.offset);
+        assert_eq!(decoded.scale_factor, old.scale_factor);
+        assert_eq!(decoded.temp_coeff_centi, old.temp_coeff_centi);
+        assert_eq!(decoded.tare_temp_tenths, old.tare_temp_tenths);
+        // And the night cadence comes up off, like every other opt-in.
+        assert_eq!(decoded.night_idle_secs, 0);
+    }
+
+    #[test]
+    fn a_corrupt_version_6_sector_is_still_rejected() {
+        let good = v6_bytes(sample());
+        for byte in 0..V6_LEN {
+            for bit in 0..8 {
+                let mut b = good;
+                b[byte] ^= 1 << bit;
+                assert!(
+                    Config::from_bytes(&b).is_none(),
+                    "bit {bit} of byte {byte} decoded despite corruption"
+                );
+            }
+        }
+    }
+
+    // --- Night cadence ------------------------------------------------------
+
+    #[test]
+    fn an_unknown_clock_keeps_the_day_cadence() {
+        // Costing current is the safe direction to be wrong in; costing
+        // visitors is not.
+        let cfg = Config {
+            night_idle_secs: 300,
+            idle_secs: 5,
+            ..Config::DEFAULT
+        };
+        assert_eq!(cfg.idle_interval_at(None), cfg.idle_interval());
+    }
+
+    #[test]
+    fn the_night_cadence_applies_only_inside_the_window() {
+        let cfg = Config {
+            night_idle_secs: 300,
+            night_margin_min: 30,
+            idle_secs: 5,
+            ..Config::DEFAULT
+        };
+        // 2026-09-26T00:00Z, where sunset is about 17:15 UTC and sunrise 05:15.
+        let midnight = 1_790_380_800_000u64;
+        assert_eq!(cfg.idle_interval_at(Some(midnight + 2 * 3_600_000)).as_secs(), 300);
+        assert_eq!(cfg.idle_interval_at(Some(midnight + 12 * 3_600_000)).as_secs(), 5);
+    }
+
+    #[test]
+    fn a_zero_night_interval_switches_the_whole_thing_off() {
+        let cfg = Config {
+            night_idle_secs: 0,
+            idle_secs: 5,
+            ..Config::DEFAULT
+        };
+        let midnight = 1_790_380_800_000u64;
+        for h in 0..24u64 {
+            assert_eq!(
+                cfg.idle_interval_at(Some(midnight + h * 3_600_000)).as_secs(),
+                5,
+                "{h}:00"
+            );
+        }
+    }
+
     // --- Temperature compensation -------------------------------------------
+
 
     #[test]
     fn no_coefficient_means_no_correction() {
@@ -1143,17 +1345,47 @@ mod tests {
     }
 
     #[test]
+    fn the_heartbeat_counts_in_the_rounds_actually_slept() {
+        // The defect this guards: at the night cadence the same heartbeat is
+        // due after the same *time*, not after the same number of wakes.
+        let cfg = Config {
+            heartbeat_secs: 600,
+            idle_secs: 5,
+            night_idle_secs: 300,
+            ..Config::DEFAULT
+        };
+        assert_eq!(cfg.heartbeat_wakes_at(5), 120);
+        assert_eq!(cfg.heartbeat_wakes_at(300), 2);
+        // Same elapsed time either way, which is the whole point.
+        assert_eq!(cfg.heartbeat_wakes_at(5) * 5, cfg.heartbeat_wakes_at(300) * 300);
+    }
+
+    #[test]
+    fn the_round_length_follows_the_night_cadence() {
+        let cfg = Config {
+            idle_secs: 5,
+            night_idle_secs: 300,
+            night_margin_min: 30,
+            ..Config::DEFAULT
+        };
+        let midnight = 1_790_380_800_000u64;
+        assert_eq!(cfg.wake_secs_at(Some(midnight + 2 * 3_600_000)), 300);
+        assert_eq!(cfg.wake_secs_at(Some(midnight + 12 * 3_600_000)), 5);
+        assert_eq!(cfg.wake_secs_at(None), 5);
+    }
+
+    #[test]
     fn heartbeat_wakes_is_at_least_one() {
         let mut cfg = Config::DEFAULT;
         // A zero interval would divide by zero; it clamps to one second, so the
         // heartbeat still lands on its configured period.
         cfg.idle_secs = 0;
-        assert_eq!(cfg.heartbeat_wakes(), cfg.heartbeat_secs);
+        assert_eq!(cfg.heartbeat_wakes_at(cfg.idle_secs), cfg.heartbeat_secs);
         cfg.idle_secs = 2;
         cfg.heartbeat_secs = 600;
-        assert_eq!(cfg.heartbeat_wakes(), 300);
+        assert_eq!(cfg.heartbeat_wakes_at(cfg.idle_secs), 300);
         cfg.heartbeat_secs = 1; // shorter than one wake
-        assert_eq!(cfg.heartbeat_wakes(), 1);
+        assert_eq!(cfg.heartbeat_wakes_at(cfg.idle_secs), 1);
     }
 
     #[test]
