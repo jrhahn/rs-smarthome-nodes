@@ -8,10 +8,19 @@ Why bother: in two years a step in a series is indistinguishable from a real
 change in the house. The terrace's weight jumped on 2026-09-09 because the scale
 was recalibrated, not because a heavier bird arrived, and nothing in the data
 says so. [`long-term-history.md`](long-term-history.md) argues the case at
-length; this file is the cheap half of it, kept by hand until the `annotations`
-table exists.
+length; this file is the cheap half of it.
 
-**One line per event.** Date, node, channel if it matters, what happened, and
+**The `annotations` table holds the same list, and the two are not rivals.**
+This file is where an event gets the paragraphs it needs — the evidence, what was
+ruled out, what it does to which channel. The table adds *where*: a note with a
+timestamp is drawn on the chart it explains, at the point it explains, which is
+where somebody actually asks. So an event worth a note gets both, and the short
+version in the table ends by pointing here. See
+[`questdb/annotations.rs`](../timeseries/src/questdb/annotations.rs) for the
+table itself, and note that its API needs a `from`/`to` range — without one a
+query comes back empty rather than unfiltered.
+
+**One entry per event.** Date, node, channel if it matters, what happened, and
 what it does to the data. Newest last, so the file reads forwards.
 
 ---
