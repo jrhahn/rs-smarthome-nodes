@@ -387,6 +387,17 @@ note on the visit counter's usable range above.
 
 **Re-taring is not the fix.** It resets the offset and the zero walks again by
 the next afternoon; recalibrating `temp_coeff` chases a coefficient that is
-itself moving while the spine creeps. The fix is mechanical — deepen `RAIL_T`,
-as the README says, and reprint the load-path parts in something that does not
-creep in the sun (PETG at the least, ASA better).
+itself moving while the spine creeps. The fix is mechanical.
+
+**What was done about it, 2026-09-27.** `RAIL_T` went from 14 to 20 mm in
+`models.py` — 2.9× the stiffness, about half the bending stress, and it grows
+downward into open air so the 4 mm clearance under the bar is untouched. The
+hanger goes from 19.9 to 27.6 cm³ and its counterbore from 10 to 16 mm deep; the
+bolt stays M5 × 16. `terrasse_beam_hanger.stl`/`.step` re-exported.
+
+**The reprint has not happened yet, so nothing below this line has changed in the
+data.** And the geometry is the smaller half: that spine was **PLA**, and the
+reprint wants PETG at the least, ASA for preference. Expect a step in `weight`
+when the part is swapped — it is a new mount, so it needs `scale_factor`
+re-checked in the fixture, then `temp_coeff` re-measured over a night, then a
+tare, in that order. Add an entry here when it happens.

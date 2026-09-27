@@ -623,14 +623,39 @@ print("terrasse body  %.1f cm3   floor %.1f cm3" % (
 ##      other, WIRE_X 61.5 mm away.
 ##
 ##      What follows from it is a cantilever in the load path, so the spine
-##      rather than the pad is the deep section: RAIL_T is 14 mm, and stiffness
+##      rather than the pad is the deep section: RAIL_T is 20 mm, and stiffness
 ##      goes with depth cubed. That is the constraint being met, and it is why
 ##      the spine is sized the way it is rather than trimmed to save filament.
 ##      Deflection here is not a safety question, it is an accuracy one: what
 ##      bends does not spring back exactly, and the difference shows up as
-##      hysteresis in the weight. If readings ever drift between a loaded and
-##      an unloaded pan, this section is the first thing to suspect -- deepen
-##      RAIL_T before touching anything in the firmware.
+##      hysteresis in the weight.
+##
+##      **It has already happened, and 14 mm was not enough.** RAIL_T was 14
+##      until 2026-09-27. Over three warm days the terrace zero walked from
+##      +1.4 g to -75.8 g, measured at matched air temperature so the
+##      reversible thermal part cancels out, and it did not come back in the
+##      evenings -- see the entry in `docs/annotations.md`. That is creep, not
+##      deflection: the part was printed in PLA, which yields under sustained
+##      load well below its glass transition, and a dark part in direct sun
+##      runs far hotter than the shaded air the SHT31 reads.
+##
+##      So two changes, and the second matters more than the first. 14 -> 20 mm
+##      is 2.9x the stiffness and, because bending stress goes with the square
+##      of the depth, roughly half the stress -- and creep rate falls much
+##      faster than linearly with stress. But **print this part and the spacer
+##      in PETG at the least, ASA for preference.** No RAIL_T survives PLA in
+##      August sun; the geometry only buys margin, the material decides whether
+##      there is any.
+##
+##      Growing RAIL_T is free in one direction and only one: the spine hangs
+##      *down* from RAIL_TOP into open air, so RAIL_GAP -- the clearance that
+##      keeps it off the bar, see (c) -- is untouched by this. What it does cost
+##      is a deeper counterbore (PAD_T - BOLT_BEARING, now 16 mm) and a longer
+##      wire hole, 20 mm of 3.4 mm bore to thread 3 mm wire through.
+##
+##      If the zero walks again on a part that is not PLA, come back here before
+##      touching anything in the firmware -- no `temp_coeff` corrects a mount
+##      that does not return to its own zero.
 ##   c) Nothing but the bar may bridge the two clamps. Only the hanger's pad
 ##      touches the bar; the spine runs RAIL_GAP clear of it for its whole
 ##      length. Touch anything and the load path goes around the strain gauges:
@@ -644,8 +669,12 @@ print("terrasse body  %.1f cm3   floor %.1f cm3" % (
 ## counterbore ceilings, 112.9 mm² of bridge over a 5.3 mm hole, which is what
 ## every counterbore printed face-down does. No support anywhere.
 ##
-## The pad ends up 18 mm thick, so the M5 has to span BOLT_BEARING of pad plus
-## the bar's thread: M5x16, not M5x12.
+## The pad ends up 24 mm thick, and the bolt is **still M5x16** -- the pad's
+## thickness does not set it. What the M5 has to span is BOLT_BEARING of pad plus
+## the bar's thread; the counterbore swallows everything above that, so it
+## deepens with RAIL_T instead of asking for a longer bolt. (M5x12 would not
+## reach, which is the part worth remembering.) The counterbore is 16 mm deep at
+## 10 mm across, so the 4 mm key needs that much reach.
 
 # --- the bar, as measured --------------------------------------------------
 BEAM_L = 80.0                    # the bar's overall length
@@ -661,7 +690,7 @@ CLAMP_EDGE = 5.0                 # material beyond the outermost screw centre
 SPACER_H = 10.0
 HANGER_W = 18.0                  # hanger is wider: the M5 counterbores need it
 BOLT_BEARING = 8.0               # pad material left above the counterbore
-RAIL_T, RAIL_GAP = 14.0, 4.0     # spine thickness, and its free air under the bar
+RAIL_T, RAIL_GAP = 20.0, 4.0     # spine thickness, and its free air under the bar
 WIRE_EDGE = 6.0                  # material beyond the wire hole at the free end
 CBORE_D, CBORE_H = 8.0, 4.0      # M4/M5 cap-head counterbore
 WIRE_D = 3.4                     # 3 mm wire, plus clearance
@@ -732,11 +761,16 @@ display(spacer)
 _export(spacer, "terrasse_beam_spacer")
 
 # ---------------------------------------------------------------------------
-# Hanger — the wire hangs between the bolts, on a pad that carries everything
+# Hanger — bolts at one end, wire at the other, spine carrying between them
 # ---------------------------------------------------------------------------
-# The pad is the whole load path: wire in the middle, two bolts either side,
-# 15 mm apart. Nothing between them bends, so nothing is lost there. The spine
-# behind it reaches the bar's full 80 mm and carries no load at all.
+# These three lines used to describe the retired clamps -- "the wire hangs
+# between the bolts, on a pad that carries everything", and the spine "carries no
+# load at all". That was true of the pair `f858d60` removed, which put the wire
+# 27.5 mm from its own screws. It is the opposite of this part, where the wire is
+# WIRE_X 61.5 mm past the bolts and every newton of it is carried by the spine as
+# bending. Worth correcting rather than deleting: read the other way round, the
+# note invites someone to trim the one section that must not be trimmed, and the
+# zero walking off in September 2026 is what that costs.
 _pad_x0 = LOAD_X - BEAM_PITCH / 2 - CLAMP_EDGE
 _pad_x1 = LOAD_X + BEAM_PITCH / 2 + CLAMP_EDGE
 

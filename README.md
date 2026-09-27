@@ -327,11 +327,23 @@ a requirement — it is where the feeder hangs — and the section is dimensione
 for it rather than around it.
 
 What follows is a cantilever in the load path, which is why the **spine** is the
-deep part at 14 mm and not the pad: stiffness goes with depth cubed. Deflection
+deep part at 20 mm and not the pad: stiffness goes with depth cubed. Deflection
 here is an accuracy problem rather than a strength one — what bends does not
 spring back exactly, and that shows up as hysteresis in the weight. If readings
 ever differ between a loaded and an unloaded pan, deepen `RAIL_T` before
 suspecting anything in the firmware.
+
+**`RAIL_T` was 14 mm until 2026-09-27, and that was not enough.** Over three warm
+days the terrace zero walked from +1.4 g to −75.8 g at matched air temperature and
+did not return overnight — creep in the printed spine, not deflection. See
+[`docs/annotations.md`](docs/annotations.md). 20 mm is 2.9× the stiffness and, since
+bending stress goes with the square of the depth, about half the stress. It grows
+*downward* into open air, so the 4 mm clearance below is untouched.
+
+**The material matters more than the number.** That spine was PLA, which yields
+under sustained load far below its glass transition, and a dark part in direct sun
+runs well above the shaded air the SHT31 reads. **Print the hanger and the spacer
+in PETG at the least, ASA for preference.** No `RAIL_T` survives PLA in August sun.
 
 > **Nothing but the bar may bridge the two clamps.** Only the hanger's pad
 > touches the bar; the spine runs 4 mm clear of it along its whole length and
@@ -343,7 +355,11 @@ suspecting anything in the firmware.
 proud of it, so there is one flat face across all 80 mm and a single 4 mm step
 on top — a step *up*, overhanging nothing. The only downward faces off the bed
 are the two counterbore ceilings, 112.9 mm² of bridge over a 5.3 mm hole. No
-support. The pad is 18 mm thick as a result, so the bolts want to be **M5 × 16**.
+support. The pad is 24 mm thick as a result, and the bolts are **still M5 × 16** —
+the counterbore swallows whatever the pad gains, so it deepens with `RAIL_T`
+instead of asking for a longer bolt. What the M5 spans is the 8 mm of
+`BOLT_BEARING` plus the bar's thread, which is why M5 × 12 does not reach. The
+counterbore is now 16 mm deep at 10 mm across, so bring a hex key with the reach.
 
 Calibrate in the fixture: `scale_factor` is what absorbs whatever the mounting
 does to the sensitivity.
