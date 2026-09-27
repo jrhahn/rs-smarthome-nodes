@@ -301,3 +301,83 @@ None of that is a Wi-Fi or broker problem, which is what it will look like.
 
 **Not affected:** `bad`, `kueche` and `schlafzimmer`, which published normally
 throughout. And nothing before 10:39:41 or after 21:49:28 on either node.
+
+## 2026-09-25 21:13 — terrasse — `visits` only becomes trustworthy the next day
+
+`aaebba2` gave `Decision::Unexplained` a way out. Before it, a delta too large
+for the drift band and too small for a visit froze the presence baseline
+permanently, and the node counted nothing until someone tared it — it sat that
+way for thirty-two hours from 2026-09-22.
+
+So **`terrasse/visits` before 2026-09-26 understates reality badly**: 2–6 a day
+through 2026-09-17…25 is a mostly blind node, against 53 and 32 on the two days
+after the fix. Do not use the earlier figures as a baseline for "normal", and do
+not read the jump as birds discovering the feeder.
+
+The 94–165 a day of 2026-09-13…15 are not a usable comparison either, from the
+other direction: that is a different counter state entirely, ending in the RTC
+garbage of 2026-09-16 (reading 622, then reset to 3 — see the 2026-09-12 entry).
+
+The two days that *are* trustworthy look like a bird feeder should: nothing
+overnight, first counts around 08 h, a peak late morning, tapering through the
+afternoon, and visit durations spread smoothly from 0.0 s to 22.9 s rather than
+piled against the 1 s floor (`presence::MIN_COUNTED_VISIT_MILLIS`).
+
+## 2026-09-26 onward — terrasse — `weight`: the zero walks down every hot afternoon
+
+The terrace zero no longer comes back. Through each warm afternoon the published
+weight ramps down by tens of grams, and in the evening — as the air cools back
+through the temperature it started at — **it stays down**. Measured at matched
+air temperature (18–20 °C), so the reversible thermal part cancels out:
+
+| | zero at 18–20 °C | change |
+|---|---|---|
+| 2026-09-24 | +1.4 g | — |
+| 2026-09-25 | −19.5 g | −20.9 g |
+| 2026-09-26 | −26.0 g | −6.4 g |
+| 2026-09-27 | −75.8 g | −49.9 g |
+
+On 2026-09-27 it fell from −33 g at 10 h MESZ to a plateau of −97 g by 20 h,
+the steepest hour being −20 g/h at 15 h.
+
+**This is not the thermal correction failing.** `temp_coeff` is doing its job,
+and the night of 26→27 proves it: the published weight sat flat at −32 ±1 g
+while the air moved 12.3 → 16.6 °C and the reconstructed raw reading moved −54
+→ −100 g. It removes something like 95 % of a 9.9 g/K mount. Nor is the
+afternoon ramp thermal in the first place, because a temperature effect is
+reversible by definition and this one is not: the air peaked at 28.7 °C at 15 h
+and was back to 19.4 °C by 22 h while the weight went on falling. At 19.4 °C
+against a 19.0 °C anchor the correction is +3.5 g, i.e. nothing — so the −97 g
+is the **raw** zero, with no temperature left in it to subtract.
+
+**It is the mount, and the likely mechanism is PLA creep.** `e873226` already
+identified the printed clamps as the source of the 9.9 g/K; what is new is that
+they now yield *permanently* when warm. The load path runs through a cantilever
+— the hanger's spine — and the entry for `terrasse_beam_hanger` in the README
+predicts this exact failure: "what bends does not spring back exactly, and that
+shows up as hysteresis in the weight." PLA under sustained load softens far
+below its glass transition, and a dark printed part in direct sun runs well
+above the shaded air the SHT31 reads. That the daily step is growing
+(−6 g, then −50 g) is what creep does, and it is why this will not settle on its
+own.
+
+**What it does to the data.** Absolute grams from 2026-09-25 onward are not
+comparable between days, and within a hot afternoon not comparable between
+hours. What survives is *differences over seconds* — the weight of a bird on the
+cell, since `presence` works against a baseline that tracks — so `visit` and the
+arrival logic are sound even where the absolute number is meaningless.
+
+**`visits` is not affected.** Worth stating because the counter jumps from 2–6 a
+day to 53 and 32 exactly here, which looks like the drift manufacturing arrivals.
+It is not: the counts are *anti*-correlated with the ramp — zero counted in every
+hour past 15 h on 2026-09-27, which is where the drift is steepest — and a
+monotonically falling reading cannot produce an `Arrived` at all, because
+`delta = raw − baseline` stays negative while the baseline follows it down. The
+jump is the `Unexplained` freeze being fixed on 2026-09-25 21:13 (`aaebba2`); see the
+note on the visit counter's usable range above.
+
+**Re-taring is not the fix.** It resets the offset and the zero walks again by
+the next afternoon; recalibrating `temp_coeff` chases a coefficient that is
+itself moving while the spine creeps. The fix is mechanical — deepen `RAIL_T`,
+as the README says, and reprint the load-path parts in something that does not
+creep in the sun (PETG at the least, ASA better).

@@ -542,9 +542,21 @@ presence comparison and the drift-tracked baseline alike, so all three keep
 describing the same scale. It needs two things and does nothing without both:
 
 1. **A coefficient.** Let the node sit through a temperature swing with nothing
-   on it, then divide the published grams by the kelvin between them. Sign
-   included — the terrace zero goes *down* as it cools, so its coefficient is
-   negative. Enter it in the *Temperaturgang* number.
+   on it, then divide the published grams by the kelvin between them, and enter
+   that number — sign and all — in the *Temperaturgang* number.
+
+   The sign is the grams the *reading* rises per kelvin of **warming**, because
+   that is what the correction subtracts. The terrace zero goes *down* as it
+   cools, so it goes up as it warms, so its coefficient is **positive**: about
+   `+9.9`. Which is exactly what dividing published grams by kelvin gives you —
+   enter the measurement as measured and the sign takes care of itself. A mount
+   that pulls the other way gets a negative one, which is why the field is
+   signed at all.
+
+   Getting it backwards does not merely fail to correct: `corrected = raw −
+   (air − tare_temp) × temp_coeff` with the sign inverted *doubles* the drift,
+   to some 20 g/K on this mount. The check is a night — a correct coefficient
+   leaves the published weight flat while the air moves several kelvin.
 2. **An anchor.** The correction measures drift from the temperature the zero was
    taken at, and only a tare records one. So **set the coefficient first, then
    tare** — until a tare has happened under firmware that knows about the anchor,
