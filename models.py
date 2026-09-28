@@ -288,7 +288,7 @@ def _cyl(d, h, at=(0.0, 0.0, 0.0)):
 
 
 def _export(shape, stem):
-    """Write <stem>.stl and <stem>.step, both reproducible.
+    """Write <stem>.stl and <stem>.step, both reproducible *on one machine*.
 
     OpenCASCADE stamps the wall-clock time into the STEP header, so an
     unchanged model would show up as a diff on every run. The meshes are
@@ -299,6 +299,26 @@ def _export(shape, stem):
     is the same churn wearing a different hat: the four climate/wohnzimmer
     STEPs moved from `translator 7.9 4` to `... 6` when the two beam clamps
     were added ahead of them, with byte-identical meshes. Pin it too.
+
+    **The STEP is portable, the STL is not, and the difference matters when a
+    mesh turns up dirty.** Repeated runs in one environment agree byte for byte
+    -- that much was measured, three runs over all sixteen parts. Across OCCT
+    builds the *tessellation* can differ while the geometry does not:
+    `terrasse_floor.stl` has disagreed with this flake's toolchain since at
+    least 2026-09-18 in 232 of its 13198 triangles, over an identical set of
+    6576 vertices, all of them on the five 45 deg conical faces -- the four
+    screw counterbores at (+-36, +-31) and the cable chamfer at (-34, 20).
+    A cone is meshed as rings of quads, splitting each quad into two triangles
+    takes a diagonal, and which diagonal is a tie the builds break differently.
+    Same points, same count, same solid; the part slices and prints identically.
+
+    So when `git status` shows a mesh after a run: **diff the STEP first.** It
+    is exact rather than tessellated, and it was byte-identical across both
+    environments here for all sixteen parts. A quiet STEP beside a noisy STL is
+    this, and the mesh can simply be committed. A STEP that moved too is a real
+    geometry change, and then the question is what moved and why.
+
+    Nothing in CI runs this file, so neither kind is caught automatically.
     """
     exporters.export(shape, str(path_save / (stem + ".stl")))
     step = path_save / (stem + ".step")
