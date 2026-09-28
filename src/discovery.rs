@@ -63,8 +63,6 @@ pub const MAX_ENTITIES: usize = 16;
 /// Upper bound on command entities (the calibration and tuning knobs).
 pub const MAX_CONTROLS: usize = 15;
 
-
-
 /// Room for one discovery payload. The longest today is ~390 B (a `number`
 /// control on a node with a last will and a long name); the headroom is for the
 /// device block, which grows with the node's name. An over-long payload is
@@ -368,7 +366,11 @@ fn write_device(p: &mut Payload, node: &NodeConfig) -> core::fmt::Result {
     write!(
         p,
         "\"dev\":{{\"ids\":[\"{}\"],\"name\":\"{}\",\"mf\":\"{}\",\"mdl\":\"{}\",\"sw\":\"{}\"",
-        node.id, node.name, MANUFACTURER, MODEL, crate::FW_VERSION
+        node.id,
+        node.name,
+        MANUFACTURER,
+        MODEL,
+        crate::FW_VERSION
     )?;
     // `cns` is Home Assistant's abbreviation for `connections`, and a `mac`
     // entry is what puts the board's address on its device page. Omitted rather
@@ -589,8 +591,6 @@ const BATTERY_CONTROLS: &[Control] = &[
         spec: "\"min\":0,\"max\":180,\"step\":5,\"unit_of_meas\":\"min\",\"mode\":\"box\",",
     },
 ];
-
-
 
 /// The knob every sleeping node gets, whatever it is powered from.
 ///
@@ -872,7 +872,10 @@ mod tests {
         // value arriving under `{{value_json.v}}` does not render as the number.
         for at in [None, Some(1_789_675_200_123)] {
             let payload = state_payload("-17.25", at).unwrap();
-            assert!(payload.starts_with('{') && payload.ends_with('}'), "{payload}");
+            assert!(
+                payload.starts_with('{') && payload.ends_with('}'),
+                "{payload}"
+            );
             serde_json::from_str::<serde_json::Value>(&payload).unwrap();
         }
     }
@@ -887,7 +890,11 @@ mod tests {
         assert_eq!(widest.len(), 16, "the value buffer is String<16>");
         let payload = state_payload(widest, Some(crate::clock::SANE_UNTIL_MS - 1))
             .expect("the widest payload must fit STATE_MAX");
-        assert!(payload.len() <= STATE_MAX, "{} bytes: {payload}", payload.len());
+        assert!(
+            payload.len() <= STATE_MAX,
+            "{} bytes: {payload}",
+            payload.len()
+        );
         serde_json::from_str::<serde_json::Value>(&payload).unwrap();
     }
 

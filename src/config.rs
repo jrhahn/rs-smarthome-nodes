@@ -151,7 +151,6 @@ pub struct Config {
     pub night_margin_min: u32,
 }
 
-
 /// `tare_temp_tenths` when no tare has recorded a temperature.
 ///
 /// A sentinel rather than an `Option` because the blob stores fixed-width
@@ -204,7 +203,6 @@ impl Config {
         night_margin_min: 30,
     };
 
-
     /// The presence threshold expressed in raw HX711 ticks, i.e. what `main`
     /// compares the load delta against. Clamped to at least 1 tick so a bad
     /// (zero/negative) calibration can never make everything look "present".
@@ -240,7 +238,6 @@ impl Config {
     }
 
     pub fn idle_interval(&self) -> CoreDuration {
-
         CoreDuration::from_secs(self.idle_secs.max(1) as u64)
     }
 
@@ -474,7 +471,6 @@ impl Config {
                 }
             }
             "deep_sleep" => match value {
-
                 "1" | "true" | "on" | "ON" => self.deep_sleep = true,
                 "0" | "false" | "off" | "OFF" => self.deep_sleep = false,
                 _ => {}
@@ -518,7 +514,6 @@ impl Config {
             ..rest
         })
     }
-
 
     /// The ten fields versions 5 and 6 share, on top of whatever defaults the
     /// caller starts from. Split out so the migration and the current decoder
@@ -862,7 +857,6 @@ mod tests {
         b
     }
 
-
     /// The same settings as [`sample`], serialised the way version 5 wrote
     /// them: ten fields and a CRC at byte 48, with the two bytes ranges version
     /// 6 added left as the flash erase leaves them.
@@ -1038,8 +1032,16 @@ mod tests {
         };
         // 2026-09-26T00:00Z, where sunset is about 17:15 UTC and sunrise 05:15.
         let midnight = 1_790_380_800_000u64;
-        assert_eq!(cfg.idle_interval_at(Some(midnight + 2 * 3_600_000)).as_secs(), 300);
-        assert_eq!(cfg.idle_interval_at(Some(midnight + 12 * 3_600_000)).as_secs(), 5);
+        assert_eq!(
+            cfg.idle_interval_at(Some(midnight + 2 * 3_600_000))
+                .as_secs(),
+            300
+        );
+        assert_eq!(
+            cfg.idle_interval_at(Some(midnight + 12 * 3_600_000))
+                .as_secs(),
+            5
+        );
     }
 
     #[test]
@@ -1052,7 +1054,8 @@ mod tests {
         let midnight = 1_790_380_800_000u64;
         for h in 0..24u64 {
             assert_eq!(
-                cfg.idle_interval_at(Some(midnight + h * 3_600_000)).as_secs(),
+                cfg.idle_interval_at(Some(midnight + h * 3_600_000))
+                    .as_secs(),
                 5,
                 "{h}:00"
             );
@@ -1060,7 +1063,6 @@ mod tests {
     }
 
     // --- Temperature compensation -------------------------------------------
-
 
     #[test]
     fn no_coefficient_means_no_correction() {
@@ -1357,7 +1359,10 @@ mod tests {
         assert_eq!(cfg.heartbeat_wakes_at(5), 120);
         assert_eq!(cfg.heartbeat_wakes_at(300), 2);
         // Same elapsed time either way, which is the whole point.
-        assert_eq!(cfg.heartbeat_wakes_at(5) * 5, cfg.heartbeat_wakes_at(300) * 300);
+        assert_eq!(
+            cfg.heartbeat_wakes_at(5) * 5,
+            cfg.heartbeat_wakes_at(300) * 300
+        );
     }
 
     #[test]

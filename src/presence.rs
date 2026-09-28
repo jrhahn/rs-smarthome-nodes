@@ -115,7 +115,6 @@ const _: () = assert!(STUCK_AFTER_SECS >= 120, "a bird may legitimately linger")
 /// something the node has already decided not to count.
 pub const UNEXPLAINED_ADOPT_AFTER_SECS: u32 = STUCK_AFTER_SECS;
 
-
 /// Whole rounds of `round_secs` needed to cover `secs`, at least one.
 ///
 /// Rounded up: the loop only wakes on its own cadence, so a budget between two
@@ -565,7 +564,6 @@ mod tests {
 
     #[test]
     fn the_drift_band_never_collapses_to_zero() {
-
         // A tiny threshold must not make every reading "creep" by making the
         // band round down to nothing.
         for threshold in [1, 2, 3, DRIFT_BAND_DIVISOR] {

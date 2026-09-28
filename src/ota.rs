@@ -896,7 +896,14 @@ mod tests {
         // number that is no longer running. Rolling back on that would undo a
         // deliberate flash.
         assert_eq!(
-            on_attempt(Some(Pending { seq: 4, attempts: 9 }), 7, MAX_ATTEMPTS),
+            on_attempt(
+                Some(Pending {
+                    seq: 4,
+                    attempts: 9
+                }),
+                7,
+                MAX_ATTEMPTS
+            ),
             Verdict::Nothing
         );
         assert_eq!(on_attempt(None, 7, MAX_ATTEMPTS), Verdict::Nothing);

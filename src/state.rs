@@ -75,7 +75,6 @@ static mut CLOCK_MS_HI: u32 = 0;
 /// Digest of the discovery messages last successfully announced from this
 /// board; see [`crate::discovery::announcement_tag`]. Zero means "nothing".
 
-
 #[ram(rtc_fast, persistent)]
 static mut DISCOVERY_TAG: u32 = 0;
 
@@ -235,7 +234,6 @@ pub fn set_unexplained_rounds(value: u32) {
     unsafe { core::ptr::addr_of_mut!(UNEXPLAINED_ROUNDS).write(value) }
 }
 
-
 /// Visits counted since the last full power loss, or zero if the stored pair
 /// does not agree -- which is what leftover RTC memory looks like.
 pub fn visit_count() -> u32 {
@@ -359,8 +357,7 @@ pub fn set_join_refusals(value: u32) {
 fn reset_state_is_ours() -> bool {
     unsafe {
         core::ptr::addr_of!(RESET_TAG).read() == crate::reset_reason::EPOCH_TAG
-            && core::ptr::addr_of!(RESET_COUNT).read()
-                <= crate::reset_reason::MAX_PLAUSIBLE_COUNT
+            && core::ptr::addr_of!(RESET_COUNT).read() <= crate::reset_reason::MAX_PLAUSIBLE_COUNT
     }
 }
 

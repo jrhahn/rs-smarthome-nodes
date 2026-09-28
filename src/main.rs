@@ -36,6 +36,7 @@ use core::time::Duration as CoreDuration;
 use embassy_executor::Spawner;
 use embassy_net::{tcp::TcpSocket, Config as NetConfig, Ipv4Address, Stack, StackResources};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embedded_hal::delay::DelayNs as _;
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
@@ -57,7 +58,6 @@ use esp_wifi::{
     },
     EspWifiController,
 };
-use embedded_hal::delay::DelayNs as _;
 use log::{info, warn};
 use rust_mqtt::{
     client::{client::MqttClient, client_config::ClientConfig},
@@ -68,8 +68,7 @@ use rust_mqtt::{
 use node::{NodeConfig, Provision};
 use rs_smarthome_nodes::{
     battery, clock, config, discovery, ds18b20, http, hx711, node, ntp, ota, platform, presence,
-    solar,
-    reset_reason, rssi, sensors::scale, state, wifi, FW_VERSION,
+    reset_reason, rssi, sensors::scale, solar, state, wifi, FW_VERSION,
 };
 
 use battery::Battery;
@@ -339,10 +338,7 @@ async fn main(spawner: Spawner) {
     );
     // Say where to reach this board if it needs to be told what it is; the MAC
     // is the only name it is sure of before provisioning.
-    info!(
-        "provision topic: {}",
-        node::provision_topic(node::mac())
-    );
+    info!("provision topic: {}", node::provision_topic(node::mac()));
     info!("firmware: {} on board {}", FW_VERSION, node::mac_string());
 
     // Which network? Credentials stored over the serial console win over the
@@ -972,32 +968,35 @@ async fn run_awake(
         // image that has not proved itself, and confirm it only once the broker
         // has actually been reached.
         let on_trial = ota_begin_attempt();
-        let drained =
-            match with_timeout(WIFI_BUDGET, publish_samples(stack, &mut samples, cfg, now_ms)).await
-            {
-                Ok(Ok(d)) => {
-                    if on_trial {
-                        ota_confirm();
-                    }
-                    d
+        let drained = match with_timeout(
+            WIFI_BUDGET,
+            publish_samples(stack, &mut samples, cfg, now_ms),
+        )
+        .await
+        {
+            Ok(Ok(d)) => {
+                if on_trial {
+                    ota_confirm();
                 }
-                Ok(Err(e)) => {
-                    warn!("publish failed: {}", e);
-                    Drained {
-                cfg,
-                tare: false,
-                offer: None,
+                d
             }
+            Ok(Err(e)) => {
+                warn!("publish failed: {}", e);
+                Drained {
+                    cfg,
+                    tare: false,
+                    offer: None,
                 }
-                Err(_) => {
-                    warn!("publish exceeded {:?}", WIFI_BUDGET);
-                    Drained {
-                cfg,
-                tare: false,
-                offer: None,
             }
+            Err(_) => {
+                warn!("publish exceeded {:?}", WIFI_BUDGET);
+                Drained {
+                    cfg,
+                    tare: false,
+                    offer: None,
                 }
-            };
+            }
+        };
         install_if_offered(stack, &drained).await;
 
         let updated = if drained.tare {
@@ -1563,7 +1562,10 @@ async fn install_if_offered(stack: &'static WifiStack, drained: &Drained) {
     };
     match run_update(stack, offer).await {
         Ok(seq) => {
-            info!("image written and selected (seq {}); restarting into it", seq);
+            info!(
+                "image written and selected (seq {}); restarting into it",
+                seq
+            );
             Timer::after(Duration::from_millis(200)).await;
             software_reset();
         }
@@ -1640,7 +1642,11 @@ fn ota_begin_attempt() -> bool {
                 active.target_slot()
             );
             match ota::roll_back(active) {
-                Ok(seq) => info!("selector points back at slot {} (seq {})", active.target_slot(), seq),
+                Ok(seq) => info!(
+                    "selector points back at slot {} (seq {})",
+                    active.target_slot(),
+                    seq
+                ),
                 Err(e) => warn!("rollback failed, and this node is now on its own: {}", e),
             }
             software_reset();
@@ -1730,7 +1736,10 @@ async fn sync_time(stack: &'static WifiStack) -> Option<u64> {
         // century — an era mistake, or a clock nobody ever set. Refused here so
         // it costs a timestamp rather than poisoning the history with one.
         Ok(millis) => {
-            warn!("time server gave an implausible {} ms; publishing unstamped", millis);
+            warn!(
+                "time server gave an implausible {} ms; publishing unstamped",
+                millis
+            );
             None
         }
         Err(why) => {
@@ -1957,7 +1966,12 @@ async fn publish_samples(
     let meta_topic = node.meta_topic();
     if let Some(payload) = board_meta(stack) {
         if client
-            .send_message(&meta_topic, payload.as_bytes(), QualityOfService::QoS0, true)
+            .send_message(
+                &meta_topic,
+                payload.as_bytes(),
+                QualityOfService::QoS0,
+                true,
+            )
             .await
             .is_err()
         {
@@ -2051,7 +2065,9 @@ async fn publish_samples(
         let taken_at = now_ms.map(|now| {
             clock::stamp(
                 now,
-                published_at.saturating_duration_since(sample.at).as_millis(),
+                published_at
+                    .saturating_duration_since(sample.at)
+                    .as_millis(),
             )
         });
         let topic = node.state_topic(sample.prefix, sample.reading.key);

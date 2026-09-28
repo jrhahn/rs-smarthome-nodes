@@ -25,12 +25,30 @@
 /// this file having to model either. They shift by seconds between years, which
 /// is four orders of magnitude below what the caller asks.
 const TABLE: [(u16, u16); 24] = [
-    ( 443,  935), ( 436,  954), ( 419,  978), ( 393, 1006),
-    ( 364, 1031), ( 332, 1055), ( 300, 1079), ( 268, 1102),
-    ( 238, 1127), ( 216, 1148), ( 201, 1166), ( 196, 1176),
-    ( 202, 1177), ( 217, 1165), ( 236, 1145), ( 258, 1119),
-    ( 280, 1088), ( 304, 1054), ( 327, 1021), ( 350,  990),
-    ( 375,  962), ( 399,  940), ( 423,  926), ( 438,  924),
+    (443, 935),
+    (436, 954),
+    (419, 978),
+    (393, 1006),
+    (364, 1031),
+    (332, 1055),
+    (300, 1079),
+    (268, 1102),
+    (238, 1127),
+    (216, 1148),
+    (201, 1166),
+    (196, 1176),
+    (202, 1177),
+    (217, 1165),
+    (236, 1145),
+    (258, 1119),
+    (280, 1088),
+    (304, 1054),
+    (327, 1021),
+    (350, 990),
+    (375, 962),
+    (399, 940),
+    (423, 926),
+    (438, 924),
 ];
 
 /// Minutes in a day, and the modulus every time-of-day here is taken in.
@@ -152,7 +170,10 @@ mod tests {
             assert!(s > r, "day {doy}: sunset {s} must follow sunrise {r}");
             // Darmstadt's shortest and longest days, with room to spare.
             let daylight = s - r;
-            assert!((7 * 60..=17 * 60).contains(&daylight), "day {doy}: {daylight} min");
+            assert!(
+                (7 * 60..=17 * 60).contains(&daylight),
+                "day {doy}: {daylight} min"
+            );
         }
     }
 

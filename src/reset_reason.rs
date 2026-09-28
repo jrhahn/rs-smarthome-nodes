@@ -176,7 +176,10 @@ mod tests {
     #[test]
     fn a_plausible_count_still_climbs() {
         let (_, count, _, _) = latch(EPOCH_TAG, MAX_PLAUSIBLE_COUNT - 1, 0, 0, 0x07);
-        assert_eq!(count, MAX_PLAUSIBLE_COUNT, "the bound must not clamp real history");
+        assert_eq!(
+            count, MAX_PLAUSIBLE_COUNT,
+            "the bound must not clamp real history"
+        );
     }
 
     #[test]
@@ -215,7 +218,10 @@ mod tests {
         // counter reset before FALLBACK_AFTER could ever be reached and the
         // protection against a mistyped passphrase never fired.
         let (_, _, _, refusals) = latch(EPOCH_TAG, 1, 21, 2, DEEP_SLEEP);
-        assert_eq!(refusals, 2, "a wake must not forgive the stored credentials");
+        assert_eq!(
+            refusals, 2,
+            "a wake must not forgive the stored credentials"
+        );
     }
 
     #[test]
@@ -237,7 +243,11 @@ mod tests {
     fn a_code_is_published_as_a_bare_integer() {
         let mut s = String::<16>::new();
         write_code(&mut s, 0x0F);
-        assert_eq!(s.as_str(), "15", "decimal, not hex — the archiver stores doubles");
+        assert_eq!(
+            s.as_str(),
+            "15",
+            "decimal, not hex — the archiver stores doubles"
+        );
     }
 
     #[test]
@@ -247,7 +257,11 @@ mod tests {
         // these two rely on that.
         for d in DESCRIPTORS {
             assert!(d.unit.is_empty(), "{} should have no unit", d.key);
-            assert!(d.device_class.is_empty(), "{} should have no device class", d.key);
+            assert!(
+                d.device_class.is_empty(),
+                "{} should have no device class",
+                d.key
+            );
         }
     }
 }

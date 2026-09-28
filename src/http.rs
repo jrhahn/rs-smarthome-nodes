@@ -212,10 +212,7 @@ where
     }
 
     loop {
-        let n = stream
-            .read(scratch)
-            .await
-            .map_err(|_| "http read failed")?;
+        let n = stream.read(scratch).await.map_err(|_| "http read failed")?;
         if n == 0 {
             break;
         }
@@ -298,8 +295,8 @@ mod tests {
 
     #[test]
     fn headers_are_case_insensitive_and_a_missing_length_is_not_fatal() {
-        let head = parse_head(b"HTTP/1.0 206 Partial Content\r\ncONTENT-lENGTH:  7 \r\n\r\n")
-            .unwrap();
+        let head =
+            parse_head(b"HTTP/1.0 206 Partial Content\r\ncONTENT-lENGTH:  7 \r\n\r\n").unwrap();
         assert_eq!(head.status, 206);
         assert_eq!(head.content_length, Some(7));
 
@@ -390,9 +387,7 @@ mod stream_tests {
         // The split that matters is one that cuts the header in half, and one
         // that puts head and body in the same read.
         for piece in [1usize, 7, 40, 4096] {
-            let mut response = Vec::from(
-                &b"HTTP/1.1 200 OK\r\nContent-Length: 36\r\n\r\n"[..],
-            );
+            let mut response = Vec::from(&b"HTTP/1.1 200 OK\r\nContent-Length: 36\r\n\r\n"[..]);
             response.extend_from_slice(BODY);
             let (got, _) = body_of(&response, piece, 0);
             assert_eq!(got, BODY, "piece size {piece}");
@@ -401,9 +396,8 @@ mod stream_tests {
 
     #[test]
     fn a_resumed_download_asks_for_a_range_and_insists_on_getting_one() {
-        let mut response = Vec::from(
-            &b"HTTP/1.1 206 Partial Content\r\nContent-Length: 6\r\n\r\n"[..],
-        );
+        let mut response =
+            Vec::from(&b"HTTP/1.1 206 Partial Content\r\nContent-Length: 6\r\n\r\n"[..]);
         response.extend_from_slice(b"uvwxyz");
         let (got, stream) = body_of(&response, 16, 30);
         assert_eq!(got, b"uvwxyz");
@@ -444,8 +438,7 @@ mod stream_tests {
     fn a_sink_that_refuses_stops_the_download() {
         // The writer refusing — a bad magic byte, a full slot — must end the
         // fetch rather than be swallowed.
-        let mut response =
-            Vec::from(&b"HTTP/1.1 200 OK\r\nContent-Length: 36\r\n\r\n"[..]);
+        let mut response = Vec::from(&b"HTTP/1.1 200 OK\r\nContent-Length: 36\r\n\r\n"[..]);
         response.extend_from_slice(BODY);
         let mut stream = Canned::new(&response, 4);
         let url = parse_url("http://192.168.1.67/f").unwrap();
