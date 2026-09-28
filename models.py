@@ -1503,8 +1503,12 @@ print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
 ##
 ##   wasserzaehler_tube    saddle that cradles the meter, and the barrel
 ##   wasserzaehler_strap   the other half of the clamp
-##   wasserzaehler_ring    drop-in carrier for the illumination LEDs
+##   wasserzaehler_bar     flat strip that holds the board down in the bay
 ##   wasserzaehler_cap     lens plate, camera pocket, and the board bay
+##
+## A fifth, `wasserzaehler_ring`, carried the illumination LEDs and was retired
+## in `0acf537` -- the board's own flash turned out to do the job. Its seat and
+## band are still in the barrel, deliberately; see the note further down.
 ##
 ## Two things about this section are exceptions, and both are deliberate.
 ##
@@ -1532,9 +1536,10 @@ print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
 ## capsule therefore stands upright and its dial looks horizontally out of the
 ## shaft, which puts the axis of this tube horizontal as well. Nothing in the
 ## assembly is held down by gravity: the board hangs off the back of a lying
-## tube, the LED ring stands on edge in its seat. Both need positive retention
-## and neither gets it from being put down carefully. Anything below that reads
-## as "it drops in" means "it is captured", never "it rests there".
+## tube, held by `wasserzaehler_bar` rather than by resting in its bay. It needs
+## positive retention and does not get it from being put down carefully.
+## Anything below that reads as "it drops in" means "it is captured", never "it
+## rests there".
 ##
 ## It also settles what "up" means, which is not a question this file can
 ## answer. Up in the picture is a rotation about the tube axis, decided by
@@ -1550,9 +1555,9 @@ print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
 ##
 ## The last two are not caliper figures. They are ratios read off a square-on
 ## photograph and scaled by the 64 mm. Honest enough for framing -- nothing
-## here touches the window -- but they do not get to become tolerances, and
-## nothing below depends on them except the check that the LED ring does not
-## shade the window.
+## here touches the window -- but they do not get to become tolerances. Nothing
+## below depends on them at all any more: the one thing that did was the check
+## that the LED ring did not shade the window, and the ring is gone.
 ##
 ## The optics, which set the length. This is a measured focus distance and no
 ## longer a computed framing. The draft that dimensioned this part at 62 mm
@@ -1643,10 +1648,20 @@ print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
 ##
 ## On the cap it is because the lens plate IS that face. It was not always: see
 ## the note at WU_CAP_FIT for the socket this replaced and the 4038 mm2 of
-## ceiling it cost. The strap and the ring print flat.
+## ceiling it cost. The strap and the bar print flat.
 ##
 ## PETG, not PLA. The clamp is under sustained load in a warm damp room and PLA
-## creeps; the rest of this file is PLA because nothing in it is a spring.
+## creeps.
+##
+## That reasoning was once written down here as "the rest of this file is PLA
+## because nothing in it is a spring", and the terrace disproved it on
+## 2026-09-27. `terrasse_beam_hanger` is no spring either -- it is a stiff
+## cantilever -- and it crept anyway, walking the scale's zero 77 g over three
+## warm days (`docs/annotations.md`). **Sustained load is the test, not
+## springiness**, and sunlight counts twice: a dark part in the sun runs far
+## above air temperature. The load-path parts of the terrace mount want PETG or
+## ASA for the same reason this clamp does. Boxes and lids can stay PLA -- they
+## hold their own weight and nothing else.
 
 WU_CAP_D = 64.0                  # measured, caliper, 2026-09-15
 WU_CLAMP_BORE = WU_CAP_D         # the two halves close ONTO this, not past it
