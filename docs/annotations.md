@@ -517,3 +517,32 @@ nothing else.
 permanent death into a visible restart. If a node starts reporting `0x100`
 regularly, that is the bug arriving in the archive where it can be read — which
 is the first time it will have been.
+
+## 2026-09-29 22:08 / 22:16 — bad, terrasse — the watchdog build, and what `boot_count` starts at
+
+`…-29a4d62` — the firmware that restarts a panicked node instead of leaving it
+dead, from the entry above — went on over the air:
+
+| | took it | `boot_count` after |
+| --- | --- | --- |
+| `bad` | 22:08 | **2** |
+| `terrasse` | 22:16 | **1** |
+
+**Neither number is a count of failures**, and that is the only thing here worth
+remembering. `boot_count` starts at 1 on the first boot of the first firmware
+that has it, because the flash record was blank until then. `bad` reads 2
+because it had already been updated once that evening — the 19:25 install of
+`38caeb5`, then this one. Read the *increments* from here, not the values.
+
+`reset_count` behaved differently on the two, which is worth knowing before it
+is read as a fault: `bad` came back with 1 and `terrasse` with 2, across the
+same kind of software reset. RTC RAM survives a restart only while the statics
+land at the same addresses, and that depends on the two images, not on the node.
+**`reset_count` is only meaningful between updates**; `boot_count` is the one
+that spans them.
+
+The two were picked first on purpose. They are the nodes the fix is *for* —
+`bad` has stopped four times in a fortnight and `terrasse` twice, and on the
+terrace a power cycle means a ladder. `wohnzimmer`, `schlafzimmer` and `kueche`
+carry the same defect and have not yet been bitten by it, so they wait for these
+two to run a night.

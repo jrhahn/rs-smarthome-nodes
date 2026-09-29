@@ -411,6 +411,23 @@ directory — rather than off a laptop, which changes three things:
   refused the request".
 - **Nothing depends on a laptop being open**, or on a hole in its firewall.
 
+### What it costs a cell, measured
+
+Asked as a known unknown above and answered on 2026-09-29, when `terrasse` took
+`terrasse-29a4d62` over the air. Its `battery_voltage`, one reading every ten
+minutes across the update:
+
+```
+19:19 … 20:10   3.98 V
+20:16           3.98 V   <- the round that fetched, wrote and restarted
+20:26 … 20:36   3.98 V
+```
+
+Nothing measurable, at 10 mV of resolution. That is not "free" — it is "below
+what this node can see", which for the question the doc was asking (is a battery
+node ever allowed to do this?) is the same answer. 778 KB, 190 erase-and-write
+cycles with the radio up, and the cell did not move a step.
+
 Two firsts worth separating. `bad` was the first node updated **through the
 deep-sleep path** — `wohnzimmer` is a mains node and had only ever exercised the
 stay-associated loop — and it was done to a board on a bathroom wall, out of
