@@ -118,6 +118,21 @@ const FLAG_PRESENT: u32 = 1 << 1;
 /// removing power clears them. So a board that has already booted once will not
 /// re-open the console window just because you flashed it.
 const FLAG_BOOTED: u32 = 1 << 3;
+/// Set by [`crate::panic_reset`] on its way out, so the boot that follows can
+/// say *why* it restarted itself. Without it a panic is reported as a plain
+/// software reset, which is also what an over-the-air update looks like -- and
+/// the two want very different reactions.
+const FLAG_PANICKED: u32 = 1 << 4;
+
+/// Whether the last restart was this firmware giving up on itself.
+pub fn panicked() -> bool {
+    flags() & FLAG_PANICKED != 0
+}
+
+/// Record that it was, or that it has been reported.
+pub fn set_panicked(value: bool) {
+    set_flag(FLAG_PANICKED, value);
+}
 
 fn flags() -> u32 {
     // Single-word reads/writes of a `Persistable` primitive; no other execution

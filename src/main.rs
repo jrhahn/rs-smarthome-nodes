@@ -40,14 +40,16 @@ use embedded_hal::delay::DelayNs as _;
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
+    config::WatchdogStatus,
     delay::Delay,
     efuse::Efuse,
     gpio::{GpioPin, Input, Level, Output, OutputOpenDrain, Pull},
-    peripherals::{LPWR, RADIO_CLK, RNG, TIMG1, WIFI},
+    peripherals::{LPWR, RADIO_CLK, RNG, TIMG0, TIMG1, WIFI},
     reset::software_reset,
     rng::Rng,
     rtc_cntl::{sleep::TimerWakeupSource, Rtc},
-    timer::timg::TimerGroup,
+    time::Duration as HalDuration,
+    timer::timg::{TimerGroup, Wdt},
     usb_serial_jtag::UsbSerialJtag,
 };
 use esp_wifi::{
@@ -227,6 +229,19 @@ const HX711_TIMEOUT: Duration = Duration::from_millis(500);
 /// happens before this window, so a slow sensor never eats into it.
 const WIFI_BUDGET: Duration = Duration::from_secs(20);
 
+/// How long the executor may stop running before the board is restarted.
+///
+/// Fed by [`feed_watchdog`] while anything is still being polled, so what this
+/// actually measures is "the executor has stopped making progress" -- a
+/// deadlock, a blocking loop, a driver that never returns. A panic does not go
+/// through here at all; it has [`custom_halt`].
+const WATCHDOG_SECS: u64 = 60;
+
+/// How often the watchdog is fed. Well inside [`WATCHDOG_SECS`], so a single
+/// missed turn is not a reboot: what should trigger it is the executor stopping
+/// altogether, not one task running long.
+const WATCHDOG_FEED_SECS: u64 = 5;
+
 /// How long to wait for the MQTT DISCONNECT and the TCP FIN to actually leave
 /// the board at the end of a round. Short on purpose: the readings are already
 /// out by then, so this only buys a tidy shutdown, and it is spent inside
@@ -288,6 +303,56 @@ struct Radio {
     wifi: WIFI,
 }
 
+/// Where a panic or a CPU exception ends up, because `esp-backtrace` is built
+/// with `custom-halt`.
+///
+/// Its own handler spins here instead — `loop { continue; }` — which on a board
+/// with no watchdog armed means the node is gone until someone removes power.
+/// That is the failure this replaces: four silences on `bad` in a fortnight and
+/// two on `terrasse` before it, each one a board with its power LED lit, off
+/// the air, reporting nothing afterwards because nothing had reset.
+///
+/// Restarting is not a fix for whatever panicked. It converts an invisible
+/// permanent death into a visible restart: `reset_reason` publishes
+/// [`reset_reason::PANIC`], `boot_count` in flash counts it, and the node is
+/// back on the air in a minute rather than waiting for someone to walk into the
+/// bathroom. A board that panics every round becomes a board that reboots every
+/// round, which is loud — and loud is the point.
+///
+/// The backtrace has already been printed by the time this runs; anyone with a
+/// cable in the port still gets it.
+#[cfg(feature = "hal")]
+#[no_mangle]
+extern "Rust" fn custom_halt() -> ! {
+    // Before the reset, because the reset is what erases the evidence. RTC RAM
+    // survives a software reset; it is the only store that both survives and
+    // can be written from a panic context, where nothing may allocate, lock or
+    // await.
+    state::set_panicked(true);
+    software_reset();
+    // `software_reset` is typed as returning, and does not. The loop is here to
+    // satisfy `-> !` and is the one place in this firmware where spinning is
+    // correct: the reset is already in flight.
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Feed the watchdog for as long as the executor is still turning.
+///
+/// A task rather than a call in the round loop, and that is deliberate: what
+/// this proves is that the executor runs, not that one particular loop does. A
+/// node stuck in an await that never completes still has an executor, and it
+/// still deserves to be restarted -- a board waiting for ever on a bus that
+/// will not answer is no more use than one that has panicked.
+#[embassy_executor::task]
+async fn feed_watchdog(mut watchdog: Wdt<TIMG0>) {
+    loop {
+        watchdog.feed();
+        Timer::after(Duration::from_secs(WATCHDOG_FEED_SECS)).await;
+    }
+}
+
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
     // --- 1. HAL & async runtime --------------------------------------------
@@ -312,6 +377,25 @@ async fn main(spawner: Spawner) {
         // a win — half the clock means twice as long awake for the same work —
         // but the radio-idle stretches, which dominate a wake, still cost less.
         c.cpu_clock = CpuClock::Clock80MHz;
+
+        // Arm a watchdog. Every one of them is off by default -- esp-hal's
+        // `WatchdogConfig` derives `Default` and `WatchdogStatus::Disabled` is
+        // it -- and this firmware had been running that way, which is why a
+        // hang that was not a panic could only be ended by a person.
+        //
+        // **TIMG0 and not the RWDT**, and the difference is the whole design.
+        // The RWDT lives in the RTC domain, which stays powered through deep
+        // sleep, so arming it would reboot a sleeping node mid-sleep -- on a
+        // duty-cycled board that is most of its life. The TIMG watchdogs are in
+        // the digital domain, which deep sleep switches off, so this covers
+        // exactly the awake window and nothing else.
+        //
+        // Sixty seconds against a `WIFI_BUDGET` of twenty plus sampling and
+        // boot: generous enough that nothing legitimate reaches it, short
+        // enough that a hang costs a minute rather than a day. The longest
+        // legitimate stretch is an over-the-air write, measured at seventeen
+        // seconds end to end on 2026-09-17.
+        c.watchdog.timg0 = WatchdogStatus::Enabled(HalDuration::secs(WATCHDOG_SECS));
         c
     };
     let peripherals = esp_hal::init(hal_config);
@@ -321,7 +405,13 @@ async fn main(spawner: Spawner) {
 
     // TIMG0 drives the global Embassy executor (per the hardware spec).
     let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let watchdog = timg0.wdt;
     esp_hal_embassy::init(timg0.timer0);
+
+    // Spawned before anything else can block, because everything below this
+    // line is inside the watchdog's window -- including the console wait, which
+    // is two minutes on a board that cannot join.
+    spawner.must_spawn(feed_watchdog(watchdog));
 
     // Who am I? A provisioned identity in flash wins over the one this image was
     // built with. Must happen before any peripheral is touched: the sensor set
@@ -348,7 +438,15 @@ async fn main(spawner: Spawner) {
     // wake is the steady state and is dropped; anything else is latched in RTC
     // RAM so the next publish can carry it. See `reset_reason` for why this is
     // worth the two numbers.
-    let boot_code = reset_reason::code();
+    // A panic restarts the board through `custom_halt`, and the hardware calls
+    // that a software reset -- the same thing an over-the-air update is. The
+    // flag survives the reset in RTC RAM and is what tells them apart.
+    let boot_code = if state::panicked() {
+        state::set_panicked(false);
+        reset_reason::PANIC
+    } else {
+        reset_reason::code()
+    };
     state::note_reset(boot_code);
     // And once more where power cannot erase it. RTC RAM answers "what kind of
     // reset", flash answers "did it restart at all" -- and only the second

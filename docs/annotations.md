@@ -477,3 +477,43 @@ tag no longer matched and `latch` took its "not ours" branch. **Expect
 `reset_count` to restart at 1 after every over-the-air update** — which is one
 more reason the counter that answers "did it restart at all" had to live in
 flash.
+
+## 2026-09-29 — the whole fleet — why a hung node never came back
+
+Read alongside the `bad` entry above, which this explains, and the two
+`terrasse` silences in [`commissioning.md`](commissioning.md), which it explains
+too.
+
+Two things were true of every node in the house, and each was enough on its own:
+
+**No watchdog was armed.** `esp_hal::Config::default()` sets every one of
+`swd`, `rwdt`, `timg0` and `timg1` to `Disabled`, and `main` only ever set the
+CPU clock. Nothing on the chip could restart a stuck board.
+
+**A panic stopped rather than restarted.** `esp-backtrace` 0.14.2's panic
+handler and exception handler both end in `halt()` — `loop { continue; }`.
+
+So a panic or a CPU exception left the board spinning with its power LED lit,
+off the air, until somebody removed power. Which is exactly what was seen, and
+why `reset_reason` never had anything to report: **nothing had reset**. The
+counter was working; there was nothing to count. It also explains why the same
+failure appeared on `bad`, on mains, and on `terrasse`, on a battery — the one
+thing they share is the firmware.
+
+**From this firmware on**, a panic restarts the node and says so: `reset_reason`
+publishes `0x100`, which is not a hardware code, and `boot_count` in flash
+counts it. A hang that is not a panic is restarted by the TIMG0 watchdog after
+60 s and reports `0x07`. **A silence with nothing reported afterwards therefore
+means something new from here** — the two explanations it used to hide are now
+both loud.
+
+The watchdog is TIMG0 and deliberately not the RWDT: the RWDT lives in the RTC
+domain, which stays powered through deep sleep, so arming it would reboot a
+sleeping node mid-sleep — most of a duty-cycled board's life. TIMG is in the
+digital domain, which deep sleep switches off, so it covers the awake window and
+nothing else.
+
+**What this does not do is fix whatever panics.** It converts an invisible
+permanent death into a visible restart. If a node starts reporting `0x100`
+regularly, that is the bug arriving in the archive where it can be read — which
+is the first time it will have been.

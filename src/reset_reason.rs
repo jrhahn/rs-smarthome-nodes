@@ -14,8 +14,17 @@
 //! * a **brownout** cause means the supply collapses under radio load, which
 //!   for a cell reading 3.7 V would mean an aged cell rather than a flat one;
 //! * **nothing at all** across a silence means a true hang, with the watchdog
-//!   not firing either — the case that needs a power cycle, and the one we have
-//!   no explanation for yet.
+//!   not firing either — the case that needs a power cycle.
+//!
+//! That third case had no explanation until 2026-09-29, and the explanation was
+//! that neither half of it could have gone otherwise: **no watchdog was armed**
+//! — `esp_hal::Config::default()` disables all four and `main` only set the
+//! clock — and `esp-backtrace`'s panic and exception handlers both end in
+//! `halt()`, which is `loop { continue; }`. So any panic parked the board for
+//! ever, and nothing on the chip could end it. Both are fixed: see
+//! [`PANIC`] and `WATCHDOG_SECS` in `main`. A silence with nothing reported
+//! afterwards now means something new, because a panic reports [`PANIC`] and a
+//! hang reports `0x07`.
 //!
 //! Reported as the raw `SocResetReason` discriminant rather than a name: the
 //! MQTT archiver stores values as doubles, so a string would not survive the
@@ -123,7 +132,17 @@ const _: () = {
 /// | 0x12 | super watchdog |
 /// | 0x15 | USB UART reset — a host attached, e.g. `espflash` |
 /// | 0x16 | USB JTAG reset |
+/// | 0x100 | **panic** — not a hardware code; see [`PANIC`] |
 pub const POWER_ON: u32 = 0x01;
+
+/// Not a hardware code: this firmware restarting itself because it panicked.
+///
+/// Above every `SocResetReason` discriminant on purpose, so it cannot collide
+/// with one the hardware might start reporting. It exists because the reset
+/// itself is a software reset (`0x03`) and so is the one an over-the-air update
+/// performs -- and "the image is bad" and "the image is new" are not things to
+/// read from the same number.
+pub const PANIC: u32 = 0x100;
 
 /// Deep-sleep wake (`SocResetReason::CoreDeepSleep`). The expected cause on a
 /// battery node, hundreds of times between publishes, and the one worth

@@ -76,11 +76,19 @@ log = "0.4.22"
 # --- ESP32-C3 HAL & async runtime ---
 esp-hal = { version = "0.22.0", features = ["esp32c3"], optional = true }
 esp-hal-embassy = { version = "0.5.0", features = ["esp32c3"], optional = true }
+# `custom-halt` is the whole point of this dependency's configuration. Without
+# it both handlers end in `halt()` -- `loop { continue; }` -- and a panic or a
+# CPU exception parks the board for ever: powered, LED lit, no radio, and no
+# watchdog to rescue it, because none is armed either. That is not a theory; it
+# is what `bad` did four times in a fortnight and `terrasse` twice before it,
+# and it is why `reset_reason` never had anything to report. See `custom_halt`
+# in src/main.rs.
 esp-backtrace = { version = "0.14.2", features = [
     "esp32c3",
     "panic-handler",
     "println",
     "exception-handler",
+    "custom-halt",
 ], optional = true }
 esp-println = { version = "0.12.0", features = [
     "esp32c3",
