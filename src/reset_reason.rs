@@ -50,7 +50,62 @@ pub const DESCRIPTORS: &[EntityDescriptor] = &[
         device_class: "",
         state_class: "total_increasing",
     },
+    EntityDescriptor {
+        key: "boot_count",
+        name: "Kaltstarts",
+        unit: "",
+        device_class: "",
+        state_class: "total_increasing",
+    },
 ];
+
+/// Where the boot counter lives: inside the sector [`crate::ota`] already keeps
+/// its bookkeeping in, clear of the record at its start.
+///
+/// Flash rather than RTC RAM, and that is the entire point of this number. The
+/// counter beside it, `reset_count`, lives in RTC RAM, and RTC RAM does not
+/// survive a power cut long enough to matter -- so [`latch`] takes its
+/// "not ours" branch and the count starts again at 1 with the reason set to
+/// `POWER_ON`. Which is *exactly* the state a node that has simply been running
+/// quietly reports. The two cases that matter most cannot be told apart:
+///
+/// | what happened | reset_reason | reset_count |
+/// | --- | --- | --- |
+/// | nothing; it has been up for days | 1 | 1 |
+/// | the supply went away for an hour | 1 | 1 |
+///
+/// That cost an evening on `bad` in September 2026 -- four outages in two
+/// weeks, and no way to say from the archive whether the board had lost power
+/// or had stopped waking up. A number that survives power answers it by
+/// existing: if it has climbed, the board restarted; if it has not, the board
+/// never did, and whatever went wrong happened with the power still on.
+pub const BOOT_LOG_OFFSET: u32 = crate::ota::STATE_OFFSET + 0x100;
+
+/// `"BOOT"` little-endian.
+const BOOT_MAGIC: u32 = 0x544F_4F42;
+const BOOT_VERSION: u8 = 1;
+/// magic(4) + version(1) + pad(3) + count(4) + reason(4) + crc(4).
+pub const BOOT_LOG_LEN: usize = 20;
+
+/// Stop writing past this, and keep reporting it.
+///
+/// Every hard boot is a flash write, and the failure this number exists to
+/// describe -- a board restarting over and over -- is also the one that would
+/// wear the sector out. Ten thousand is far beyond any history worth reading
+/// (`bad` managed four in a fortnight) and far below what a sector will take,
+/// so the counter stops being written long before it stops being writable. The
+/// story is already told by then.
+pub const MAX_RECORDED_BOOTS: u32 = 10_000;
+
+// Same sector as the OTA bookkeeping, and it has to stay clear of the record at
+// its start: overlapping the two would trade one diagnostic for a node that
+// cannot roll back. Checked at build time rather than in a test, the way
+// `ota.rs` checks its own layout -- a wrong offset here is not something to
+// learn from a red test on a laptop.
+const _: () = {
+    assert!(BOOT_LOG_OFFSET > crate::ota::STATE_OFFSET + 64);
+    assert!(BOOT_LOG_OFFSET + BOOT_LOG_LEN as u32 <= crate::ota::STATE_OFFSET + crate::ota::SECTOR);
+};
 
 /// The codes worth recognising when reading the archive back. The full list is
 /// `esp_hal`'s `SocResetReason`; these are the ones this node can plausibly
@@ -143,6 +198,86 @@ pub const fn latch(
     match code {
         DEEP_SLEEP => (tag, count, latched, kept),
         _ => (tag, count.saturating_add(1), code, kept),
+    }
+}
+
+/// What this boot does to the flash counter: `None` when nothing should be
+/// written, `Some((count, reason))` when it should.
+///
+/// Pure, for the same reason [`latch`] is: the decision is testable on the host
+/// and the flash access is not. A deep-sleep wake writes nothing -- it is the
+/// steady state and happens every two minutes, which no sector should be asked
+/// to absorb.
+pub const fn record_boot(stored: Option<(u32, u32)>, code: u32) -> Option<(u32, u32)> {
+    if code == DEEP_SLEEP {
+        return None;
+    }
+    match stored {
+        // A blank or unreadable record is not a history. This boot is the first
+        // one that can be counted, which is the same rule `latch` uses.
+        None => Some((1, code)),
+        Some((count, _)) if count >= MAX_RECORDED_BOOTS => None,
+        Some((count, _)) => Some((count.saturating_add(1), code)),
+    }
+}
+
+/// Encode the counter for flash.
+pub fn encode_boot_log(count: u32, reason: u32) -> [u8; BOOT_LOG_LEN] {
+    let mut b = [0u8; BOOT_LOG_LEN];
+    b[0..4].copy_from_slice(&BOOT_MAGIC.to_le_bytes());
+    b[4] = BOOT_VERSION;
+    b[8..12].copy_from_slice(&count.to_le_bytes());
+    b[12..16].copy_from_slice(&reason.to_le_bytes());
+    let crc = crate::config::crc32(&b[0..16]);
+    b[16..20].copy_from_slice(&crc.to_le_bytes());
+    b
+}
+
+/// Decode it. `None` for a blank sector, an erased one, a stale version or a
+/// bad CRC -- all of which read as "no history", never as a wrong number.
+pub fn decode_boot_log(b: &[u8; BOOT_LOG_LEN]) -> Option<(u32, u32)> {
+    if u32::from_le_bytes([b[0], b[1], b[2], b[3]]) != BOOT_MAGIC || b[4] != BOOT_VERSION {
+        return None;
+    }
+    let crc = u32::from_le_bytes([b[16], b[17], b[18], b[19]]);
+    if crc != crate::config::crc32(&b[0..16]) {
+        return None;
+    }
+    let count = u32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+    if count == 0 || count > MAX_RECORDED_BOOTS {
+        return None;
+    }
+    Some((count, u32::from_le_bytes([b[12], b[13], b[14], b[15]])))
+}
+
+/// The counter as flash holds it, or `None` if the sector never held one.
+#[cfg(feature = "hal")]
+pub fn load_boot_log() -> Option<(u32, u32)> {
+    use embedded_storage::ReadStorage as _;
+    let mut b = [0u8; BOOT_LOG_LEN];
+    esp_storage::FlashStorage::new()
+        .read(BOOT_LOG_OFFSET, &mut b)
+        .ok()?;
+    decode_boot_log(&b)
+}
+
+/// Count this boot, if it is one worth counting. Call once, early, beside
+/// [`crate::state::note_reset`].
+///
+/// Deliberately best-effort: a node that cannot write this sector should still
+/// boot and publish. The number is a diagnostic, and a diagnostic that can stop
+/// a node from running is worse than no diagnostic.
+#[cfg(feature = "hal")]
+pub fn note_boot(code: u32) {
+    use embedded_storage::Storage as _;
+    let Some((count, reason)) = record_boot(load_boot_log(), code) else {
+        return;
+    };
+    if esp_storage::FlashStorage::new()
+        .write(BOOT_LOG_OFFSET, &encode_boot_log(count, reason))
+        .is_err()
+    {
+        log::warn!("could not record this boot; the counter will lag");
     }
 }
 
@@ -263,5 +398,54 @@ mod tests {
                 d.key
             );
         }
+    }
+
+    #[test]
+    fn a_deep_sleep_wake_never_touches_the_flash() {
+        // Every two minutes, for years. The sector would not survive being told
+        // about it, and there is nothing to tell: a wake is the steady state.
+        assert_eq!(record_boot(Some((7, POWER_ON)), DEEP_SLEEP), None);
+        assert_eq!(record_boot(None, DEEP_SLEEP), None);
+    }
+
+    #[test]
+    fn a_blank_sector_starts_the_history_at_one() {
+        assert_eq!(record_boot(None, POWER_ON), Some((1, POWER_ON)));
+    }
+
+    #[test]
+    fn every_other_boot_counts_and_records_why() {
+        assert_eq!(record_boot(Some((4, POWER_ON)), 0x07), Some((5, 0x07)));
+    }
+
+    #[test]
+    fn the_counter_stops_writing_before_it_wears_the_sector_out() {
+        // The failure this number describes -- a board restarting over and over
+        // -- is the one that would write most, so the write has to stop while
+        // the number still reads.
+        assert_eq!(
+            record_boot(Some((MAX_RECORDED_BOOTS, POWER_ON)), POWER_ON),
+            None
+        );
+        assert_eq!(
+            record_boot(Some((MAX_RECORDED_BOOTS - 1, POWER_ON)), POWER_ON),
+            Some((MAX_RECORDED_BOOTS, POWER_ON))
+        );
+    }
+
+    #[test]
+    fn the_blob_survives_a_round_trip() {
+        let bytes = encode_boot_log(42, 0x0F);
+        assert_eq!(decode_boot_log(&bytes), Some((42, 0x0F)));
+    }
+
+    #[test]
+    fn a_damaged_blob_reads_as_no_history_rather_than_a_wrong_number() {
+        let mut bytes = encode_boot_log(42, POWER_ON);
+        bytes[9] ^= 0xFF; // flip a byte of the count
+        assert_eq!(decode_boot_log(&bytes), None);
+        // An erased sector is all ones, a blank one all zeros; neither is ours.
+        assert_eq!(decode_boot_log(&[0xFF; BOOT_LOG_LEN]), None);
+        assert_eq!(decode_boot_log(&[0x00; BOOT_LOG_LEN]), None);
     }
 }

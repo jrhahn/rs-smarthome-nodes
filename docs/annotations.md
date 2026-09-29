@@ -401,3 +401,58 @@ reprint wants PETG at the least, ASA for preference. Expect a step in `weight`
 when the part is swapped — it is a new mount, so it needs `scale_factor`
 re-checked in the fixture, then `temp_coeff` re-measured over a night, then a
 tare, in that order. Add an entry here when it happens.
+
+## 2026-09-17 onward — bad — stops every few days, and it is not the power
+
+Four outages in a fortnight, all of them this node alone:
+
+| stopped | resumed | down | had run |
+| --- | --- | --- | --- |
+| 17.09 08:03:28Z | 08:45:32Z | 0.7 h | 63 h |
+| 20.09 17:02:36Z | 18:05:22Z | 1.0 h | 80 h |
+| 25.09 17:41:52Z | 20:17:46Z | 2.6 h | 120 h |
+| 28.09 19:39:25Z | 29.09, by hand | 21 h+ | 71 h |
+
+**Read the gaps as missing, not as flat.** Everything is absent — temperature,
+humidity, `rssi` — because the node is absent, and a chart drawn across them
+will interpolate a line through hours that were never measured.
+
+It stops mid-stride. The last rounds before each outage are indistinguishable
+from any other: the 120 s cadence holds to the final publish, RSSI sits at
+−59 dBm, the readings are flat. Afterwards the broker sees **nothing at all** —
+not a failed publish, not a connection attempt.
+
+**It is the node, not the house.** Through every one of those windows the other
+four published normally. Over the day of the last outage: `wohnzimmer` 1334
+rounds, `schlafzimmer` 1425, `kueche` 717, `bad` 83 and then silence.
+
+What has been ruled out, and by what:
+
+| | |
+| --- | --- |
+| broker, Wi-Fi, archiver | the other nodes publish straight through |
+| a watchdog reboot | reason `0x07` never reported, before or after |
+| a brownout | reason `0x0F` never reported |
+| loss of power at the board | **the red 3V3 LED is lit while it is dead** |
+| a mis-computed sleep | `publish_interval` is a constant 120 s for a node with no load cell; the seasonal night cadence never touches this path |
+| the HX711 pad hold | `park_scale` returns immediately when no scale is enabled |
+| condensation, showers | humidity moved 0.3 points in the six hours before the last one |
+
+Two possibilities survive, and **the archive cannot separate them**: the board
+is asleep and the RTC timer never fires, or it is awake and hung somewhere the
+watchdog does not reach. Deep sleep switches the watchdogs off, which is why the
+first would leave exactly this trace — powered, silent, no reset ever reported.
+
+**Why the existing counters could not answer it**, which is the lesson worth
+keeping: `reset_count` lives in RTC RAM, and an outage long enough to matter
+clears it, so `latch` starts again at 1 with the reason set to `POWER_ON` — the
+same pair a node reports when it has simply been running quietly for days. Both
+cases read `reason 1, count 1`. From 2026-09-29 a second counter sits in flash
+at `0xC000+0x100` and survives power, so the next time this happens the question
+answers itself: if `boot_count` has climbed, the board restarted; if it has not,
+it never did, and whatever went wrong happened with the power still on.
+
+Next step is a measurement, not a guess: with deep sleep switched off this node
+either stops failing — in which case it was the sleep it did not come back from
+— or fails while awake, where the watchdog can reach it and the reset reason
+will finally have a name.

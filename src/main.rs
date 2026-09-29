@@ -348,7 +348,12 @@ async fn main(spawner: Spawner) {
     // wake is the steady state and is dropped; anything else is latched in RTC
     // RAM so the next publish can carry it. See `reset_reason` for why this is
     // worth the two numbers.
-    state::note_reset(reset_reason::code());
+    let boot_code = reset_reason::code();
+    state::note_reset(boot_code);
+    // And once more where power cannot erase it. RTC RAM answers "what kind of
+    // reset", flash answers "did it restart at all" -- and only the second
+    // survives the outage that makes the question worth asking.
+    reset_reason::note_boot(boot_code);
     if state::last_reset() != 0 {
         warn!(
             "last non-routine reset: code 0x{:02X}, {} since power-on",
@@ -1246,6 +1251,14 @@ async fn collect_samples(
         let mut value = heapless::String::new();
         reset_reason::write_code(&mut value, state::reset_count());
         platform::push_sample(&mut samples, node::Slot::on(), "reset_count", value);
+
+        // Read back rather than carried in a static: this is a flash read, not
+        // a write, and a number that has to be right after an unplanned restart
+        // should come from the place that survived it.
+        let mut value = heapless::String::new();
+        let boots = reset_reason::load_boot_log().map_or(0, |(count, _)| count);
+        reset_reason::write_code(&mut value, boots);
+        platform::push_sample(&mut samples, node::Slot::on(), "boot_count", value);
     }
 
     if let Some(sense) = board.battery.as_mut() {

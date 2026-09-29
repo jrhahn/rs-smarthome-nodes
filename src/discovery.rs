@@ -1198,7 +1198,7 @@ mod tests {
             entities(n)
                 .iter()
                 .map(|e| e.desc.key)
-                .filter(|k| !matches!(*k, "rssi" | "reset_reason" | "reset_count"))
+                .filter(|k| !matches!(*k, "rssi" | "reset_reason" | "reset_count" | "boot_count"))
                 .collect()
         };
         assert_eq!(keys(&plain), ["pm25", "pm10"]);
