@@ -456,3 +456,24 @@ Next step is a measurement, not a guess: with deep sleep switched off this node
 either stops failing — in which case it was the sleep it did not come back from
 — or fails while awake, where the watchdog can reach it and the reset reason
 will finally have a name.
+
+## 2026-09-29 19:25 — bad — updated over the air, and `boot_count` starts here
+
+`bad-38caeb5` went on over the air: the round at 17:25:08Z took the offer, and
+the node was publishing again at 17:25:25Z. Seventeen seconds to fetch 778 KB,
+write the slot it was not running from, restart into it and report. Four rounds
+at 117 s since.
+
+**`boot_count` exists from this timestamp and not before**, so an empty series
+before it is the channel not existing, not a node that never booted. It starts
+at 1 because the flash sector was blank — the number only becomes interesting at
+the *next* unexplained stop.
+
+One thing the update itself demonstrated, and it is worth knowing when reading
+the other counter: `reset_count` came back as 1 across the OTA, not 2, although
+the restart was a software reset the node did to itself. The RTC-RAM statics
+almost certainly land at different addresses in a different binary, so the epoch
+tag no longer matched and `latch` took its "not ours" branch. **Expect
+`reset_count` to restart at 1 after every over-the-air update** — which is one
+more reason the counter that answers "did it restart at all" had to live in
+flash.
