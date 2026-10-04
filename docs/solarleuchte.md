@@ -1,12 +1,13 @@
 # Solarleuchte — replacing a bought garden light's electronics
 
-> **Nothing is built and nothing is measured.** This is a diagnosis and a
-> design, written 2026-09-22 from a photograph of the original board and a
-> single multimeter reading. **Two bench measurements gate everything below**
-> — see [Before you build any of this](#before-you-build-any-of-this). Every
-> current figure for the LEDs is an assumption, and it is flagged as one each
-> time it is used. When it is built, the record goes in
-> [`commissioning.md`](commissioning.md), not here.
+> **Nothing is built.** This is a diagnosis and a design, written 2026-09-22
+> and revised the same day twice: once when the LED output was measured, and
+> once when this repository's own notes killed the assumption the first version
+> rested on. **The LED current is still a guess and the panel is still
+> unidentified** — see
+> [Before you build any of this](#before-you-build-any-of-this). Every figure
+> that rests on the guess is flagged where it is used. When it is built, the
+> record goes in [`commissioning.md`](commissioning.md), not here.
 
 ## What this is
 
@@ -73,63 +74,90 @@ it is in fact only a question of replacing the module (WS2812 and similar carry
 a controller per LED on a three-wire chain). **The decision taken was to keep
 the existing LEDs** and accept one channel.
 
-One thing this leaves open, and the bench test settles it: if the original
-carousel changes *colour* on two wires, the module contains its own colour-cycle
-IC. Such a module cannot be dimmed — PWM would restart its sequence — and would
+**Measured 2026-09-22: the LED output sits at 3.6–3.7 V with the output on,
+i.e. at the cell voltage.** So the original board does not boost — it switches
+the string straight onto the cell, and the string is parallel LEDs with series
+resistors. That is ordinary for fairy lights: a white LED drops 2.8–3.2 V and
+the resistor takes the rest. The two inductors on the board belong to the
+charger, not to the LED side; an earlier draft of this page guessed otherwise.
+
+Consequences: **no boost converter is needed**, and the brightness will track
+the cell voltage, which the firmware corrects for (below).
+
+One thing still open, and the bench test settles it: if the original carousel
+changes *colour* on two wires, the module contains its own colour-cycle IC.
+Such a module cannot be dimmed — PWM would restart its sequence — and would
 have to be replaced after all.
 
-## Energy: the controller can be made to disappear
+## Who holds the PWM while the CPU sleeps
 
-The decisive point, and the reason a small panel is viable at all.
+A light needs its PWM running all night, and the CPU must not be awake to
+provide it. **The first version of this page proposed clocking LEDC from the
+ESP32-C3's 8 MHz RC oscillator and light-sleeping between duty updates. That
+does not work on this board, and this repository already knew it:**
 
-A light needs its PWM running all night, which naively means the CPU stays
-awake. It does not: the ESP32-C3's **LEDC block can be clocked from the internal
-8 MHz RC oscillator, which keeps running through light sleep.** So the duty is
-set, the CPU light-sleeps, a timer wakes it a few seconds later to set the next
-duty. The LED never flickers and the CPU is off ~99.9 % of the night.
+> `Rtc::sleep_light` **resets this chip instead of resuming**, producing a boot
+> loop of roughly one cycle per sleep, with no output past the last line before
+> the first sleep (observed on hardware 2026-09-04).
+> — [`src/main.rs`](../src/main.rs), `run_battery`
 
-| | awake, Wi-Fi off | light sleep + HW PWM |
-| --- | --- | --- |
-| controller current | ~25 mA | ~0.3 mA |
-| over a 12 h night | 300 mAh | 3.6 mAh |
+Setting `lslp_mem_inf_fpu` on a hand-built `RtcSleepConfig` did not change it,
+and [`src/hx711.rs`](../src/hx711.rs) records the same finding from the other
+direction: there is no sleep on this board that both retains a pad and returns.
+Whatever the C3's light-sleep path needs in esp-hal 0.22, it is not available
+here, and migrating off 0.22 is not a thing a garden light gets to ask for.
 
-Both are datasheet-class estimates, not measurements. The ratio is the load-
-bearing part, and it is large enough that the conclusion survives being wrong by
-a factor of two.
+**So the PWM moves off-chip.** A PCA9685 — 16-channel, 12-bit, I²C, already on
+the shelf — keeps its duty in its own registers and runs its own oscillator.
+The ESP32-C3 then uses **deep sleep**, which this firmware already does
+everywhere, and the lamp stays lit through it.
 
-**Wake every 5 s, not every minute.** A minute-cadence ramp steps visibly; at
-5 s the wake costs nothing measurable and the fade reads as continuous.
+| | continuous draw |
+| --- | --- |
+| ESP32-C3 awake, LEDC | ~25 mA |
+| ESP32-C3 deep sleep + PCA9685 | ~6 mA + wake cost |
+
+The PCA9685's `IDD` is **6 mA typical, 10 mA max, operating mode, no load**
+(datasheet, Table "Static characteristics"). Its 2.2 µA standby is not an
+option at night: setting the `SLEEP` bit stops the oscillator, and *"when the
+oscillator is off (Sleep mode) the LEDn outputs cannot be turned on, off or
+dimmed/blinked"*. **By day it is exactly the right thing to do** — the lamp is
+off anyway, so daylight hours cost 2.2 µA rather than 6 mA, and the 6 mA below
+is a night-only figure.
+
+Wake cost: ~270 ms of ROM boot and app init (measured for the terrasse node) at
+~30 mA, every 5 s, is ~2 mA averaged. Stretching the wake interval is the lever
+if the panel turns out small — a slow breath tolerates 15 s steps far better
+than a fast one.
 
 ### The budget that follows
 
-Assuming **20 mA average LED current — an assumption, not a measurement**:
+LED current of **20 mA is an assumption, not a measurement**, and it dominates:
 
 | | |
 | --- | --- |
-| LEDs | 240 mAh/night |
-| controller | 3.6 mAh/night |
-| **total** | **~244 mAh ≈ 0.90 Wh/day** |
-| on the spare 2000 mAh cell | **~8 nights** |
+| LEDs | 20 mA |
+| PCA9685 | 6 mA |
+| ESP32-C3 deep sleep + wakes | ~2 mA |
+| **total** | **28 mA ≈ 336 mAh ≈ 1.24 Wh per night** |
+| on the spare 2000 mAh cell | **~6 nights** |
 
-That is the same order as the terrasse node's measured 240 mAh/day, and there
-it is enough. **The cell is not the constraint.**
-
-### The panel is
+### The panel decides whether this flies
 
 Same method as [`solar.md`](solar.md#the-panel-and-what-it-forces): December at
 ~1 peak-sun-hour and 70 % system efficiency, i.e. `Wh/day ≈ Wp × 0.7`.
 
-| Panel | December yield | against 0.90 Wh/day |
+| Panel | December yield | against 1.24 Wh/day |
 | --- | --- | --- |
-| Waveshare 18 V / 10 W | ~7 Wh | 7.8× — sorglos |
-| 2 W | ~1.4 Wh | 1.6× — works, tight in January |
-| the light's original panel (~0.5 W, **guessed**) | ~0.35 Wh | short by 2.5× |
+| Waveshare 18 V / 10 W | ~7 Wh | 5.6× — comfortable |
+| 2 W | ~1.4 Wh | **1.13× — no margin at all** |
+| the light's original panel (~0.5 W, **guessed**) | ~0.35 Wh | short by 3.5× |
 
-And the same table for a controller that stays awake — 45 mA, 540 mAh, 2.0
-Wh/day — turns the 2 W column into 0.7×, i.e. it does not work. **Light sleep is
-what makes anything smaller than the 10 W panel viable.** That is the whole
-argument for the LEDC-in-light-sleep trick, and it is why verifying it comes
-first.
+The 2 W row is the one that changed when light sleep fell away: it was 1.6×
+while the controller was believed to cost 0.3 mA. **At 1.13× a single overcast
+week empties the cell**, and the 6-night buffer is all there is. If the panel on
+hand is in that class, either the wake interval stretches, the LED current comes
+down, or the panel gets bigger.
 
 Measure the original panel before writing it off: open-circuit volts and
 short-circuit amps in sun, product × ~0.75 is the real peak power. The 0.5 W
@@ -137,71 +165,72 @@ above is a guess from its size.
 
 ## Driving the LEDs
 
-A GPIO cannot carry the string — the ESP32-C3 is rated ~40 mA per pin absolute
-and ~20 LEDs are far past that. But the MOSFET below is a **switch**, not a
-**driver**, and it does not by itself solve the second problem: the cell wanders
-from 4.2 V to 3.0 V and the brightness wanders with it.
+Neither the ESP32-C3 nor the PCA9685 can carry the string. The C3 is rated
+~40 mA per pin absolute; the PCA9685 sinks 25 mA typical per channel. A string
+of ~20 LEDs is past both. So the PWM channel drives a **gate**, and a MOSFET
+carries the current:
 
 ```
-Cell 3.0–4.2 V ──► boost (fixed Vout) ──► LED string ──► R_set ──► MOSFET ──► GND
-                        ▲ EN                                        ▲ gate
-                        │                                           │
-                      GPIO (off by day)                       GPIO (PWM, 2 kHz)
+PCA9685 LED0 ──► 330 Ω ──┬──► gate  AO3400A
+                         └──► 100 kΩ ──► GND
+BMS P+ ──► LED string ──────► drain
+                              source ──► GND
 ```
 
-Boost to a fixed voltage, set the current with a resistor, dim with the MOSFET.
-Dimming acts on the current rather than on the converter's control loop, which
-is why this way round is the stable one. Set the boost **15–20 % above the
-string's forward voltage**: less, and part spread plus temperature move the
-current; more, and the surplus is burnt in `R_set`.
+Since the string runs straight off the cell, that is the whole power path —
+no converter, no `R_set`, no current regulation. Brightness tracks the cell
+from 4.2 V down to 3.0 V, and the firmware compensates against the
+`battery_voltage` the node already measures.
 
-**Two traps.**
+**330 Ω, not 100 Ω or 220 Ω.** The resistor is sized by whatever drives the
+gate: the PCA9685 sources `IOH` = 10 mA, so 3.3 V / 330 Ω ≈ 10 mA stays inside
+it. (An earlier draft said 100 Ω, which would have asked 33 mA of an ESP32-C3
+pin rated 40 mA absolute.)
 
-*A boost converter cannot switch its output off.* Inductor and diode leave a DC
-path from input to output even with `EN` low. So the MOSFET is the switch and
-`EN` is only the daytime standby — the other way round leaves the string
-glowing, depending on its forward voltage.
+**The 100 kΩ pulldown is not optional.** GPIOs and the PCA9685's outputs float
+through reset and power-up; without it the lamp flashes to full brightness on
+every restart.
 
-*The module idles at ~2 mA*, which is 10 % of this budget. Drive `EN` low during
-daylight and desolder the module's power LED if it has one.
+### Use the small MOSFET, not the fat one
+
+Counter-intuitive, and it is the gradient that decides it. Gate charge sets the
+switching time, switching time eats PWM codes, and gamma correction makes the
+lowest codes the perceptually expensive ones. At 1 kHz and 12 bits one LSB is
+244 ns:
+
+| | Qg | switch time at 10 mA | codes lost | perceived brightness lost |
+| --- | --- | --- | --- | --- |
+| **AO3400A** (SOT-23) | ~5.6 nC | ~0.6 µs | ~2 of 4096 | ~3 % |
+| IRLZ44N (TO-220) | ~48 nC | ~4.8 µs | ~20 of 4096 | ~9 % |
+
+Datasheet arithmetic, not a measurement, but the gap is wide enough to decide
+on. The fat MOSFET would make the bottom tenth of the fade mushy — which is
+precisely the part this whole build exists for. A SOT-23 breakout board costs
+€0.50 if hand-soldering SMD onto perfboard is unappealing.
 
 **Do not** use a PT4115/AL8805-class "LED driver". They are buck topologies and
 need Vin above the string voltage; from 3.7 V there is nothing to buck.
-
-### The branch without a boost — check for it first
-
-If the string is wired in parallel and lights at ~3.0–3.2 V, the whole converter
-comes out:
-
-```
-Cell ──► LED string (with its existing resistors) ──► MOSFET ──► GND
-```
-
-Brightness then tracks the cell, and the firmware corrects for it — the node
-measures `battery_voltage` anyway, so the duty is compensated against it. That
-removes a stage, 2 mA of quiescent draw and a conversion loss.
-
-The catch is the current at the top of the charge: through the same resistors,
-4.2 V passes roughly 3–4× what 3.4 V does when the forward voltage sits close to
-the cell voltage. Check that the LEDs tolerate the 4.2 V figure before choosing
-this branch.
 
 ## Parts
 
 | Role | Part | Note |
 | --- | --- | --- |
 | Controller | XIAO ESP32-C3 | on hand |
+| PWM | PCA9685 breakout, 16-ch 12-bit | on hand; one channel used |
+| Switch | AO3400A, SOT-23 | 30 V / 5 A — overkill and correct, see above |
+| Gate | 330 Ω series, 100 kΩ to GND | |
 | Cell | 2000 mAh LiPo pouch | on hand, ×2 |
 | Protection | BMS board | on hand |
-| Charger | CN3791 | on hand; MPPT jumper to the panel, not 18 V |
+| Charger | CN3791 | on hand; MPPT jumper to *this* panel, not 18 V |
 | Panel | see the table above | on hand — **which one is unrecorded** |
-| Boost | MT3608 module, 2–24 V | only in the boost branch |
-| Switch | AO3400A | logic-level, 30 V / 5 A — overkill and fine |
-| Gate | 100 Ω series, 100 kΩ to GND | the pulldown is not optional |
-| Current | `R_set` | value from the bench measurement |
 
-**The pulldown earns its line.** GPIOs float through reset and boot; without it
-the lamp flashes to full brightness every time the node restarts.
+Nothing else. No boost module, no sense resistor, no gate driver — the PCA9685
+output drives the gate directly.
+
+**Two things to do to the PCA9685 breakout:** desolder its power LED, and check
+its I²C pull-ups. The bus already carries the SHT31-D, so a second set of
+pull-ups lands in parallel. The PCA9685's default address is 0x40 and does not
+collide.
 
 A pouch cell outdoors is acceptable in a box built to be dry — the terrasse node
 already does exactly that — but it has no hard can. If the light's housing can
@@ -209,14 +238,23 @@ pool water, an 18650 is the more forgiving choice.
 
 ## Firmware notes
 
+- **Driver crate: [`pwm-pca9685`](https://crates.io/crates/pwm-pca9685) 1.0** —
+  platform-agnostic, embedded-hal, no reason to write register pokes by hand.
+- **1 kHz PWM.** The PCA9685 spans 24–1526 Hz via `PRE_SCALE`; 1 kHz is
+  flicker-free to the eye and leaves headroom under the ceiling. The 2 kHz an
+  earlier draft specified is not reachable on this chip and was an artefact of
+  the RC-oscillator plan.
 - **Gamma-correct the duty.** A linear ramp does not look linear: it jumps at
-  the bottom and flattens at the top. `duty = (perceived^2.2) * full_scale`.
-- **12-bit, not 8.** After gamma correction 8 bits leave only a handful of
-  distinguishable steps near black, which is where a breathing effect spends its
-  time. 8 MHz / 4096 ≈ **2 kHz**, which is flicker-free to the eye and to a
-  phone camera.
+  the bottom and flattens at the top. `duty = (perceived^2.2) * 4095`. The
+  PCA9685's 12 bits are native, so nothing is thrown away.
+- **Compensate against `battery_voltage`**, since the string runs off the cell
+  and dims as it discharges.
+- **`SLEEP` bit set during daylight.** 6 mA becomes 2.2 µA, and the lamp is off
+  anyway. Clearing it needs 500 µs for the oscillator, then a `RESTART` —
+  see the datasheet's restart sequence.
 - **A sine half-wave over 20–30 s** reads as calm. Anything under ~10 s reads as
-  agitated.
+  agitated. Longer periods also cut the wake rate, which is the cheapest lever
+  on the budget.
 - **Night detection off the panel divider**, as the original board did — no LDR.
 - **Expose the curve over MQTT** (`smarthome/solarleuchte/config/<key>`, the
   mechanism README.md already describes) so the choice between breathing and a
@@ -227,20 +265,19 @@ Node name `solarleuchte`, following the fleet's German naming.
 
 ## Before you build any of this
 
-- **Bench the LED module** on a current-limited supply, ~200 mA:
-  1. At what voltage does it light? Under ~3.2 V → the boost-free branch is
-     open. Above → a boost is needed, and the original board's two inductors
-     suggest it will be.
-  2. What current at a pleasant brightness? **This is the number the entire
-     budget rests on, and 20 mA is currently a guess.**
-  3. Does it cycle colours by itself? Then it has its own IC, cannot be dimmed,
-     and has to be replaced.
+- **Measure the string current.** Multimeter in series with the chain, original
+  board on. **This is the number the entire budget rests on, and 20 mA is a
+  guess.** Measure it again at 4.2 V from a bench supply: full charge pushes
+  roughly 3–4× what 3.7 V does through the same series resistors, and if the
+  LEDs dislike it the fix is a duty ceiling in firmware, not a part.
+- **Check the module does not cycle colours by itself.** If it does, it has its
+  own IC, cannot be dimmed, and has to be replaced.
 - **Bench the panel**: Voc and Isc in sun. Which panel is on hand was never
-  written down; the table above spans an 8:1 range of outcomes.
-- **Verify LEDC survives light sleep** on the C3 with the RC clock source,
-  on the desk, before the housing is closed. The entire small-panel case rests
-  on it. If it does not hold, the fallbacks are an external PWM part or staying
-  awake — and staying awake means the 10 W panel.
+  written down, and the table above spans an 8:1 range of outcomes. With the
+  2 W row at 1.13× this is no longer an academic question.
+- **Measure the PCA9685 breakout's actual draw** before trusting the 6 mA. That
+  is a datasheet typical with no load, and the board carries a power LED and
+  pull-ups of its own.
 - **Count the LEDs and look for resistors on the module.** Twenty in parallel
   with individual resistors and four series groups of five behave nothing alike,
   and it is usually visible.
