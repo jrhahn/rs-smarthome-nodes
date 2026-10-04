@@ -112,35 +112,46 @@ duty, so a duty ceiling cannot protect an LED from it. If the measurement shows
 more than ~20 mA per LED at 4.2 V, the fix is one resistor in series with the
 whole string, and it is a part rather than a line of firmware.
 
-### The string is bright enough to need a ceiling
+### Measured, and it needs a ceiling
 
-The first measurement (2026-10-04) hit the XIAO charger's ~370 mA ceiling at
-**350 mA**, so the string wants *at least* that. That is well outside the
-20–100 mA this page had been reasoning about, and it changes the answer.
+**640 mA at 4.06 V, 25 LEDs** — from the cell with USB unplugged, 2026-10-04,
+output held flat out. That is **25.6 mA per LED**, and about 29 mA at a full
+4.2 V. A first attempt had read 350 mA and was clamped: the string was running
+off the XIAO's own ~370 mA charger, so that number was the charger's and not
+the lamp's.
 
-The breath helps on its own: the gamma-corrected table's mean is **36 % of
-peak**, so the string is never lit flat out for long. Even so, taking 350 mA as
-a floor:
+The breath helps on its own — the gamma table's mean is **36 % of peak**, so
+the string is never lit flat out for long. It is not enough:
 
-| peak | mean at 36 % | + controller | per evening | panel margin | cell lasts |
+| ceiling | perceived | mean | per evening | panel | evenings |
 | --- | --- | --- | --- | --- | --- |
-| 100 mA | 36 mA | 61 mA | 396 mAh | 4.8× | 5.0 evenings |
-| 200 mA | 72 mA | 97 mA | 630 mAh | 3.0× | 3.2 evenings |
-| **350 mA** | **126 mA** | **151 mA** | **982 mAh** | **1.9×** | **2.0 evenings** |
-| 500 mA | 180 mA | 205 mA | 1332 mAh | 1.4× | 1.5 evenings |
+| 100 % | 100 % | 230 mA | 1660 mAh | 1.1× | 1.2 |
+| 40 % | 66 % | 92 mA | 762 mAh | 2.5× | 2.6 |
+| **30 %** | **58 %** | **69 mA** | **612 mAh** | **3.1×** | **3.3** |
+| 20 % | 48 % | 46 mA | 462 mAh | 4.1× | 4.3 |
 
-Two evenings of buffer is not enough for a German November, so **a duty ceiling
-goes in**. It is cheap, because gamma works in the right direction here: energy
-scales with duty, perceived brightness only with duty^(1/2.2).
+Unchecked, the lamp flattens a 2000 mAh cell in just over one evening and leaves
+the panel 1.1× of margin. **30 % is the figure**, and it costs less than it
+sounds because gamma runs the right way: energy falls with the duty, perceived
+brightness only with `duty^(1/2.2)`. Three evenings of buffer and 3.1× on the
+panel matches what [`solar.md`](solar.md#does-the-cold-actually-bind) already
+accepts for the terrasse node — roughly one usable day in three.
 
-| ceiling | energy | perceived brightness | evenings |
-| --- | --- | --- | --- |
-| 100 % | 100 % | 100 % | 2.0 |
-| **50 %** | **50 %** | **73 %** | **3.5** |
-| 35 % | 35 % | 62 % | 4.4 |
+Fitted in [`examples/lamp_bench.rs`](../examples/lamp_bench.rs) as
+`CEILING_PCT`, applied by scaling the whole table with rounding. Relative step
+sizes are untouched, so the breath is exactly as smooth as before; the only
+cost is six more zeros out of 256 at the dark end, below what the eye resolves
+at 1/4095.
 
-Half the energy for 73 % of the brightness. The ceiling belongs over MQTT with
-the rest of the curve, so the trade can be made in the garden.
+**No series resistor.** 29 mA peak against a typical 20 mA DC rating is 1.45×,
+and a datasheet normally allows two to three times the DC figure when pulsed —
+which at a 30 % duty is what these are. A resistor would be redundant and would
+burn the difference as heat.
+
+**But the ceiling needs a compiled-in maximum, not only a config value.** It
+belongs on MQTT so the trade can be made in the garden, and a config that could
+raise it to 100 % would run the string at a DC-equivalent 29 mA for months.
+MQTT may lower it; it may not raise it past ~40 %.
 
 One thing still open, and the bench settles it: if the original carousel changes
 *colour* on two wires, the module contains its own colour-cycle IC. Such a
@@ -419,18 +430,16 @@ Node name `solarleuchte`, following the fleet's German naming.
 
 ## Before you build any of this
 
-- **Measure the string current properly.** First attempt 2026-10-04 read
-  **350 mA and was clamped**: with no cell fitted the string was running off
-  the XIAO's own charger, whose ceiling is ~370 mA, so the number is a lower
-  bound on the string and an upper bound on that charger. Redo it from the cell
-  with USB unplugged, and count the LEDs while you are there.
+- **Trim the battery divider.** It reads and it is stable — 4064 mV at the
+  pin's own reckoning, moving 8 mV between idle and 640 mA, which also says the
+  cell's internal resistance is ~23 mΩ and healthy. What has not been done is
+  checking it against a multimeter at the cell; on terrasse the firmware read
+  4.09–4.12 V against a measured 4.05 V, and `R_TOP_KOHM` / `R_BOTTOM_KOHM` in
+  [`src/battery.rs`](../src/battery.rs) are what that trims.
 - **Check the module does not cycle colours by itself.** If it does, it has its
   own IC, cannot be dimmed, and has to be replaced.
 - **Check what the XY-MOS module already has fitted**: gate series resistor,
   pulldown, and the indicator LED that has to come off.
-- **Count the LEDs and look for resistors on the module.** Twenty in parallel
-  with individual resistors and four series groups of five behave nothing alike,
-  and it is usually visible.
 - **Size the panel divider** for 18 V nominal and ~25 V `Voc` at −20 °C, not for
   the 6 V an earlier draft of this page assumed.
 - The cell's **3.6 V after a sunny day** was never explained. It stops mattering

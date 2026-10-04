@@ -35,6 +35,7 @@ use esp_hal::{
     prelude::*,
 };
 use log::info;
+use rs_smarthome_nodes::battery::{self, Battery};
 
 /// One full breath, dark to bright to dark. Under ~10 s reads as agitated.
 const PERIOD_MS: u32 = 25_000;
@@ -99,6 +100,59 @@ const STEP_MS: u32 = PERIOD_MS / BREATH.len() as u32;
 /// flicker-free to the eye and to a phone camera.
 const PWM_HZ: u32 = 1_000;
 
+/// **Duty ceiling, as a percentage of the table.**
+///
+/// The string draws **640 mA at 4.06 V** -- measured 2026-10-04 from the cell,
+/// 25 LEDs, i.e. 25.6 mA each and ~29 mA at a full 4.2 V. Unchecked that is
+/// 1660 mAh an evening out of a 2000 mAh cell: the lamp would flatten it in
+/// just over one night and leave the panel 1.1x of margin.
+///
+/// Scaling the whole table is cheap because gamma runs the right way. Energy
+/// falls with the duty, perceived brightness only with `duty^(1/2.2)`:
+///
+/// | ceiling | perceived | per evening | panel | evenings |
+/// | --- | --- | --- | --- | --- |
+/// | 100 % | 100 % | 1660 mAh | 1.1x | 1.2 |
+/// | 40 % | 66 % | 762 mAh | 2.5x | 2.6 |
+/// | **30 %** | **58 %** | **612 mAh** | **3.1x** | **3.3** |
+/// | 20 % | 48 % | 462 mAh | 4.1x | 4.3 |
+///
+/// It also keeps the LEDs inside their ratings without a series resistor. At
+/// 29 mA peak against a typical 20 mA DC rating the ratio is 1.45x, and a
+/// datasheet normally allows two to three times the DC figure when pulsed --
+/// which at a 30 % duty is what these are.
+///
+/// **In the node this needs a compiled-in maximum, not just this constant.**
+/// The ceiling belongs on MQTT so it can be trimmed in the garden, but a
+/// config that could raise it to 100 % would run the string at a DC-equivalent
+/// 29 mA for months. MQTT may lower it; it may not raise it past ~40 %.
+const CEILING_PCT: u32 = 30;
+
+/// Apply [`CEILING_PCT`], rounding rather than truncating.
+///
+/// Truncation would push the smallest table entries to zero; rounding costs
+/// six more zeros out of 256 at the dark end, which is below anything the eye
+/// resolves at 1/4095 anyway. Relative step sizes are untouched, so the breath
+/// is exactly as smooth as it was -- scaling the duty scales perceived
+/// brightness uniformly by `k^(1/2.2)`.
+const fn capped(entry: u16) -> u32 {
+    (entry as u32 * CEILING_PCT + 50) / 100
+}
+
+/// **Hold the output full on instead of breathing, to measure the string.**
+///
+/// A multimeter in series with a breathing lamp reads a moving average, and
+/// the number that decides whether the string needs a series resistor is the
+/// *peak*: during every PWM on-phase the full cell voltage sits across the
+/// LEDs however small the duty, so a duty ceiling cannot protect them from it.
+/// Holding 100 % makes the meter read that peak directly.
+///
+/// With no cell fitted, `VIN+` comes from the XIAO's own charger at ~4.2 V,
+/// which is the worst case the string ever sees and exactly the case worth
+/// measuring. Divide the reading by the number of LEDs: under ~20 mA each is
+/// fine, above it the fix is one resistor in series with the whole string.
+const MEASURE: bool = false;
+
 /// `esp-backtrace` is configured with `custom-halt` for the firmware's sake --
 /// see the note on the dependency in `Cargo.toml` -- so every binary in this
 /// crate has to supply the symbol. The firmware's version stores a flag in RTC
@@ -143,17 +197,49 @@ fn main() -> ! {
         })
         .expect("LEDC channel 0 on GPIO8");
 
-    info!("breathing on D8: {PERIOD_MS} ms period, {STEP_MS} ms per step, {PWM_HZ} Hz");
-    info!("with no string attached, watch the XY-MOS indicator LED");
+    // Same divider and same pin as the terrasse node, so the firmware's own
+    // driver reads it: 100 kΩ / 100 kΩ on `D2`, ratio undone and the ADC
+    // calibrated against the chip's eFuse reference inside `battery.rs`.
+    // Reading it here is half a wiring check and half the number the duty
+    // ceiling will be expressed against.
+    let mut cell = Battery::new(peripherals.ADC1, peripherals.GPIO4);
+    match cell.read_millivolts() {
+        Some(mv) => info!("cell {mv} mV, ~{} %", battery::percent(mv)),
+        None => info!("cell: no ADC conversion -- check the divider on D2"),
+    }
 
     let delay = Delay::new();
+
+    if MEASURE {
+        channel0.set_duty_hw(4095);
+        info!("MEASURE: held at 4095/4096, full on");
+        info!("meter in series with the string, DC amps, 10 A jack");
+        loop {
+            delay.delay_millis(5_000);
+            match cell.read_millivolts() {
+                // Under load and worth watching: a cell that sags here is
+                // telling you the string is pulling more than it can give.
+                Some(mv) => info!("full on, cell {mv} mV, ~{} %", battery::percent(mv)),
+                None => info!("full on, cell unreadable"),
+            }
+        }
+    }
+
+    info!("breathing on D8: {PERIOD_MS} ms period, {STEP_MS} ms per step, {PWM_HZ} Hz");
+    info!("ceiling {CEILING_PCT} % -> peak duty {}/4096", capped(4095));
+    info!("with no string attached, watch the XY-MOS indicator LED");
+
     let mut step: usize = 0;
     loop {
-        channel0.set_duty_hw(BREATH[step % BREATH.len()] as u32);
+        channel0.set_duty_hw(capped(BREATH[step % BREATH.len()]));
 
         // Once per breath, so a long run stays readable.
         if step % BREATH.len() == 0 {
-            info!("breath {}", step / BREATH.len() + 1);
+            match cell.read_millivolts() {
+                Some(mv) => info!("breath {}, cell {mv} mV, ~{} %",
+                                  step / BREATH.len() + 1, battery::percent(mv)),
+                None => info!("breath {}, cell unreadable", step / BREATH.len() + 1),
+            }
         }
 
         delay.delay_millis(STEP_MS);
