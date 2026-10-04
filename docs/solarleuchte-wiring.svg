@@ -18,7 +18,7 @@
   </style>
 
   <text class="ttl" x="40" y="36">Solarleuchte — Verdrahtung</text>
-  <text class="sub" x="40" y="58">XIAO ESP32-C3 · PCA9685 · XY-MOS (D4184) · Lichterkette</text>
+  <text class="sub" x="40" y="58">XIAO ESP32-C3 · XY-MOS (D4184) · Lichterkette</text>
 
   <line class="pos" x1="290" y1="215" x2="1180" y2="215"/>
   <text class="pin" x="1188" y="220" fill="#c0392b">P+</text>
@@ -27,7 +27,7 @@
 
   <rect class="blk" x="40" y="85" width="110" height="70"/>
   <text class="lbl" x="58" y="117">Panel</text>
-  <text class="sub" x="58" y="137">ungemessen</text>
+  <text class="sub" x="58" y="137">18 V / 10 W</text>
   <line class="pos" x1="150" y1="105" x2="240" y2="105"/>
   <line class="neg" x1="150" y1="138" x2="240" y2="138"/>
   <text class="pin e" x="234" y="98">VIN+</text>
@@ -36,7 +36,7 @@
   <rect class="blk" x="240" y="78" width="170" height="100"/>
   <text class="lbl" x="258" y="112">CN3791</text>
   <text class="sub" x="258" y="132">MPPT-Lader</text>
-  <text class="sub" x="258" y="150">MPPT-Jumper = Panel</text>
+  <text class="sub" x="258" y="150">MPPT 18 V · R8 = 1 Ω</text>
   <line class="pos" x1="290" y1="178" x2="290" y2="215"/>
   <circle class="dotp" cx="290" cy="215" r="5"/>
   <text class="pin e" x="284" y="200">BAT+</text>
@@ -65,9 +65,8 @@
   <rect class="blk" x="520" y="320" width="190" height="170"/>
   <text class="lbl" x="540" y="362">XIAO</text>
   <text class="lbl" x="540" y="384">ESP32-C3</text>
-  <text class="sub" x="540" y="408">Deep Sleep</text>
-  <text class="sub" x="540" y="426">weckt alle 5 s</text>
-  <text class="sub" x="540" y="448">D4=GPIO6 · D5=GPIO7</text>
+  <text class="sub" x="540" y="408">wach bis 23 Uhr</text>
+  <text class="sub" x="540" y="426">LEDC 12 bit, 1 kHz</text>
   <line class="pos" x1="560" y1="320" x2="560" y2="215"/>
   <circle class="dotp" cx="560" cy="215" r="5"/>
   <text class="pin" x="568" y="312">B+</text>
@@ -75,36 +74,12 @@
   <circle class="dotn" cx="560" cy="760" r="5"/>
   <text class="pin" x="568" y="508">GND</text>
 
-  <line class="sig" x1="710" y1="355" x2="800" y2="355"/>
-  <line class="sig" x1="710" y1="395" x2="800" y2="395"/>
-  <line class="sig" x1="710" y1="435" x2="800" y2="435"/>
-  <text class="pin" x="716" y="348">3V3</text>
-  <text class="pin" x="716" y="388">D4</text>
-  <text class="pin" x="716" y="428">D5</text>
-  <text class="pin e" x="794" y="348">VCC</text>
-  <text class="pin e" x="794" y="388">SDA</text>
-  <text class="pin e" x="794" y="428">SCL</text>
 
-  <rect class="blk" x="800" y="320" width="190" height="170"/>
-  <text class="lbl" x="820" y="362">PCA9685</text>
-  <text class="sub" x="820" y="384">16-ch · 12 bit</text>
-  <text class="sub" x="820" y="402">I²C 0x40</text>
-  <text class="sub" x="820" y="420">1 kHz · 6 mA</text>
-  <text class="sub" x="820" y="438">Kanal 0 →</text>
-  <line class="neg" x1="840" y1="490" x2="840" y2="760"/>
-  <circle class="dotn" cx="840" cy="760" r="5"/>
-  <text class="pin" x="816" y="508">GND</text>
-  <line class="neg" x1="900" y1="490" x2="900" y2="760"/>
-  <circle class="dotn" cx="900" cy="760" r="5"/>
-  <text class="pin" x="884" y="508">OE</text>
-  <text class="sub" x="912" y="556">OE active LOW</text>
-  <text class="sub" x="912" y="574">= Ausgänge an</text>
-  <line class="sig" x1="990" y1="348" x2="1030" y2="348" stroke-dasharray="6 5"/>
-  <text class="pin" x="996" y="340">V+ offen</text>
 
-  <line class="sig" x1="990" y1="400" x2="1006" y2="400"/>
+  <line class="sig" x1="710" y1="400" x2="1006" y2="400"/>
+  <text class="pin" x="716" y="392">D8 · GPIO8</text>
   <rect class="res" x="1006" y="389" width="44" height="22"/>
-  <text class="pin m" x="1028" y="378">330 Ω</text>
+  <text class="pin m" x="1028" y="378">220 Ω</text>
   <line class="sig" x1="1050" y1="400" x2="1080" y2="400"/>
   <circle class="dots" cx="1065" cy="400" r="5"/>
   <text class="pin e" x="1074" y="394">SIG</text>
@@ -147,6 +122,6 @@
   <circle class="dotn" cx="77" cy="644" r="5"/>
   <text class="note" x="104" y="649">Punkt = Verbindung</text>
   <text class="note" x="58" y="673">Kreuzung ohne Punkt = keine Verbindung</text>
-  <text class="note" x="58" y="695">VCC = 3,3 V, niemals 5 V</text>
-  <text class="note" x="58" y="717">330 Ω / 100 kΩ evtl. schon auf XY-MOS</text>
+  <text class="note" x="58" y="695">Kette an P+, nicht am XIAO</text>
+  <text class="note" x="58" y="717">220 Ω / 100 kΩ evtl. schon auf XY-MOS</text>
 </svg>

@@ -84,199 +84,143 @@ charger, not to the LED side; an earlier draft of this page guessed otherwise.
 Consequences: **no boost converter is needed**, and the brightness will track
 the cell voltage, which the firmware corrects for (below).
 
-One thing still open, and the bench test settles it: if the original carousel
-changes *colour* on two wires, the module contains its own colour-cycle IC.
-Such a module cannot be dimmed — PWM would restart its sequence — and would
-have to be replaced after all.
+One thing still open, and the bench settles it: if the original carousel changes
+*colour* on two wires, the module contains its own colour-cycle IC. Such a
+module cannot be dimmed — PWM would restart its sequence — and would have to be
+replaced after all.
 
-## Who holds the PWM while the CPU sleeps
+## Who holds the PWM — the answer changed twice
 
-A light needs its PWM running all night, and the CPU must not be awake to
-provide it. **The first version of this page proposed clocking LEDC from the
-ESP32-C3's 8 MHz RC oscillator and light-sleeping between duty updates. That
-does not work on this board, and this repository already knew it:**
+Worth keeping in order, because the conclusion is only obvious from the end.
+
+**First answer, wrong: LEDC through light sleep.** Clock LEDC from the C3's
+8 MHz RC oscillator, light-sleep between duty updates, 0.3 mA. It does not work
+on this board, and this repository already knew it:
 
 > `Rtc::sleep_light` **resets this chip instead of resuming**, producing a boot
-> loop of roughly one cycle per sleep, with no output past the last line before
-> the first sleep (observed on hardware 2026-09-04).
+> loop of roughly one cycle per sleep (observed on hardware 2026-09-04).
 > — [`src/main.rs`](../src/main.rs), `run_battery`
 
-Setting `lslp_mem_inf_fpu` on a hand-built `RtcSleepConfig` did not change it,
-and [`src/hx711.rs`](../src/hx711.rs) records the same finding from the other
-direction: there is no sleep on this board that both retains a pad and returns.
-Whatever the C3's light-sleep path needs in esp-hal 0.22, it is not available
-here, and migrating off 0.22 is not a thing a garden light gets to ask for.
-
-**So the PWM moves off-chip.** A PCA9685 — 16-channel, 12-bit, I²C, already on
-the shelf — keeps its duty in its own registers and runs its own oscillator.
-The ESP32-C3 then uses **deep sleep**, which this firmware already does
-everywhere, and the lamp stays lit through it.
-
-**Verified on hardware 2026-10-04** with
+**Second answer: move the PWM off-chip.** A PCA9685 holds its duty in its own
+registers and runs its own oscillator, so the C3 can use the deep sleep this
+firmware already does everywhere. **Verified on hardware 2026-10-04** with
 [`examples/pca9685_bench.rs`](../examples/pca9685_bench.rs): channel 0 held at
-2048/4096 through a 30 s deep sleep, steady, no flicker. That was the one
-assumption everything here rested on, and it holds.
+2048/4096 through a 30 s deep sleep, steady, no flicker. The chip does what it
+claims.
 
-| | continuous draw |
-| --- | --- |
-| ESP32-C3 awake, LEDC | ~25 mA |
-| ESP32-C3 deep sleep + PCA9685 | ~6 mA + wake cost |
-
-The PCA9685's `IDD` is **6 mA typical, 10 mA max, operating mode, no load**
-(datasheet, Table "Static characteristics"). Its 2.2 µA standby is not an
-option at night: setting the `SLEEP` bit stops the oscillator, and *"when the
-oscillator is off (Sleep mode) the LEDn outputs cannot be turned on, off or
-dimmed/blinked"*. **By day it is exactly the right thing to do** — the lamp is
-off anyway, so daylight hours cost 2.2 µA rather than 6 mA, and the 6 mA below
-is a night-only figure.
-
-Wake cost: ~270 ms of ROM boot and app init (measured for the terrasse node) at
-~30 mA, every 5 s, is ~2 mA averaged. Stretching the wake interval is the lever
-if the panel turns out small — a slow breath tolerates 15 s steps far better
-than a fast one.
-
-### What the bench rig then made obvious
-
-A smooth breath and deep sleep do not fit together, and no tuning reconciles
-them. The fade that looked right on the bench — 25 s per breath, 256
-gamma-corrected steps, verified 2026-10-04 — wants a new duty every **98 ms**,
+**Then the bench showed what that costs.** A smooth breath and deep sleep do
+not fit together, and no tuning reconciles them. The fade that looked right —
+25 s per breath, 256 gamma-corrected steps — wants a new duty every **98 ms**,
 against a wake that costs **270 ms**. The chip cannot sleep between steps,
-because it cannot come back in time to take the next one.
+because it cannot come back in time to take the next one. So the breath period
+is not a preference, it is bought:
 
-So the period is not a preference. It is bought:
+| | breath | draw | per day |
+| --- | --- | --- | --- |
+| drift, one step per 5 s wake | ~21 min | 28 mA | 0.76 Wh |
+| awake fade | 25 s | 45 mA | 1.08 Wh |
 
-| | breath | total | per day | vs 2 W panel | vs 10 W |
-| --- | --- | --- | --- | --- | --- |
-| drift, 5 s wake | ~21 min | 28 mA | 1.24 Wh | 1.13× | 5.6× |
-| drift, 1 s wake | ~4 min | 34 mA | 1.51 Wh | **0.93×** | 4.6× |
-| awake fade | 25 s | 45 mA | 2.0 Wh | **0.70×** | 3.5× |
+**Third and final answer: stay awake, use LEDC, and drop the PCA9685.** Which
+is only affordable because of what the lamp turned out to need — see below.
 
-Which collapses the whole design question into the panel, and nothing else:
+### Why the burn window decides it
 
-- **If the panel is the 10 W Waveshare, take the awake fade** — every row clears
-  it. And then [the fork below](#the-fork-that-was-not-taken) reopens and wins
-  on its own merits: with the ESP awake anyway, LEDC is the better PWM, and
-  **the PCA9685 comes back out of the circuit.**
-- **If it is anything smaller, the breath is measured in minutes**, the PCA9685
-  stays, and 5 s is the only wake interval the budget tolerates.
-
-There is no middle. **Identify the panel before writing any more firmware.**
-
-### The fork that was not taken
-
-Staying awake and using the C3's own LEDC is a real option, and on the merits of
-the code it is the better one: a `set_duty` loop needs no I²C driver, no wake
-scheduling, and LEDC outruns the PCA9685 anyway (14 bits available, no 1526 Hz
-ceiling). It costs 45 mA against 28 mA, i.e. 2.0 Wh/day against 1.24, and only
-the 10 W panel carries that — the 2 W row falls to 0.7× and does not work at
-all. It also needs Wi-Fi explicitly off all night, or the 25 mA figure is pure
-fiction, and a node that stays up all night is a shape this firmware does not
-have: `run_battery` is built around cold boot, one round, deep sleep.
-
-**Decided 2026-09-22: the PCA9685 stays in.** The panel is not identified, the
-chip is already on the shelf, and 17 mA is most of the margin on anything
-smaller than the 10 W panel. If the panel measures 10 W and the extra firmware
-is wanted, this is the thing to revisit — not before.
-
-### The budget that follows
-
-LED current of **20 mA is an assumption, not a measurement**, and it dominates:
+The lamp does not run all night. It runs from dusk to **23:00**, and at 49.87 N
+December is the design case: sunset ~16:25, dark enough by ~17:00, so **6.5
+hours**. June is 45 minutes.
 
 | | |
 | --- | --- |
-| LEDs | 20 mA |
-| PCA9685 | 6 mA |
-| ESP32-C3 deep sleep + wakes | ~2 mA |
-| **total** | **28 mA ≈ 336 mAh ≈ 1.24 Wh per night** |
-| on the spare 2000 mAh cell | **~6 nights** |
+| awake fade, 25 mA controller + 20 mA LEDs | 45 mA |
+| × 6.5 h | 293 mAh ≈ **1.08 Wh/day** |
+| rest of the day in deep sleep | ~0.2 mAh — nothing |
+| **10 W panel, December** | **~7 Wh/day** |
+| **margin** | **6.5×** |
 
-### The panel decides whether this flies
+Deep sleep stays in the design; it just moves to the hours when the lamp is
+off, where LEDC dying with the digital domain costs nothing.
 
-Same method as [`solar.md`](solar.md#the-panel-and-what-it-forces): December at
-~1 peak-sun-hour and 70 % system efficiency, i.e. `Wh/day ≈ Wp × 0.7`.
+**6.5× is what buys the simplicity.** The panel site is not a good one, and at
+this margin it does not have to be: the yield can fall to **15 % of the model**
+— shading, poor aspect, dirty glass, a run of overcast days against the
+6.8-night buffer on the cell — before the lamp starts losing ground. That is a
+different kind of reserve from the 1.13× a 2 W panel would have given, and it
+is the whole reason the PCA9685 comes back out of the circuit.
 
-| Panel | December yield | against 1.24 Wh/day |
+**And the lamp may be bright.** The 20 mA was a conservative guess and is no
+longer load-bearing:
+
+| LED current | per day | margin |
 | --- | --- | --- |
-| Waveshare 18 V / 10 W | ~7 Wh | 5.6× — comfortable |
-| 2 W | ~1.4 Wh | **1.13× — no margin at all** |
-| the light's original panel (~0.5 W, **guessed**) | ~0.35 Wh | short by 3.5× |
+| 20 mA | 1.08 Wh | 6.5× |
+| 50 mA | 1.80 Wh | 3.9× |
+| 100 mA | 2.53 Wh | 2.8× |
 
-The 2 W row is the one that changed when light sleep fell away: it was 1.6×
-while the controller was believed to cost 0.3 mA. **At 1.13× a single overcast
-week empties the cell**, and the 6-night buffer is all there is. If the panel on
-hand is in that class, either the wake interval stretches, the LED current comes
-down, or the panel gets bigger.
+100 mA continuous through the string is still carried threefold. Brightness is
+a matter of taste here, not of budget.
 
-Measure the original panel before writing it off: open-circuit volts and
-short-circuit amps in sun, product × ~0.75 is the real peak power. The 0.5 W
-above is a guess from its size.
+**The panel is a second one**, bought for this lamp; the terrasse node keeps
+the one [`solar.md`](solar.md) allocates to it.
 
 ## Driving the LEDs
 
-Neither the ESP32-C3 nor the PCA9685 can carry the string. The C3 is rated
-~40 mA per pin absolute; the PCA9685 sinks 25 mA typical per channel. A string
-of ~20 LEDs is past both. So the PWM channel drives a **gate**, and a MOSFET
-carries the current:
+A GPIO cannot carry the string — the C3 is rated ~40 mA per pin absolute and
+~20 LEDs are past that. So the PWM pin drives a **gate**, and a MOSFET carries
+the current:
 
 ```
-PCA9685 LED0 ──► 330 Ω ──┬──► gate   D4184 (XY-MOS module)
-                         └──► 100 kΩ ──► GND
-BMS P+ ──► LED string ──────► drain
-                              source ──► GND
+GPIO ──► 220 Ω ──┬──► gate   D4184 (XY-MOS module)
+                 └──► 100 kΩ ──► GND
+BMS P+ ──► LED string ──────────► drain
+                                  source ──► GND
 ```
 
-**Both resistors may already be fitted on the module** — the XY-MOS boards
-usually carry a gate series resistor and a pulldown. Check the series value is
-at least 330 Ω before relying on it, and check the pulldown exists at all.
-
-Since the string runs straight off the cell, that is the whole power path —
-no converter, no `R_set`, no current regulation. Brightness tracks the cell
+Since the string runs straight off the cell, that is the whole power path — no
+converter, no sense resistor, no current regulation. Brightness tracks the cell
 from 4.2 V down to 3.0 V, and the firmware compensates against the
 `battery_voltage` the node already measures.
 
-**330 Ω, not 100 Ω or 220 Ω.** The resistor is sized by whatever drives the
-gate: the PCA9685 sources `IOH` = 10 mA, so 3.3 V / 330 Ω ≈ 10 mA stays inside
-it. (An earlier draft said 100 Ω, which would have asked 33 mA of an ESP32-C3
-pin rated 40 mA absolute.)
+**220 Ω, not 330 Ω.** The value is set by whatever drives the gate: 330 Ω was
+sized for the PCA9685's 10 mA `IOH`, and a C3 pin will give 15 mA at 220 Ω with
+room under its 40 mA absolute rating. Both resistors **may already be fitted on
+the XY-MOS module** — check the series value and the pulldown before adding
+anything, since a second series resistor only doubles the switching time.
 
-**The 100 kΩ pulldown is not optional.** GPIOs and the PCA9685's outputs float
-through reset and power-up; without it the lamp flashes to full brightness on
-every restart.
+**The 100 kΩ pulldown is not optional.** GPIOs float through reset and boot;
+without it the lamp flashes to full brightness on every restart.
 
 ### Gate charge decides the bottom of the fade
 
-The MOSFET is chosen by its gate, not by its current rating — anything here
+The MOSFET is chosen by its gate, not its current rating — anything here
 carries 150 mA without noticing. Gate charge sets the switching time, switching
 time eats PWM codes, and gamma correction makes the lowest codes the
-perceptually expensive ones. At 1 kHz and 12 bits one LSB is 244 ns, and the
-PCA9685 sources 10 mA:
+perceptually expensive ones. At 1 kHz and 12 bits one LSB is 244 ns:
 
-| | Qg at 4.5 V | switch time | codes lost | perceived brightness lost |
+| | Qg at 4.5 V | switch time at 15 mA | codes lost | perceived |
 | --- | --- | --- | --- | --- |
-| AO3400A (SOT-23) | ~5.6 nC | ~0.6 µs | ~2 of 4096 | ~3 % |
-| **D4184** (XY-MOS module) | ~13.6 nC | ~1 µs | ~4 of 4096 | ~4 % |
-| IRLZ44N (TO-220) | ~48 nC | ~4.8 µs | ~20 of 4096 | ~9 % |
+| AO3400A (SOT-23) | ~5.6 nC | ~0.4 µs | ~2 of 4096 | ~3 % |
+| **D4184** (XY-MOS module) | ~13.6 nC | ~0.7 µs | ~3 of 4096 | ~4 % |
+| IRLZ44N (TO-220) | ~48 nC | ~3.2 µs | ~13 of 4096 | ~7 % |
 
-Datasheet arithmetic, not a measurement. **The D4184 on the XY-MOS module is
-good enough and it is already on the shelf**, which settles it — a modern
-trench part, not the old TO-220 class the third row stands for. An earlier
-draft of this page assumed any screw-terminal module meant the IRLZ44N case;
-it does not.
+Datasheet arithmetic, not a measurement. **The D4184 is good enough and already
+on the shelf**, which settles it — a modern trench part, not the TO-220 class
+the third row stands for.
 
-**The caveat is the threshold, not the charge.** The D4184's `VGS(th)` is
-2.2 V typical and **2.6 V maximum**, and the gate is driven from 3.3 V. Worst
-case that is 0.7 V of overdrive, and the datasheet characterises `RDS(on)`
-only at 4.5 V and 10 V. Conduction is still irrelevant at 150 mA — even
-100 mΩ is 15 mV — but the crossing of the threshold is slow and varies between
-parts, and it is slow exactly where the eye is looking.
+**The caveat is the threshold, not the charge.** `VGS(th)` is 2.2 V typical and
+**2.6 V maximum** against a 3.3 V gate, so worst case leaves 0.7 V of overdrive,
+and `RDS(on)` is characterised only at 4.5 V and 10 V. Conduction stays
+irrelevant at 150 mA — even 100 mΩ is 15 mV — but the crossing of the threshold
+is slow and varies between parts, and it is slow exactly where the eye is
+looking. Build it, then watch the bottom of the breath; an **AO3400A**
+(`VGS(th)` 0.65–1.45 V) is the ten-cent fix if it sticks.
 
-So: build it with the module, then look at the bottom of the breath. If it
-steps or sticks, that is why, and an **AO3400A** (`VGS(th)` 0.65–1.45 V, real
-headroom at 3.3 V) is the ten-cent fix. Worth having two in the drawer before
-starting rather than waiting a week for them mid-build.
+**Do not raise the PWM frequency to "improve" things.** It makes this worse:
+the LSB shrinks with frequency while the switching time does not, so 4 kHz
+would cost four times the codes at the bottom. 1 kHz is the figure.
 
-**Do not** use a PT4115/AL8805-class "LED driver". They are buck topologies and
-need Vin above the string voltage; from 3.7 V there is nothing to buck.
+**Do not** use a PT4115/AL8805-class "LED driver" either. They are buck
+topologies and need Vin above the string voltage; from 3.7 V there is nothing
+to buck.
 
 ## Wiring
 
@@ -285,154 +229,109 @@ the bench), source [`solarleuchte-wiring.svg`](solarleuchte-wiring.svg). Edit
 the SVG and re-export with
 `inkscape --export-type=pdf --export-filename=docs/solarleuchte-wiring.pdf docs/solarleuchte-wiring.svg`.
 
-### What the PCA9685 breakout's pins are
-
-The breakout brings out `GND OE SCL SDA VCC V+` plus sixteen `PWM`/`V+`/`GND`
-groups. Only three of those matter here, and two are traps:
-
-| Pin | What it is | Here |
-| --- | --- | --- |
-| `VCC` | logic supply — **and the high level of every PWM output** | 3.3 V from the XIAO |
-| `V+` | servo rail; feeds only the middle pin of the sixteen groups | **leave open** |
-| `OE` | output enable, **active LOW**, pulled down on the board | to `GND` |
-| `SDA` / `SCL` | I²C | `D4` / `D5` |
-| `PWM` of group 0 | the one channel used | gate network |
-
-**`VCC` must be 3.3 V, never 5 V.** Two separate reasons, either of which is
-enough: the PWM output's high level *is* `VCC`, and the whole gate calculation
-above assumes 3.3 V; and the board's I²C pull-ups go to `VCC`, so 5 V there puts
-5 V on `SDA`/`SCL`, which the C3's pads do not tolerate.
-
-`OE` could be driven from a GPIO for a hard blackout, but the `SLEEP` bit does
-that and saves 6 mA as well. Tie it to `GND` and leave the pad free.
-
-### Nets
-
 ```
                       BMS P+ ──┬── XIAO  B+
                                ├── CN3791 BAT+
                                └── XY-MOS DC+ ──► OUT+ ──► string ──► OUT−
                       BMS P− ──┬── XIAO  GND
                                ├── CN3791 GND
-                               ├── XY-MOS DC− and signal GND
-                               └── PCA9685 GND
+                               └── XY-MOS DC− and signal GND
 
-   XIAO 3V3 ─────────────────► PCA9685 VCC
-   XIAO D4 (GPIO6) ──────────► PCA9685 SDA
-   XIAO D5 (GPIO7) ──────────► PCA9685 SCL
-                               PCA9685 OE ──► GND
-                               PCA9685 V+ ──► open
-
-   PCA9685 ch0 PWM ──► 330 Ω ──┬──► XY-MOS SIG
+   XIAO D8 (GPIO8) ──► 220 Ω ──┬──► XY-MOS SIG
                                └──► 100 kΩ ──► GND
+
+   XIAO D1 (GPIO3) ──► panel divider tap (ADC1)
+   XIAO D2 (GPIO4) ──► battery divider tap (ADC1), as on terrasse
 ```
 
 **The string hangs off `P+`, not off the XIAO.** ~150 mA has no business
 crossing a microcontroller.
 
 On the XY-MOS board the MOSFET is in the low side: `OUT+` is tied internally to
-`DC+` and the switching happens in `OUT−`. That matches the circuit above, but
-these modules exist in variants — read the silkscreen before trusting it. On
-the signal header connect only `SIG` and `GND`; a `VCC` pin there stays open.
+`DC+` and the switching happens in `OUT−`. These modules exist in variants —
+read the silkscreen. On the signal header connect only `SIG` and `GND`; a `VCC`
+pin there stays open. **Desolder the module's indicator LED**; 1–3 mA all
+evening buys nothing.
+
+I²C is not used. There is no PCA9685 in the final circuit — it was the fallback
+for a small panel, and the panel is not small.
 
 ### Before powering it up
 
-The list in [`wiring.md`](wiring.md#before-you-power-it-up) applies; item 3 is
-the one that bites on this node.
+The list in [`wiring.md`](wiring.md#before-you-power-it-up) applies.
 
 1. Continuity from every module's GND to the XIAO's GND.
-2. `SDA` and `SCL` not swapped.
-3. **No 5 V anywhere near a GPIO** — `VCC` included.
-4. Fit the 330 Ω and 100 kΩ only if the XY-MOS board does not already carry them.
-5. Indicator LEDs off both modules.
-
-Then USB in and read the log: the node reports what it found on its buses in
-the first second, and the PCA9685 has to appear at 0x40.
-
-### Not wired yet
-
-Night detection off a panel divider. `D1` (GPIO3) is free and on ADC1; `D2`
-(GPIO4) is reserved for the battery divider as on `terrasse`. The divider ratio
-cannot be chosen until the panel is identified — an 18 V panel reaching ~25 V
-`Voc` cold needs a completely different one from a 6 V panel.
+2. Fit the 220 Ω and 100 kΩ only if the XY-MOS board does not already carry them.
+3. Indicator LED off the XY-MOS module.
+4. Nothing on `D9` — a wire there strapped the chip into download mode for an
+   evening on 2026-10-04, and the symptom was a board that looked dead.
 
 ## Parts
 
 | Role | Part | Note |
 | --- | --- | --- |
 | Controller | XIAO ESP32-C3 | on hand |
-| PWM | PCA9685 breakout, 16-ch 12-bit | on hand; one channel used |
 | Switch | XY-MOS module, D4184 | on hand; see the gate-charge section |
-| Gate | 330 Ω series, 100 kΩ to GND | **probably already on the module** — verify |
+| Gate | 220 Ω series, 100 kΩ to GND | **probably already on the module** — verify |
 | Fallback switch | AO3400A, SOT-23 | ~€0.10, buy two against a mushy fade |
 | Cell | 2000 mAh LiPo pouch | on hand, ×2 |
 | Protection | BMS board | on hand |
-| Charger | CN3791 | on hand; MPPT jumper to *this* panel, not 18 V |
-| Panel | see the table above | on hand — **which one is unrecorded** |
+| Charger | CN3791 | on hand; `R8` → 1 Ω, MPPT jumper to 18 V |
+| Panel | Waveshare 18 V / 10 W | on hand, its own — see [`solar.md`](solar.md) |
 
-Nothing else. No boost module, no sense resistor, no gate driver — the PCA9685
-output drives the gate directly.
+Nothing else. No boost module, no sense resistor, no PWM expander, no gate
+driver.
 
-**Desolder the indicator LED on both modules.** The PCA9685 breakout and the
-XY-MOS board each carry one, and 1–3 mA apiece is up to 20 % of a 28 mA budget,
-burnt all night to tell nobody anything.
-
-Also check the PCA9685 breakout's I²C pull-ups: the bus already carries the
-SHT31-D, so a second set lands in parallel. Its default address is 0x40 and
-does not collide.
-
-A pouch cell outdoors is acceptable in a box built to be dry — the terrasse node
-already does exactly that — but it has no hard can. If the light's housing can
-pool water, an 18650 is the more forgiving choice.
+A pouch cell outdoors is acceptable in a box built to be dry — the terrasse
+node already does exactly that — but it has no hard can. If the light's housing
+can pool water, an 18650 is the more forgiving choice.
 
 ## Firmware notes
 
-- **Driver crate: [`pwm-pca9685`](https://crates.io/crates/pwm-pca9685) 1.0** —
-  platform-agnostic, embedded-hal, no reason to write register pokes by hand.
-- **1 kHz PWM.** The PCA9685 spans 24–1526 Hz via `PRE_SCALE`; 1 kHz is
-  flicker-free to the eye and leaves headroom under the ceiling. The 2 kHz an
-  earlier draft specified is not reachable on this chip and was an artefact of
-  the RC-oscillator plan.
-- **Gamma-correct the duty.** A linear ramp does not look linear: it jumps at
-  the bottom and flattens at the top. `duty = (perceived^2.2) * 4095`. The
-  PCA9685's 12 bits are native, so nothing is thrown away.
+The node's shape is **not** the one this firmware already has. `run_battery` is
+built around cold boot, one round, deep sleep; this one wakes once at dusk and
+stays up for hours. The sleeping part is the day, not the gaps.
+
+- **LEDC, 12 bit, 1 kHz.** Native on the C3, nothing to add. See above for why
+  not faster.
+- **Gamma-correct the duty**, or a linear ramp jumps at the bottom and flattens
+  at the top. The table in
+  [`examples/pca9685_bench.rs`](../examples/pca9685_bench.rs) is the one that
+  was tried and looked right on hardware 2026-10-04 — 256 entries of
+  `round(((1 - cos(2πi/256))/2)^2.2 × 4095)`, whose largest neighbouring step is
+  1.23 % of perceived brightness, under the ~2 % that is noticeable. It is
+  independent of what drives the LEDs and carries over unchanged.
+- **25 s per breath.** Under ~10 s reads as agitated.
+- **Dusk from [`solar.rs`](../src/solar.rs)**, not from a light sensor: it
+  already carries sunrise and sunset for 49.87 N / 8.65 E at 24 points through
+  the year, worst interpolation error two minutes. The 23:00 cutoff needs the
+  wall clock, which `state.rs` keeps across deep sleep and NTP anchors.
 - **Compensate against `battery_voltage`**, since the string runs off the cell
   and dims as it discharges.
-- **`SLEEP` bit set during daylight.** 6 mA becomes 2.2 µA, and the lamp is off
-  anyway. Clearing it needs 500 µs for the oscillator, then a `RESTART` —
-  see the datasheet's restart sequence.
-- **A sine half-wave over 20–30 s** reads as calm. Anything under ~10 s reads as
-  agitated. Longer periods also cut the wake rate, which is the cheapest lever
-  on the budget.
-- **Night detection off the panel divider**, as the original board did — no LDR.
+- **Wi-Fi off while lit.** 25 mA assumes the radio is down; a connected station
+  is several times that. Connect on a schedule, not continuously.
 - **Expose the curve over MQTT** (`smarthome/solarleuchte/config/<key>`, the
   mechanism README.md already describes) so the choice between breathing and a
-  flat low level is made in the garden rather than at the desk. A constant 20 %
-  is a legitimate outcome and cheaper than breathing at 50 %.
+  flat low level is made in the garden rather than at the desk.
 
 Node name `solarleuchte`, following the fleet's German naming.
 
 ## Before you build any of this
 
-- **Measure the string current.** Multimeter in series with the chain, original
-  board on. **This is the number the entire budget rests on, and 20 mA is a
-  guess.** Measure it again at 4.2 V from a bench supply: full charge pushes
-  roughly 3–4× what 3.7 V does through the same series resistors, and if the
-  LEDs dislike it the fix is a duty ceiling in firmware, not a part.
+- **Measure the string current.** Multimeter in series. It is no longer
+  load-bearing — the margin covers 20 mA and 100 mA alike — but it is the one
+  number on this page that is still a guess. Measure it at 4.2 V too: full
+  charge pushes roughly 3–4× what 3.7 V does through the same series resistors,
+  and if the LEDs dislike it the fix is a duty ceiling in firmware, not a part.
 - **Check the module does not cycle colours by itself.** If it does, it has its
   own IC, cannot be dimmed, and has to be replaced.
-- **Bench the panel**: Voc and Isc in sun. Which panel is on hand was never
-  written down, and the table above spans an 8:1 range of outcomes. With the
-  2 W row at 1.13× this is no longer an academic question.
-- **Measure the PCA9685 breakout's actual draw** before trusting the 6 mA. That
-  is a datasheet typical with no load, and the board carries a power LED and
-  pull-ups of its own.
-- **Check what the XY-MOS module already has fitted**: gate series resistor
-  (must be ≥330 Ω, or it overloads the PCA9685 output), gate pulldown, and the
-  indicator LED that has to come off.
+- **Check what the XY-MOS module already has fitted**: gate series resistor,
+  pulldown, and the indicator LED that has to come off.
 - **Count the LEDs and look for resistors on the module.** Twenty in parallel
   with individual resistors and four series groups of five behave nothing alike,
   and it is usually visible.
+- **Size the panel divider** for 18 V nominal and ~25 V `Voc` at −20 °C, not for
+  the 6 V an earlier draft of this page assumed.
 - The cell's **3.6 V after a sunny day** was never explained. It stops mattering
-  once the board is replaced, but if the original panel is reused, its charge
-  path is a suspect.
+  once the board is replaced, but if the original panel is reused anywhere, its
+  charge path is a suspect.
