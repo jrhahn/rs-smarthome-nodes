@@ -112,6 +112,36 @@ duty, so a duty ceiling cannot protect an LED from it. If the measurement shows
 more than ~20 mA per LED at 4.2 V, the fix is one resistor in series with the
 whole string, and it is a part rather than a line of firmware.
 
+### The string is bright enough to need a ceiling
+
+The first measurement (2026-10-04) hit the XIAO charger's ~370 mA ceiling at
+**350 mA**, so the string wants *at least* that. That is well outside the
+20–100 mA this page had been reasoning about, and it changes the answer.
+
+The breath helps on its own: the gamma-corrected table's mean is **36 % of
+peak**, so the string is never lit flat out for long. Even so, taking 350 mA as
+a floor:
+
+| peak | mean at 36 % | + controller | per evening | panel margin | cell lasts |
+| --- | --- | --- | --- | --- | --- |
+| 100 mA | 36 mA | 61 mA | 396 mAh | 4.8× | 5.0 evenings |
+| 200 mA | 72 mA | 97 mA | 630 mAh | 3.0× | 3.2 evenings |
+| **350 mA** | **126 mA** | **151 mA** | **982 mAh** | **1.9×** | **2.0 evenings** |
+| 500 mA | 180 mA | 205 mA | 1332 mAh | 1.4× | 1.5 evenings |
+
+Two evenings of buffer is not enough for a German November, so **a duty ceiling
+goes in**. It is cheap, because gamma works in the right direction here: energy
+scales with duty, perceived brightness only with duty^(1/2.2).
+
+| ceiling | energy | perceived brightness | evenings |
+| --- | --- | --- | --- |
+| 100 % | 100 % | 100 % | 2.0 |
+| **50 %** | **50 %** | **73 %** | **3.5** |
+| 35 % | 35 % | 62 % | 4.4 |
+
+Half the energy for 73 % of the brightness. The ceiling belongs over MQTT with
+the rest of the curve, so the trade can be made in the garden.
+
 One thing still open, and the bench settles it: if the original carousel changes
 *colour* on two wires, the module contains its own colour-cycle IC. Such a
 module cannot be dimmed — PWM would restart its sequence — and would have to be
@@ -276,14 +306,24 @@ the SVG and re-export with
 ```
                       BMS P+ ──┬── XIAO  B+
                                ├── CN3791 BAT+
-                               └── XY-MOS VIN+ ──► OUT+ ──► string ──► OUT−
+                               ├── XY-MOS VIN+ ──► OUT+ ──► string ──► OUT−
+                               └── 100 kΩ ──┬── XIAO D2 (GPIO4)
+                                            ├── 100 kΩ ──► P−
+                                            └── 100 nF ──► P−
                       BMS P− ──┬── XIAO  GND
                                ├── CN3791 GND
                                └── XY-MOS VIN− and GND
 
    XIAO D8 (GPIO8) ──────────────► XY-MOS TRIG/PWM
                                    (100 Ω and 100 kΩ are on the module)
+```
 
+| Pad | GPIO | What |
+| --- | --- | --- |
+| `D2` | 4 | battery divider tap (ADC1) |
+| `D8` | 8 | LEDC → `TRIG/PWM` |
+
+```
    XIAO D1 (GPIO3) ──► panel divider tap (ADC1)
    XIAO D2 (GPIO4) ──► battery divider tap (ADC1), as on terrasse
 ```
@@ -298,6 +338,23 @@ voltage mean anything.
 
 I²C is not used. There is no PCA9685 in the final circuit — it was the fallback
 for a small panel, and the panel is not small.
+
+### The battery divider is not telemetry here
+
+Fitted 2026-10-04, same parts and same pin as the terrasse node, which
+[`README.md`](../README.md#wiring-battery-divider--xiao-esp32-c3) already
+describes: 100 kΩ / 100 kΩ from the battery rail to ground, 100 nF across the
+lower leg, tap on `D2` (GPIO4, ADC1). `src/battery.rs` undoes the ratio and
+calibrates against the chip's eFuse reference, so there is nothing to write.
+
+**The foot goes to `P−`, not to the cell's `B−`.** On terrasse that rule saves
+~21 µA from drawing past the protection board's cutoff and deep-discharging the
+pack the board was fitted to protect; it is the same rule here.
+
+What differs from terrasse is the *purpose*. There `battery_voltage` is
+telemetry. Here it is **part of the control loop**: the breath is compensated
+against it, or the brightness drifts with the state of charge over the evening,
+and the duty ceiling below is expressed against it too. No divider, no ceiling.
 
 ### Before powering it up
 
@@ -362,10 +419,11 @@ Node name `solarleuchte`, following the fleet's German naming.
 
 ## Before you build any of this
 
-- **Measure the string current.** Multimeter in series. It is no longer
-  load-bearing for the budget — the margin covers 20 mA and 100 mA alike — but
-  it is the one number on this page that is still a guess, and there is a
-  second reason to take it at **4.2 V** as well as at 3.7 V. See below.
+- **Measure the string current properly.** First attempt 2026-10-04 read
+  **350 mA and was clamped**: with no cell fitted the string was running off
+  the XIAO's own charger, whose ceiling is ~370 mA, so the number is a lower
+  bound on the string and an upper bound on that charger. Redo it from the cell
+  with USB unplugged, and count the LEDs while you are there.
 - **Check the module does not cycle colours by itself.** If it does, it has its
   own IC, cannot be dimmed, and has to be replaced.
 - **Check what the XY-MOS module already has fitted**: gate series resistor,

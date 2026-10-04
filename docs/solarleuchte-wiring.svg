@@ -76,24 +76,35 @@
 
 
 
-  <line class="sig" x1="710" y1="400" x2="1006" y2="400"/>
+  <line class="sig" x1="710" y1="400" x2="1080" y2="400"/>
   <text class="pin" x="716" y="392">D8 · GPIO8</text>
-  <rect class="res" x="1006" y="389" width="44" height="22"/>
-  <text class="pin m" x="1028" y="378">100 Ω</text>
-  <line class="sig" x1="1050" y1="400" x2="1080" y2="400"/>
-  <circle class="dots" cx="1065" cy="400" r="5"/>
-  <text class="pin e" x="1074" y="394">TRIG</text>
-  <line class="sig" x1="1065" y1="400" x2="1065" y2="560"/>
-  <rect class="res" x="1054" y="560" width="22" height="44"/>
-  <text class="pin" x="1084" y="588">100 kΩ</text>
-  <line class="neg" x1="1065" y1="604" x2="1065" y2="760"/>
-  <circle class="dotn" cx="1065" cy="760" r="5"/>
+  <text class="pin e" x="1074" y="392">TRIG/PWM</text>
+
+  <line class="pos" x1="900" y1="215" x2="900" y2="280"/>
+  <rect class="res" x="889" y="280" width="22" height="44"/>
+  <text class="pin" x="918" y="308">100 kΩ</text>
+  <line class="sig" x1="900" y1="324" x2="900" y2="500"/>
+  <circle class="dots" cx="900" cy="460" r="5"/>
+  <line class="sig" x1="710" y1="460" x2="900" y2="460"/>
+  <text class="pin" x="716" y="452">D2 · GPIO4</text>
+  <rect class="res" x="889" y="500" width="22" height="44"/>
+  <text class="pin" x="918" y="528">100 kΩ</text>
+  <line class="neg" x1="900" y1="544" x2="900" y2="760"/>
+  <circle class="dotn" cx="900" cy="760" r="5"/>
+  <line class="sig" x1="900" y1="460" x2="980" y2="460"/>
+  <line class="sig" x1="980" y1="460" x2="980" y2="596"/>
+  <line class="sig" x1="962" y1="596" x2="998" y2="596"/>
+  <line class="sig" x1="962" y1="608" x2="998" y2="608"/>
+  <text class="pin" x="1006" y="608">100 nF</text>
+  <line class="neg" x1="980" y1="608" x2="980" y2="760"/>
+  <circle class="dotn" cx="980" cy="760" r="5"/>
 
   <rect class="blk" x="1080" y="320" width="150" height="150"/>
   <text class="lbl" x="1098" y="362">XY-MOS</text>
   <text class="sub" x="1098" y="384">2× D4184</text>
   <text class="sub" x="1098" y="402">low-side</text>
   <text class="sub" x="1098" y="420">OUT+ = VIN+</text>
+  <text class="sub" x="1098" y="438">R3, R1 onboard</text>
   <line class="pos" x1="1150" y1="320" x2="1150" y2="215"/>
   <circle class="dotp" cx="1150" cy="215" r="5"/>
   <text class="pin" x="1158" y="312">VIN+</text>
@@ -123,5 +134,5 @@
   <text class="note" x="104" y="649">Punkt = Verbindung</text>
   <text class="note" x="58" y="673">Kreuzung ohne Punkt = keine Verbindung</text>
   <text class="note" x="58" y="695">Kette an P+, nicht am XIAO</text>
-  <text class="note" x="58" y="717">100 Ω / 100 kΩ sitzen auf dem XY-MOS</text>
+  <text class="note" x="58" y="717">Gate-Widerstände sitzen auf dem XY-MOS</text>
 </svg>
