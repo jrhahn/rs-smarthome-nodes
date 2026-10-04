@@ -130,6 +130,22 @@ Wake cost: ~270 ms of ROM boot and app init (measured for the terrasse node) at
 if the panel turns out small — a slow breath tolerates 15 s steps far better
 than a fast one.
 
+### The fork that was not taken
+
+Staying awake and using the C3's own LEDC is a real option, and on the merits of
+the code it is the better one: a `set_duty` loop needs no I²C driver, no wake
+scheduling, and LEDC outruns the PCA9685 anyway (14 bits available, no 1526 Hz
+ceiling). It costs 45 mA against 28 mA, i.e. 2.0 Wh/day against 1.24, and only
+the 10 W panel carries that — the 2 W row falls to 0.7× and does not work at
+all. It also needs Wi-Fi explicitly off all night, or the 25 mA figure is pure
+fiction, and a node that stays up all night is a shape this firmware does not
+have: `run_battery` is built around cold boot, one round, deep sleep.
+
+**Decided 2026-09-22: the PCA9685 stays in.** The panel is not identified, the
+chip is already on the shelf, and 17 mA is most of the margin on anything
+smaller than the 10 W panel. If the panel measures 10 W and the extra firmware
+is wanted, this is the thing to revisit — not before.
+
 ### The budget that follows
 
 LED current of **20 mA is an assumption, not a measurement**, and it dominates:
