@@ -84,6 +84,34 @@ charger, not to the LED side; an earlier draft of this page guessed otherwise.
 Consequences: **no boost converter is needed**, and the brightness will track
 the cell voltage, which the firmware corrects for (below).
 
+**4.2 V on the string is not something this rebuild introduces.** The original
+board passes the cell straight through, so the 3.6–3.7 V measured was the
+cell's state of charge that afternoon and nothing else; a full cell puts 4.2 V
+on the same LEDs, and has done every sunny day since the lamp was made.
+
+What does change with charge is the current, through the drop across the
+string's own series resistors. Taking a white LED's `Vf` as 3.0 V — itself
+unmeasured:
+
+| cell | drop across R | relative |
+| --- | --- | --- |
+| 3.4 V | 0.4 V | 1.0× |
+| 3.7 V | 0.7 V | 1.8× |
+| 4.2 V | 1.2 V | **3.0×** |
+
+An earlier draft of this page said 3–4× against 3.7 V; it is 1.7× against
+3.7 V, and 3× only from 3.4 V. Real diodes flatten it further, since `Vf`
+climbs with current.
+
+**Two different problems hide in that swing, and only one is free.** Mean
+current, i.e. brightness drifting with the state of charge, is already handled:
+the firmware compensates against `battery_voltage`, which incidentally caps the
+duty at 4.2 V to whatever 3.7 V would have produced. **Peak current is not** —
+during the PWM on-phase the full 4.2 V is across the string however small the
+duty, so a duty ceiling cannot protect an LED from it. If the measurement shows
+more than ~20 mA per LED at 4.2 V, the fix is one resistor in series with the
+whole string, and it is a part rather than a line of firmware.
+
 One thing still open, and the bench settles it: if the original carousel changes
 *colour* on two wires, the module contains its own colour-cycle IC. Such a
 module cannot be dimmed — PWM would restart its sequence — and would have to be
@@ -335,10 +363,9 @@ Node name `solarleuchte`, following the fleet's German naming.
 ## Before you build any of this
 
 - **Measure the string current.** Multimeter in series. It is no longer
-  load-bearing — the margin covers 20 mA and 100 mA alike — but it is the one
-  number on this page that is still a guess. Measure it at 4.2 V too: full
-  charge pushes roughly 3–4× what 3.7 V does through the same series resistors,
-  and if the LEDs dislike it the fix is a duty ceiling in firmware, not a part.
+  load-bearing for the budget — the margin covers 20 mA and 100 mA alike — but
+  it is the one number on this page that is still a guess, and there is a
+  second reason to take it at **4.2 V** as well as at 3.7 V. See below.
 - **Check the module does not cycle colours by itself.** If it does, it has its
   own IC, cannot be dimmed, and has to be replaced.
 - **Check what the XY-MOS module already has fitted**: gate series resistor,
