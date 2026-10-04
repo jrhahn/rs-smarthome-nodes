@@ -112,6 +112,11 @@ the shelf — keeps its duty in its own registers and runs its own oscillator.
 The ESP32-C3 then uses **deep sleep**, which this firmware already does
 everywhere, and the lamp stays lit through it.
 
+**Verified on hardware 2026-10-04** with
+[`examples/pca9685_bench.rs`](../examples/pca9685_bench.rs): channel 0 held at
+2048/4096 through a 30 s deep sleep, steady, no flicker. That was the one
+assumption everything here rested on, and it holds.
+
 | | continuous draw |
 | --- | --- |
 | ESP32-C3 awake, LEDC | ~25 mA |
@@ -129,6 +134,33 @@ Wake cost: ~270 ms of ROM boot and app init (measured for the terrasse node) at
 ~30 mA, every 5 s, is ~2 mA averaged. Stretching the wake interval is the lever
 if the panel turns out small — a slow breath tolerates 15 s steps far better
 than a fast one.
+
+### What the bench rig then made obvious
+
+A smooth breath and deep sleep do not fit together, and no tuning reconciles
+them. The fade that looked right on the bench — 25 s per breath, 256
+gamma-corrected steps, verified 2026-10-04 — wants a new duty every **98 ms**,
+against a wake that costs **270 ms**. The chip cannot sleep between steps,
+because it cannot come back in time to take the next one.
+
+So the period is not a preference. It is bought:
+
+| | breath | total | per day | vs 2 W panel | vs 10 W |
+| --- | --- | --- | --- | --- | --- |
+| drift, 5 s wake | ~21 min | 28 mA | 1.24 Wh | 1.13× | 5.6× |
+| drift, 1 s wake | ~4 min | 34 mA | 1.51 Wh | **0.93×** | 4.6× |
+| awake fade | 25 s | 45 mA | 2.0 Wh | **0.70×** | 3.5× |
+
+Which collapses the whole design question into the panel, and nothing else:
+
+- **If the panel is the 10 W Waveshare, take the awake fade** — every row clears
+  it. And then [the fork below](#the-fork-that-was-not-taken) reopens and wins
+  on its own merits: with the ESP awake anyway, LEDC is the better PWM, and
+  **the PCA9685 comes back out of the circuit.**
+- **If it is anything smaller, the breath is measured in minutes**, the PCA9685
+  stays, and 5 s is the only wake interval the budget tolerates.
+
+There is no middle. **Identify the panel before writing any more firmware.**
 
 ### The fork that was not taken
 
