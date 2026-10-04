@@ -29,7 +29,7 @@ required-features = ["hal"]
 #
 # See `docs/base-platform.md` for the reasoning.
 [[example]]
-name = "pca9685_bench"
+name = "lamp_bench"
 # Needs the chip support crates; a host build (`--no-default-features`) has none.
 required-features = ["hal"]
 
@@ -179,7 +179,3 @@ codegen-units = 1
 debug = false
 overflow-checks = false
 
-[dev-dependencies]
-# Only the `pca9685_bench` example uses this; the firmware itself does not
-# depend on it yet.
-pwm-pca9685 = "1.0"

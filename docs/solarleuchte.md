@@ -103,10 +103,11 @@ on this board, and this repository already knew it:
 
 **Second answer: move the PWM off-chip.** A PCA9685 holds its duty in its own
 registers and runs its own oscillator, so the C3 can use the deep sleep this
-firmware already does everywhere. **Verified on hardware 2026-10-04** with
-[`examples/pca9685_bench.rs`](../examples/pca9685_bench.rs): channel 0 held at
-2048/4096 through a 30 s deep sleep, steady, no flicker. The chip does what it
-claims.
+firmware already does everywhere. **Verified on hardware 2026-10-04**: channel 0 held at 2048/4096 through a 30 s
+deep sleep, steady, no flicker. The chip does what it claims. The rig that
+showed it is not in the tree any more — the PCA9685 left the design two
+commits later — but it is in the history at `012daac`, and the gamma table it
+carried lives on in [`examples/lamp_bench.rs`](../examples/lamp_bench.rs).
 
 **Then the bench showed what that costs.** A smooth breath and deep sleep do
 not fit together, and no tuning reconciles them. The fade that looked right —
@@ -309,11 +310,13 @@ stays up for hours. The sleeping part is the day, not the gaps.
   not faster.
 - **Gamma-correct the duty**, or a linear ramp jumps at the bottom and flattens
   at the top. The table in
-  [`examples/pca9685_bench.rs`](../examples/pca9685_bench.rs) is the one that
-  was tried and looked right on hardware 2026-10-04 — 256 entries of
+  [`examples/lamp_bench.rs`](../examples/lamp_bench.rs) is the one that was
+  tried and looked right on hardware 2026-10-04 — 256 entries of
   `round(((1 - cos(2πi/256))/2)^2.2 × 4095)`, whose largest neighbouring step is
   1.23 % of perceived brightness, under the ~2 % that is noticeable. It is
-  independent of what drives the LEDs and carries over unchanged.
+  independent of what drives the LEDs and carried over unchanged when the
+  PCA9685 was replaced by LEDC — confirmed smooth on hardware again
+  2026-10-04, driving the XY-MOS gate directly from `D8`.
 - **25 s per breath.** Under ~10 s reads as agitated.
 - **Dusk from [`solar.rs`](../src/solar.rs)**, not from a light sensor: it
   already carries sunrise and sunset for 49.87 N / 8.65 E at 24 points through
