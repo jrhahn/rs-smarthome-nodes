@@ -36,59 +36,13 @@ use esp_hal::{
 };
 use log::info;
 use rs_smarthome_nodes::battery::{self, Battery};
+use rs_smarthome_nodes::lamp;
 
 /// One full breath, dark to bright to dark. Under ~10 s reads as agitated.
 const PERIOD_MS: u32 = 25_000;
 
-/// **Gamma-corrected half-cosine, one full breath, 12-bit duty.**
-///
-/// Two corrections live in this one table, and both are needed.
-///
-/// The *cosine* is why the breath has no corners: a triangle ramp visibly
-/// kinks at the top and bottom, where this flattens into the turn.
-///
-/// The *gamma* is why it looks linear at all. The eye responds roughly to the
-/// 1/2.2 power of emitted light, so feeding a linear duty ramp to an LED makes
-/// it leap away from black and then crawl once it is bright. Raising the
-/// intended perceived brightness to 2.2 before it becomes a duty cancels that.
-///
-/// 256 entries, because the largest step between neighbours is then **1.23 %**
-/// of perceived brightness -- under the ~2 % that is noticeable -- so no
-/// interpolation is needed between them. Generated with:
-///
-/// ```python
-/// round((((1 - math.cos(2*math.pi*i/256)) / 2) ** 2.2) * 4095)
-/// ```
-///
-/// Verified on hardware 2026-10-04 and unchanged since: the curve is
-/// independent of whatever drives the LEDs.
-const BREATH: [u16; 256] = [
-       0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,
-       1,    1,    2,    2,    3,    4,    5,    6,    8,   10,   12,   15,
-      18,   21,   25,   29,   34,   40,   46,   52,   60,   68,   77,   87,
-      97,  109,  122,  135,  150,  165,  182,  200,  219,  240,  261,  284,
-     308,  334,  361,  389,  419,  450,  483,  517,  553,  590,  629,  669,
-     710,  753,  798,  844,  891,  940,  990, 1042, 1095, 1149, 1204, 1261,
-    1319, 1378, 1438, 1499, 1561, 1624, 1688, 1753, 1818, 1884, 1950, 2017,
-    2084, 2152, 2220, 2288, 2356, 2424, 2492, 2559, 2626, 2693, 2760, 2825,
-    2890, 2955, 3018, 3080, 3142, 3202, 3261, 3318, 3374, 3428, 3481, 3533,
-    3582, 3629, 3675, 3718, 3760, 3799, 3836, 3871, 3904, 3934, 3961, 3986,
-    4009, 4029, 4046, 4061, 4073, 4083, 4090, 4094, 4095, 4094, 4090, 4083,
-    4073, 4061, 4046, 4029, 4009, 3986, 3961, 3934, 3904, 3871, 3836, 3799,
-    3760, 3718, 3675, 3629, 3582, 3533, 3481, 3428, 3374, 3318, 3261, 3202,
-    3142, 3080, 3018, 2955, 2890, 2825, 2760, 2693, 2626, 2559, 2492, 2424,
-    2356, 2288, 2220, 2152, 2084, 2017, 1950, 1884, 1818, 1753, 1688, 1624,
-    1561, 1499, 1438, 1378, 1319, 1261, 1204, 1149, 1095, 1042,  990,  940,
-     891,  844,  798,  753,  710,  669,  629,  590,  553,  517,  483,  450,
-     419,  389,  361,  334,  308,  284,  261,  240,  219,  200,  182,  165,
-     150,  135,  122,  109,   97,   87,   77,   68,   60,   52,   46,   40,
-      34,   29,   25,   21,   18,   15,   12,   10,    8,    6,    5,    4,
-       3,    2,    2,    1,    1,    1,    0,    0,    0,    0,    0,    0,
-       0,    0,    0,    0,
-];
-
 /// How long each table entry is held. Falls out of the period and the table.
-const STEP_MS: u32 = PERIOD_MS / BREATH.len() as u32;
+const STEP_MS: u32 = PERIOD_MS / lamp::BREATH.len() as u32;
 
 /// **1 kHz, and deliberately not faster.**
 ///
@@ -100,43 +54,19 @@ const STEP_MS: u32 = PERIOD_MS / BREATH.len() as u32;
 /// flicker-free to the eye and to a phone camera.
 const PWM_HZ: u32 = 1_000;
 
-/// **Duty ceiling, as a percentage of the table.**
+/// Ceiling the bench applies, as a percentage of [`lamp::BREATH`].
 ///
-/// The string draws **640 mA at 4.06 V** -- measured 2026-10-04 from the cell,
-/// 25 LEDs, i.e. 25.6 mA each and ~29 mA at a full 4.2 V. Unchecked that is
-/// 1660 mAh an evening out of a 2000 mAh cell: the lamp would flatten it in
-/// just over one night and leave the panel 1.1x of margin.
-///
-/// Scaling the whole table is cheap because gamma runs the right way. Energy
-/// falls with the duty, perceived brightness only with `duty^(1/2.2)`:
-///
-/// | ceiling | perceived | per evening | panel | evenings |
-/// | --- | --- | --- | --- | --- |
-/// | 100 % | 100 % | 1660 mAh | 1.1x | 1.2 |
-/// | 40 % | 66 % | 762 mAh | 2.5x | 2.6 |
-/// | **30 %** | **58 %** | **612 mAh** | **3.1x** | **3.3** |
-/// | 20 % | 48 % | 462 mAh | 4.1x | 4.3 |
-///
-/// It also keeps the LEDs inside their ratings without a series resistor. At
-/// 29 mA peak against a typical 20 mA DC rating the ratio is 1.45x, and a
-/// datasheet normally allows two to three times the DC figure when pulsed --
-/// which at a 30 % duty is what these are.
-///
-/// **In the node this needs a compiled-in maximum, not just this constant.**
-/// The ceiling belongs on MQTT so it can be trimmed in the garden, but a
-/// config that could raise it to 100 % would run the string at a DC-equivalent
-/// 29 mA for months. MQTT may lower it; it may not raise it past ~40 %.
+/// The node does not use this: there the ceiling is
+/// [`lamp::MAX_DUTY_PCT`] scaled by the twilight and charge factors, which
+/// need a clock and a cell this rig has neither the NTP anchor nor the
+/// evening for. This is the same arithmetic with those two factors pinned, so
+/// a brightness can be looked at on a bench at any hour.
 const CEILING_PCT: u32 = 30;
 
-/// Apply [`CEILING_PCT`], rounding rather than truncating.
-///
-/// Truncation would push the smallest table entries to zero; rounding costs
-/// six more zeros out of 256 at the dark end, which is below anything the eye
-/// resolves at 1/4095 anyway. Relative step sizes are untouched, so the breath
-/// is exactly as smooth as it was -- scaling the duty scales perceived
-/// brightness uniformly by `k^(1/2.2)`.
-const fn capped(entry: u16) -> u32 {
-    (entry as u32 * CEILING_PCT + 50) / 100
+/// [`CEILING_PCT`] of the breath, rounded, exactly as [`lamp::duty`] rounds.
+fn bench_duty(step: usize) -> u32 {
+    let shape = lamp::BREATH[step % lamp::BREATH.len()] as u32;
+    (shape * CEILING_PCT + 50) / 100
 }
 
 /// **Hold the output full on instead of breathing, to measure the string.**
@@ -226,19 +156,25 @@ fn main() -> ! {
     }
 
     info!("breathing on D8: {PERIOD_MS} ms period, {STEP_MS} ms per step, {PWM_HZ} Hz");
-    info!("ceiling {CEILING_PCT} % -> peak duty {}/4096", capped(4095));
+    info!(
+        "bench ceiling {CEILING_PCT} % -> peak duty {}/4096",
+        bench_duty(128)
+    );
     info!("with no string attached, watch the XY-MOS indicator LED");
 
     let mut step: usize = 0;
     loop {
-        channel0.set_duty_hw(capped(BREATH[step % BREATH.len()]));
+        channel0.set_duty_hw(bench_duty(step));
 
         // Once per breath, so a long run stays readable.
-        if step % BREATH.len() == 0 {
+        if step % lamp::BREATH.len() == 0 {
             match cell.read_millivolts() {
-                Some(mv) => info!("breath {}, cell {mv} mV, ~{} %",
-                                  step / BREATH.len() + 1, battery::percent(mv)),
-                None => info!("breath {}, cell unreadable", step / BREATH.len() + 1),
+                Some(mv) => info!(
+                    "breath {}, cell {mv} mV, ~{} %",
+                    step / lamp::BREATH.len() + 1,
+                    battery::percent(mv)
+                ),
+                None => info!("breath {}, cell unreadable", step / lamp::BREATH.len() + 1),
             }
         }
 

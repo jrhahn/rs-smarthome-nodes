@@ -48,6 +48,7 @@ pub mod discovery;
 pub mod ds18b20;
 #[cfg(feature = "drivers")]
 pub mod http;
+pub mod lamp;
 pub mod node;
 pub mod ntp;
 pub mod ota;
