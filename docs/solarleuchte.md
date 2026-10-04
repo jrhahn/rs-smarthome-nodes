@@ -169,10 +169,10 @@ A GPIO cannot carry the string — the C3 is rated ~40 mA per pin absolute and
 the current:
 
 ```
-GPIO ──► 220 Ω ──┬──► gate   D4184 (XY-MOS module)
-                 └──► 100 kΩ ──► GND
-BMS P+ ──► LED string ──────────► drain
-                                  source ──► GND
+GPIO ──► TRIG/PWM ──► [ 100 Ω ──┬── gates  Q1 ∥ Q2 (D4184) ]   on-module
+                                └── 100 kΩ ──► GND
+BMS P+ ──► VIN+ ──► OUT+ ──► LED string ──► OUT− ──► drains
+BMS P− ──► VIN− and GND
 ```
 
 Since the string runs straight off the cell, that is the whole power path — no
@@ -180,14 +180,29 @@ converter, no sense resistor, no current regulation. Brightness tracks the cell
 from 4.2 V down to 3.0 V, and the firmware compensates against the
 `battery_voltage` the node already measures.
 
-**220 Ω, not 330 Ω.** The value is set by whatever drives the gate: 330 Ω was
-sized for the PCA9685's 10 mA `IOH`, and a C3 pin will give 15 mA at 220 Ω with
-room under its 40 mA absolute rating. Both resistors **may already be fitted on
-the XY-MOS module** — check the series value and the pulldown before adding
-anything, since a second series resistor only doubles the switching time.
+**Both resistors are already on the XY-MOS board, and nothing needs adding** —
+read off the photographed module 2026-10-04:
 
-**The 100 kΩ pulldown is not optional.** GPIOs float through reset and boot;
-without it the lamp flashes to full brightness on every restart.
+| Ref | Code | Value | Role |
+| --- | --- | --- | --- |
+| `R3` | `101` | **100 Ω** | gate series |
+| `R1` | `104` | **100 kΩ** | gate pulldown |
+| `R2` | `202` | 2 kΩ | indicator LED |
+
+100 Ω rather than the 220 Ω this page specified, and that turns out to be the
+right value here for a reason the earlier draft could not know: **the board
+carries two D4184 in parallel**, `Q1` and `Q2`, so the gate charge is doubled to
+~27 nC. The lower resistor compensates — peak gate current is
+3.3 V / (100 Ω + ~30 Ω of pin impedance) ≈ **25 mA**, inside the C3's 40 mA
+absolute rating, and the switching time lands at ~0.8 µs, i.e. ~4 of 4096 codes.
+Adding a series resistor would only slow it down.
+
+**Leave the indicator LED alone too.** An earlier draft said to desolder it on
+a guess of 1–3 mA; at 2 kΩ it draws ~0.65 mA, which is 4 mAh over an evening
+against a 293 mAh budget. Not worth the iron.
+
+The pulldown is the part that matters at boot: GPIOs float through reset, and
+without `R1` the lamp would flash to full brightness on every restart.
 
 ### Gate charge decides the bottom of the fade
 
@@ -199,7 +214,7 @@ perceptually expensive ones. At 1 kHz and 12 bits one LSB is 244 ns:
 | | Qg at 4.5 V | switch time at 15 mA | codes lost | perceived |
 | --- | --- | --- | --- | --- |
 | AO3400A (SOT-23) | ~5.6 nC | ~0.4 µs | ~2 of 4096 | ~3 % |
-| **D4184** (XY-MOS module) | ~13.6 nC | ~0.7 µs | ~3 of 4096 | ~4 % |
+| **D4184 ×2** (XY-MOS module) | ~27 nC | ~0.8 µs | ~4 of 4096 | ~4 % |
 | IRLZ44N (TO-220) | ~48 nC | ~3.2 µs | ~13 of 4096 | ~7 % |
 
 Datasheet arithmetic, not a measurement. **The D4184 is good enough and already
@@ -232,13 +247,13 @@ the SVG and re-export with
 ```
                       BMS P+ ──┬── XIAO  B+
                                ├── CN3791 BAT+
-                               └── XY-MOS DC+ ──► OUT+ ──► string ──► OUT−
+                               └── XY-MOS VIN+ ──► OUT+ ──► string ──► OUT−
                       BMS P− ──┬── XIAO  GND
                                ├── CN3791 GND
-                               └── XY-MOS DC− and signal GND
+                               └── XY-MOS VIN− and GND
 
-   XIAO D8 (GPIO8) ──► 220 Ω ──┬──► XY-MOS SIG
-                               └──► 100 kΩ ──► GND
+   XIAO D8 (GPIO8) ──────────────► XY-MOS TRIG/PWM
+                                   (100 Ω and 100 kΩ are on the module)
 
    XIAO D1 (GPIO3) ──► panel divider tap (ADC1)
    XIAO D2 (GPIO4) ──► battery divider tap (ADC1), as on terrasse
@@ -247,11 +262,10 @@ the SVG and re-export with
 **The string hangs off `P+`, not off the XIAO.** ~150 mA has no business
 crossing a microcontroller.
 
-On the XY-MOS board the MOSFET is in the low side: `OUT+` is tied internally to
-`DC+` and the switching happens in `OUT−`. These modules exist in variants —
-read the silkscreen. On the signal header connect only `SIG` and `GND`; a `VCC`
-pin there stays open. **Desolder the module's indicator LED**; 1–3 mA all
-evening buys nothing.
+On the XY-MOS board the MOSFETs are in the low side: `OUT+` is tied internally
+to `VIN+` and the switching happens in `OUT−`. The signal header is labelled
+`TRIG/PWM` and `GND`, and both are needed — `GND` is what makes the gate
+voltage mean anything.
 
 I²C is not used. There is no PCA9685 in the final circuit — it was the fallback
 for a small panel, and the panel is not small.
@@ -261,9 +275,8 @@ for a small panel, and the panel is not small.
 The list in [`wiring.md`](wiring.md#before-you-power-it-up) applies.
 
 1. Continuity from every module's GND to the XIAO's GND.
-2. Fit the 220 Ω and 100 kΩ only if the XY-MOS board does not already carry them.
-3. Indicator LED off the XY-MOS module.
-4. Nothing on `D9` — a wire there strapped the chip into download mode for an
+2. Nothing to fit: `R3` and `R1` are already on the XY-MOS board.
+3. Nothing on `D9` — a wire there strapped the chip into download mode for an
    evening on 2026-10-04, and the symptom was a board that looked dead.
 
 ## Parts
@@ -272,7 +285,7 @@ The list in [`wiring.md`](wiring.md#before-you-power-it-up) applies.
 | --- | --- | --- |
 | Controller | XIAO ESP32-C3 | on hand |
 | Switch | XY-MOS module, D4184 | on hand; see the gate-charge section |
-| Gate | 220 Ω series, 100 kΩ to GND | **probably already on the module** — verify |
+| Gate | 100 Ω series, 100 kΩ to GND | **already on the module** (`R3`, `R1`) |
 | Fallback switch | AO3400A, SOT-23 | ~€0.10, buy two against a mushy fade |
 | Cell | 2000 mAh LiPo pouch | on hand, ×2 |
 | Protection | BMS board | on hand |

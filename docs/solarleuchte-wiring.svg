@@ -79,10 +79,10 @@
   <line class="sig" x1="710" y1="400" x2="1006" y2="400"/>
   <text class="pin" x="716" y="392">D8 · GPIO8</text>
   <rect class="res" x="1006" y="389" width="44" height="22"/>
-  <text class="pin m" x="1028" y="378">220 Ω</text>
+  <text class="pin m" x="1028" y="378">100 Ω</text>
   <line class="sig" x1="1050" y1="400" x2="1080" y2="400"/>
   <circle class="dots" cx="1065" cy="400" r="5"/>
-  <text class="pin e" x="1074" y="394">SIG</text>
+  <text class="pin e" x="1074" y="394">TRIG</text>
   <line class="sig" x1="1065" y1="400" x2="1065" y2="560"/>
   <rect class="res" x="1054" y="560" width="22" height="44"/>
   <text class="pin" x="1084" y="588">100 kΩ</text>
@@ -91,15 +91,15 @@
 
   <rect class="blk" x="1080" y="320" width="150" height="150"/>
   <text class="lbl" x="1098" y="362">XY-MOS</text>
-  <text class="sub" x="1098" y="384">D4184</text>
+  <text class="sub" x="1098" y="384">2× D4184</text>
   <text class="sub" x="1098" y="402">low-side</text>
-  <text class="sub" x="1098" y="420">OUT+ = DC+</text>
+  <text class="sub" x="1098" y="420">OUT+ = VIN+</text>
   <line class="pos" x1="1150" y1="320" x2="1150" y2="215"/>
   <circle class="dotp" cx="1150" cy="215" r="5"/>
-  <text class="pin" x="1158" y="312">DC+</text>
+  <text class="pin" x="1158" y="312">VIN+</text>
   <line class="neg" x1="1120" y1="470" x2="1120" y2="760"/>
   <circle class="dotn" cx="1120" cy="760" r="5"/>
-  <text class="pin" x="1126" y="488">DC−</text>
+  <text class="pin" x="1126" y="488">VIN−</text>
 
   <polyline class="pos" points="1230,360 1250,360 1250,540"/>
   <text class="pin" x="1236" y="352">OUT+</text>
@@ -123,5 +123,5 @@
   <text class="note" x="104" y="649">Punkt = Verbindung</text>
   <text class="note" x="58" y="673">Kreuzung ohne Punkt = keine Verbindung</text>
   <text class="note" x="58" y="695">Kette an P+, nicht am XIAO</text>
-  <text class="note" x="58" y="717">220 Ω / 100 kΩ evtl. schon auf XY-MOS</text>
+  <text class="note" x="58" y="717">100 Ω / 100 kΩ sitzen auf dem XY-MOS</text>
 </svg>
