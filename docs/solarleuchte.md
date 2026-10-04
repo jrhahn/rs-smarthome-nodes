@@ -171,11 +171,15 @@ of ~20 LEDs is past both. So the PWM channel drives a **gate**, and a MOSFET
 carries the current:
 
 ```
-PCA9685 LED0 ──► 330 Ω ──┬──► gate  AO3400A
+PCA9685 LED0 ──► 330 Ω ──┬──► gate   D4184 (XY-MOS module)
                          └──► 100 kΩ ──► GND
 BMS P+ ──► LED string ──────► drain
                               source ──► GND
 ```
+
+**Both resistors may already be fitted on the module** — the XY-MOS boards
+usually carry a gate series resistor and a pulldown. Check the series value is
+at least 330 Ω before relying on it, and check the pulldown exists at all.
 
 Since the string runs straight off the cell, that is the whole power path —
 no converter, no `R_set`, no current regulation. Brightness tracks the cell
@@ -191,22 +195,37 @@ pin rated 40 mA absolute.)
 through reset and power-up; without it the lamp flashes to full brightness on
 every restart.
 
-### Use the small MOSFET, not the fat one
+### Gate charge decides the bottom of the fade
 
-Counter-intuitive, and it is the gradient that decides it. Gate charge sets the
-switching time, switching time eats PWM codes, and gamma correction makes the
-lowest codes the perceptually expensive ones. At 1 kHz and 12 bits one LSB is
-244 ns:
+The MOSFET is chosen by its gate, not by its current rating — anything here
+carries 150 mA without noticing. Gate charge sets the switching time, switching
+time eats PWM codes, and gamma correction makes the lowest codes the
+perceptually expensive ones. At 1 kHz and 12 bits one LSB is 244 ns, and the
+PCA9685 sources 10 mA:
 
-| | Qg | switch time at 10 mA | codes lost | perceived brightness lost |
+| | Qg at 4.5 V | switch time | codes lost | perceived brightness lost |
 | --- | --- | --- | --- | --- |
-| **AO3400A** (SOT-23) | ~5.6 nC | ~0.6 µs | ~2 of 4096 | ~3 % |
+| AO3400A (SOT-23) | ~5.6 nC | ~0.6 µs | ~2 of 4096 | ~3 % |
+| **D4184** (XY-MOS module) | ~13.6 nC | ~1 µs | ~4 of 4096 | ~4 % |
 | IRLZ44N (TO-220) | ~48 nC | ~4.8 µs | ~20 of 4096 | ~9 % |
 
-Datasheet arithmetic, not a measurement, but the gap is wide enough to decide
-on. The fat MOSFET would make the bottom tenth of the fade mushy — which is
-precisely the part this whole build exists for. A SOT-23 breakout board costs
-€0.50 if hand-soldering SMD onto perfboard is unappealing.
+Datasheet arithmetic, not a measurement. **The D4184 on the XY-MOS module is
+good enough and it is already on the shelf**, which settles it — a modern
+trench part, not the old TO-220 class the third row stands for. An earlier
+draft of this page assumed any screw-terminal module meant the IRLZ44N case;
+it does not.
+
+**The caveat is the threshold, not the charge.** The D4184's `VGS(th)` is
+2.2 V typical and **2.6 V maximum**, and the gate is driven from 3.3 V. Worst
+case that is 0.7 V of overdrive, and the datasheet characterises `RDS(on)`
+only at 4.5 V and 10 V. Conduction is still irrelevant at 150 mA — even
+100 mΩ is 15 mV — but the crossing of the threshold is slow and varies between
+parts, and it is slow exactly where the eye is looking.
+
+So: build it with the module, then look at the bottom of the breath. If it
+steps or sticks, that is why, and an **AO3400A** (`VGS(th)` 0.65–1.45 V, real
+headroom at 3.3 V) is the ten-cent fix. Worth having two in the drawer before
+starting rather than waiting a week for them mid-build.
 
 **Do not** use a PT4115/AL8805-class "LED driver". They are buck topologies and
 need Vin above the string voltage; from 3.7 V there is nothing to buck.
@@ -217,8 +236,9 @@ need Vin above the string voltage; from 3.7 V there is nothing to buck.
 | --- | --- | --- |
 | Controller | XIAO ESP32-C3 | on hand |
 | PWM | PCA9685 breakout, 16-ch 12-bit | on hand; one channel used |
-| Switch | AO3400A, SOT-23 | 30 V / 5 A — overkill and correct, see above |
-| Gate | 330 Ω series, 100 kΩ to GND | |
+| Switch | XY-MOS module, D4184 | on hand; see the gate-charge section |
+| Gate | 330 Ω series, 100 kΩ to GND | **probably already on the module** — verify |
+| Fallback switch | AO3400A, SOT-23 | ~€0.10, buy two against a mushy fade |
 | Cell | 2000 mAh LiPo pouch | on hand, ×2 |
 | Protection | BMS board | on hand |
 | Charger | CN3791 | on hand; MPPT jumper to *this* panel, not 18 V |
@@ -227,10 +247,13 @@ need Vin above the string voltage; from 3.7 V there is nothing to buck.
 Nothing else. No boost module, no sense resistor, no gate driver — the PCA9685
 output drives the gate directly.
 
-**Two things to do to the PCA9685 breakout:** desolder its power LED, and check
-its I²C pull-ups. The bus already carries the SHT31-D, so a second set of
-pull-ups lands in parallel. The PCA9685's default address is 0x40 and does not
-collide.
+**Desolder the indicator LED on both modules.** The PCA9685 breakout and the
+XY-MOS board each carry one, and 1–3 mA apiece is up to 20 % of a 28 mA budget,
+burnt all night to tell nobody anything.
+
+Also check the PCA9685 breakout's I²C pull-ups: the bus already carries the
+SHT31-D, so a second set lands in parallel. Its default address is 0x40 and
+does not collide.
 
 A pouch cell outdoors is acceptable in a box built to be dry — the terrasse node
 already does exactly that — but it has no hard can. If the light's housing can
@@ -278,6 +301,9 @@ Node name `solarleuchte`, following the fleet's German naming.
 - **Measure the PCA9685 breakout's actual draw** before trusting the 6 mA. That
   is a datasheet typical with no load, and the board carries a power LED and
   pull-ups of its own.
+- **Check what the XY-MOS module already has fitted**: gate series resistor
+  (must be ≥330 Ω, or it overloads the PCA9685 output), gate pulldown, and the
+  indicator LED that has to come off.
 - **Count the LEDs and look for resistors on the module.** Twenty in parallel
   with individual resistors and four series groups of five behave nothing alike,
   and it is usually visible.
