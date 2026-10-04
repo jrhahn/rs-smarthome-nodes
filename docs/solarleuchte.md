@@ -246,6 +246,84 @@ starting rather than waiting a week for them mid-build.
 **Do not** use a PT4115/AL8805-class "LED driver". They are buck topologies and
 need Vin above the string voltage; from 3.7 V there is nothing to buck.
 
+## Wiring
+
+Drawn: [`solarleuchte-wiring.pdf`](solarleuchte-wiring.pdf) (A4 landscape, for
+the bench), source [`solarleuchte-wiring.svg`](solarleuchte-wiring.svg). Edit
+the SVG and re-export with
+`inkscape --export-type=pdf --export-filename=docs/solarleuchte-wiring.pdf docs/solarleuchte-wiring.svg`.
+
+### What the PCA9685 breakout's pins are
+
+The breakout brings out `GND OE SCL SDA VCC V+` plus sixteen `PWM`/`V+`/`GND`
+groups. Only three of those matter here, and two are traps:
+
+| Pin | What it is | Here |
+| --- | --- | --- |
+| `VCC` | logic supply — **and the high level of every PWM output** | 3.3 V from the XIAO |
+| `V+` | servo rail; feeds only the middle pin of the sixteen groups | **leave open** |
+| `OE` | output enable, **active LOW**, pulled down on the board | to `GND` |
+| `SDA` / `SCL` | I²C | `D4` / `D5` |
+| `PWM` of group 0 | the one channel used | gate network |
+
+**`VCC` must be 3.3 V, never 5 V.** Two separate reasons, either of which is
+enough: the PWM output's high level *is* `VCC`, and the whole gate calculation
+above assumes 3.3 V; and the board's I²C pull-ups go to `VCC`, so 5 V there puts
+5 V on `SDA`/`SCL`, which the C3's pads do not tolerate.
+
+`OE` could be driven from a GPIO for a hard blackout, but the `SLEEP` bit does
+that and saves 6 mA as well. Tie it to `GND` and leave the pad free.
+
+### Nets
+
+```
+                      BMS P+ ──┬── XIAO  B+
+                               ├── CN3791 BAT+
+                               └── XY-MOS DC+ ──► OUT+ ──► string ──► OUT−
+                      BMS P− ──┬── XIAO  GND
+                               ├── CN3791 GND
+                               ├── XY-MOS DC− and signal GND
+                               └── PCA9685 GND
+
+   XIAO 3V3 ─────────────────► PCA9685 VCC
+   XIAO D4 (GPIO6) ──────────► PCA9685 SDA
+   XIAO D5 (GPIO7) ──────────► PCA9685 SCL
+                               PCA9685 OE ──► GND
+                               PCA9685 V+ ──► open
+
+   PCA9685 ch0 PWM ──► 330 Ω ──┬──► XY-MOS SIG
+                               └──► 100 kΩ ──► GND
+```
+
+**The string hangs off `P+`, not off the XIAO.** ~150 mA has no business
+crossing a microcontroller.
+
+On the XY-MOS board the MOSFET is in the low side: `OUT+` is tied internally to
+`DC+` and the switching happens in `OUT−`. That matches the circuit above, but
+these modules exist in variants — read the silkscreen before trusting it. On
+the signal header connect only `SIG` and `GND`; a `VCC` pin there stays open.
+
+### Before powering it up
+
+The list in [`wiring.md`](wiring.md#before-you-power-it-up) applies; item 3 is
+the one that bites on this node.
+
+1. Continuity from every module's GND to the XIAO's GND.
+2. `SDA` and `SCL` not swapped.
+3. **No 5 V anywhere near a GPIO** — `VCC` included.
+4. Fit the 330 Ω and 100 kΩ only if the XY-MOS board does not already carry them.
+5. Indicator LEDs off both modules.
+
+Then USB in and read the log: the node reports what it found on its buses in
+the first second, and the PCA9685 has to appear at 0x40.
+
+### Not wired yet
+
+Night detection off a panel divider. `D1` (GPIO3) is free and on ADC1; `D2`
+(GPIO4) is reserved for the battery divider as on `terrasse`. The divider ratio
+cannot be chosen until the panel is identified — an 18 V panel reaching ~25 V
+`Voc` cold needs a completely different one from a 6 V panel.
+
 ## Parts
 
 | Role | Part | Note |

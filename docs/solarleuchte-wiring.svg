@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="297mm" height="171.6mm" viewBox="0 0 1420 820">
+  <style>
+    .blk  { fill:#f6f6f4; stroke:#333; stroke-width:2; }
+    .lbl  { font-family:"DejaVu Sans",sans-serif; font-size:19px; fill:#111; font-weight:bold; }
+    .sub  { font-family:"DejaVu Sans",sans-serif; font-size:14px; fill:#555; }
+    .pin  { font-family:"DejaVu Sans",sans-serif; font-size:13px; fill:#111; }
+    .note { font-family:"DejaVu Sans",sans-serif; font-size:14px; fill:#333; }
+    .ttl  { font-family:"DejaVu Sans",sans-serif; font-size:26px; fill:#111; font-weight:bold; }
+    .pos  { fill:none; stroke:#c0392b; stroke-width:3; }
+    .neg  { fill:none; stroke:#1a1a1a; stroke-width:3; }
+    .sig  { fill:none; stroke:#1f6feb; stroke-width:2.5; }
+    .res  { fill:#fff; stroke:#1f6feb; stroke-width:2.5; }
+    .dotp { fill:#c0392b; }
+    .dotn { fill:#1a1a1a; }
+    .dots { fill:#1f6feb; }
+    .e    { text-anchor:end; }
+    .m    { text-anchor:middle; }
+  </style>
+
+  <text class="ttl" x="40" y="36">Solarleuchte — Verdrahtung</text>
+  <text class="sub" x="40" y="58">XIAO ESP32-C3 · PCA9685 · XY-MOS (D4184) · Lichterkette</text>
+
+  <line class="pos" x1="290" y1="215" x2="1180" y2="215"/>
+  <text class="pin" x="1188" y="220" fill="#c0392b">P+</text>
+  <line class="neg" x1="440" y1="760" x2="1200" y2="760"/>
+  <text class="pin" x="1208" y="765">P−</text>
+
+  <rect class="blk" x="40" y="85" width="110" height="70"/>
+  <text class="lbl" x="58" y="117">Panel</text>
+  <text class="sub" x="58" y="137">ungemessen</text>
+  <line class="pos" x1="150" y1="105" x2="240" y2="105"/>
+  <line class="neg" x1="150" y1="138" x2="240" y2="138"/>
+  <text class="pin e" x="234" y="98">VIN+</text>
+  <text class="pin e" x="234" y="131">VIN−</text>
+
+  <rect class="blk" x="240" y="78" width="170" height="100"/>
+  <text class="lbl" x="258" y="112">CN3791</text>
+  <text class="sub" x="258" y="132">MPPT-Lader</text>
+  <text class="sub" x="258" y="150">MPPT-Jumper = Panel</text>
+  <line class="pos" x1="290" y1="178" x2="290" y2="215"/>
+  <circle class="dotp" cx="290" cy="215" r="5"/>
+  <text class="pin e" x="284" y="200">BAT+</text>
+  <polyline class="neg" points="360,178 360,196 440,196 440,400"/>
+  <circle class="dotn" cx="440" cy="400" r="5"/>
+  <text class="pin" x="366" y="188">GND</text>
+
+  <rect class="blk" x="40" y="340" width="110" height="80"/>
+  <text class="lbl" x="58" y="372">LiPo</text>
+  <text class="sub" x="58" y="392">2000 mAh</text>
+  <line class="pos" x1="150" y1="365" x2="190" y2="365"/>
+  <line class="neg" x1="150" y1="400" x2="190" y2="400"/>
+
+  <rect class="blk" x="190" y="330" width="150" height="110"/>
+  <text class="lbl" x="208" y="372">BMS</text>
+  <text class="sub" x="208" y="392">Schutzplatine</text>
+  <text class="pin e" x="184" y="358">B+</text>
+  <text class="pin e" x="184" y="393">B−</text>
+  <text class="pin" x="346" y="358">P+</text>
+  <text class="pin" x="346" y="393">P−</text>
+  <polyline class="pos" points="340,365 390,365 390,215"/>
+  <circle class="dotp" cx="390" cy="215" r="5"/>
+  <polyline class="neg" points="340,400 470,400 470,760"/>
+  <circle class="dotn" cx="470" cy="760" r="5"/>
+
+  <rect class="blk" x="520" y="320" width="190" height="170"/>
+  <text class="lbl" x="540" y="362">XIAO</text>
+  <text class="lbl" x="540" y="384">ESP32-C3</text>
+  <text class="sub" x="540" y="408">Deep Sleep</text>
+  <text class="sub" x="540" y="426">weckt alle 5 s</text>
+  <text class="sub" x="540" y="448">D4=GPIO6 · D5=GPIO7</text>
+  <line class="pos" x1="560" y1="320" x2="560" y2="215"/>
+  <circle class="dotp" cx="560" cy="215" r="5"/>
+  <text class="pin" x="568" y="312">B+</text>
+  <line class="neg" x1="560" y1="490" x2="560" y2="760"/>
+  <circle class="dotn" cx="560" cy="760" r="5"/>
+  <text class="pin" x="568" y="508">GND</text>
+
+  <line class="sig" x1="710" y1="355" x2="800" y2="355"/>
+  <line class="sig" x1="710" y1="395" x2="800" y2="395"/>
+  <line class="sig" x1="710" y1="435" x2="800" y2="435"/>
+  <text class="pin" x="716" y="348">3V3</text>
+  <text class="pin" x="716" y="388">D4</text>
+  <text class="pin" x="716" y="428">D5</text>
+  <text class="pin e" x="794" y="348">VCC</text>
+  <text class="pin e" x="794" y="388">SDA</text>
+  <text class="pin e" x="794" y="428">SCL</text>
+
+  <rect class="blk" x="800" y="320" width="190" height="170"/>
+  <text class="lbl" x="820" y="362">PCA9685</text>
+  <text class="sub" x="820" y="384">16-ch · 12 bit</text>
+  <text class="sub" x="820" y="402">I²C 0x40</text>
+  <text class="sub" x="820" y="420">1 kHz · 6 mA</text>
+  <text class="sub" x="820" y="438">Kanal 0 →</text>
+  <line class="neg" x1="840" y1="490" x2="840" y2="760"/>
+  <circle class="dotn" cx="840" cy="760" r="5"/>
+  <text class="pin" x="816" y="508">GND</text>
+  <line class="neg" x1="900" y1="490" x2="900" y2="760"/>
+  <circle class="dotn" cx="900" cy="760" r="5"/>
+  <text class="pin" x="884" y="508">OE</text>
+  <text class="sub" x="912" y="556">OE active LOW</text>
+  <text class="sub" x="912" y="574">= Ausgänge an</text>
+  <line class="sig" x1="990" y1="348" x2="1030" y2="348" stroke-dasharray="6 5"/>
+  <text class="pin" x="996" y="340">V+ offen</text>
+
+  <line class="sig" x1="990" y1="400" x2="1006" y2="400"/>
+  <rect class="res" x="1006" y="389" width="44" height="22"/>
+  <text class="pin m" x="1028" y="378">330 Ω</text>
+  <line class="sig" x1="1050" y1="400" x2="1080" y2="400"/>
+  <circle class="dots" cx="1065" cy="400" r="5"/>
+  <text class="pin e" x="1074" y="394">SIG</text>
+  <line class="sig" x1="1065" y1="400" x2="1065" y2="560"/>
+  <rect class="res" x="1054" y="560" width="22" height="44"/>
+  <text class="pin" x="1084" y="588">100 kΩ</text>
+  <line class="neg" x1="1065" y1="604" x2="1065" y2="760"/>
+  <circle class="dotn" cx="1065" cy="760" r="5"/>
+
+  <rect class="blk" x="1080" y="320" width="150" height="150"/>
+  <text class="lbl" x="1098" y="362">XY-MOS</text>
+  <text class="sub" x="1098" y="384">D4184</text>
+  <text class="sub" x="1098" y="402">low-side</text>
+  <text class="sub" x="1098" y="420">OUT+ = DC+</text>
+  <line class="pos" x1="1150" y1="320" x2="1150" y2="215"/>
+  <circle class="dotp" cx="1150" cy="215" r="5"/>
+  <text class="pin" x="1158" y="312">DC+</text>
+  <line class="neg" x1="1120" y1="470" x2="1120" y2="760"/>
+  <circle class="dotn" cx="1120" cy="760" r="5"/>
+  <text class="pin" x="1126" y="488">DC−</text>
+
+  <polyline class="pos" points="1230,360 1250,360 1250,540"/>
+  <text class="pin" x="1236" y="352">OUT+</text>
+  <polyline class="neg" points="1230,430 1310,430 1310,540"/>
+  <text class="pin" x="1236" y="422">OUT−</text>
+  <rect class="blk" x="1200" y="540" width="170" height="100"/>
+  <text class="lbl" x="1216" y="578">Lichterkette</text>
+  <text class="sub" x="1216" y="598">~20 LED parallel</text>
+  <text class="sub" x="1216" y="616">3,6–3,7 V gemessen</text>
+  <text class="sub" x="1216" y="634">Strom ungemessen</text>
+
+  <rect x="40" y="520" width="400" height="215" fill="#fbfbf9" stroke="#bbb" stroke-width="1.5"/>
+  <text class="lbl" x="58" y="550">Hinweise</text>
+  <line class="pos" x1="58" y1="572" x2="96" y2="572"/>
+  <text class="note" x="104" y="577">P+ (Zelle, 3,0–4,2 V)</text>
+  <line class="neg" x1="58" y1="596" x2="96" y2="596"/>
+  <text class="note" x="104" y="601">P− / GND</text>
+  <line class="sig" x1="58" y1="620" x2="96" y2="620"/>
+  <text class="note" x="104" y="625">Signal</text>
+  <circle class="dotn" cx="77" cy="644" r="5"/>
+  <text class="note" x="104" y="649">Punkt = Verbindung</text>
+  <text class="note" x="58" y="673">Kreuzung ohne Punkt = keine Verbindung</text>
+  <text class="note" x="58" y="695">VCC = 3,3 V, niemals 5 V</text>
+  <text class="note" x="58" y="717">330 Ω / 100 kΩ evtl. schon auf XY-MOS</text>
+</svg>
