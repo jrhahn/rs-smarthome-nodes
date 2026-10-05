@@ -624,6 +624,19 @@ async fn lamp_task(lamp: platform::Lamp) {
     }
 }
 
+/// How long an unconfirmed image gets to reach the broker before this node
+/// gives up on it and restarts.
+///
+/// Without this an attempt costs a whole boot, and the lamp boots once a day —
+/// so a genuinely broken image would sit for three evenings before
+/// [`ota::MAX_ATTEMPTS`] rolled it back. The rest of the fleet is at the other
+/// extreme: `terrasse` cold-boots every two seconds, which spends three
+/// attempts in about six.
+///
+/// Thirty minutes is six publish rounds. Far more forgiving than anything else
+/// here, and still inside the evening it broke.
+const LAMP_TRIAL_WINDOW: Duration = Duration::from_secs(1800);
+
 /// How often [`run_lamp`] recomputes the gate: reads the cell, asks the clock
 /// where the evening is, and signals [`lamp_task`].
 ///
@@ -752,6 +765,7 @@ async fn run_lamp(
         None => None,
     };
     let mut on_trial = ota_begin_attempt();
+    let trial_started = Instant::now();
     // A failed first publish is not fatal: the lamp still has defaults and a
     // clock, and the next round in five minutes tries again.
     let mut cfg = match stack {
@@ -807,6 +821,18 @@ async fn run_lamp(
         // Dark through the same signal the task is already watching, so exactly
         // one thing ever writes that duty, and give it a step to land before
         // the board stops answering.
+        // An unconfirmed image that cannot reach the broker has failed, and
+        // the way to say so is to restart: the attempt is already recorded, so
+        // the next boot counts the next one and the third rolls back. Checked
+        // before the sleeps below, or an image broken enough to misjudge the
+        // window would sleep through its own trial.
+        if on_trial && trial_started.elapsed() >= LAMP_TRIAL_WINDOW {
+            warn!("lamp: unconfirmed image has not reached the broker; restarting");
+            LAMP_GATE.signal(0);
+            Timer::after(LAMP_STEP).await;
+            software_reset();
+        }
+
         // A cell too low to light is a cell too low to spend six hours
         // talking about. The lamp is dark either way below
         // `lamp::DARK_BELOW_PCT`; the difference is whether it also burns
