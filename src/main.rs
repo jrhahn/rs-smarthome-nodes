@@ -69,8 +69,8 @@ use rust_mqtt::{
 
 use node::{NodeConfig, Provision};
 use rs_smarthome_nodes::{
-    battery, clock, config, discovery, ds18b20, http, hx711, node, ntp, ota, platform, presence,
-    reset_reason, rssi, sensors::scale, solar, state, wifi, FW_VERSION,
+    battery, clock, config, discovery, ds18b20, http, hx711, lamp, node, ntp, ota, platform,
+    presence, reset_reason, rssi, sensors::scale, solar, state, wifi, FW_VERSION,
 };
 
 use battery::Battery;
@@ -292,6 +292,9 @@ struct Board<'d> {
     probe: Option<Ds18b20<'d>>,
     battery: Option<Battery<'d>>,
     sensors: Sensors,
+    /// The LED string, on the one node that has one. Not a sensor: nothing
+    /// reads it and nothing publishes it.
+    lamp: Option<platform::Lamp>,
 }
 
 /// The peripherals needed to bring the radio up, bundled so they can be handed
@@ -557,6 +560,12 @@ async fn main(spawner: Spawner) {
             uart_rx: peripherals.GPIO5,
             uart_tx: peripherals.GPIO10,
         }),
+        lamp: node.lamp.enabled.then(|| {
+            platform::Lamp::new(platform::LampPeripherals {
+                ledc: peripherals.LEDC,
+                pin: peripherals.GPIO8,
+            })
+        }),
     };
 
     let radio = Radio {
@@ -575,7 +584,154 @@ async fn main(spawner: Spawner) {
         run_awake(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
     }
 
+    // The lamp's shape is neither of the two above: it wakes once at dusk and
+    // stays up for hours, where every other node here is awake for a round.
+    if node.lamp.enabled {
+        run_lamp(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
+    }
+
     run_battery(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
+}
+
+/// How often the lamp re-publishes during an evening.
+///
+/// Each one is also how Home Assistant's light reaches the board: the reply
+/// carries the retained `config/` topics, so a slider moved at nine is obeyed
+/// by five past. Short enough not to feel broken, long enough that an evening
+/// costs a few dozen connects rather than a few thousand.
+const LAMP_PUBLISH_EVERY: Duration = Duration::from_secs(300);
+
+/// One step of the breath. 256 of them make [`LAMP_BREATH_MS`].
+const LAMP_STEP: Duration = Duration::from_millis(LAMP_BREATH_MS / lamp::BREATH.len() as u64);
+
+/// One full breath, dark to bright to dark. Under ~10 s reads as agitated.
+const LAMP_BREATH_MS: u64 = 25_000;
+
+/// The cell voltage assumed when the divider says nothing.
+///
+/// Mid-charge rather than full: a lamp that cannot read its cell should not
+/// get the brightest evening the ceiling allows on the strength of a broken
+/// ADC.
+const LAMP_CELL_FALLBACK_MV: u32 = 3_700;
+
+/// Lamp profile: one evening per boot, then sleep until the next dusk.
+///
+/// The shape is the opposite of [`run_battery`], and deliberately so. That one
+/// cold-boots per sample and is awake for a round; this one wakes once, stays
+/// up for hours and spends the day asleep — the lamp has to be *lit*, and
+/// nothing else in this firmware has ever had to hold an output steady.
+///
+/// Wi-Fi stays up for the evening rather than being brought up per publish,
+/// because [`bring_up_wifi`] consumes the radio peripherals and can only run
+/// once per boot. With power save on that costs a few mA against the string's
+/// mean of ~69, and it buys live control: each [`publish_samples`] returns the
+/// retained config, which is how the light entity's switch and slider arrive.
+async fn run_lamp(
+    spawner: Spawner,
+    radio: Radio,
+    lpwr: LPWR,
+    board: &mut Board<'_>,
+    cfg: Config,
+) -> ! {
+    // Up front and once: the radio is consumed here, and the clock has to be
+    // anchored before any question about dusk means anything.
+    let stack = match bring_up_wifi(spawner, radio).await {
+        Ok(stack) => stack,
+        Err(e) => {
+            // No network means no NTP, and without a clock the lamp cannot
+            // know whether it is evening. Sleeping an hour and trying again is
+            // better than lighting at an arbitrary time or not at all.
+            warn!("lamp: no network ({e}); retrying in an hour");
+            enter_deep_sleep(lpwr, CoreDuration::from_secs(3600));
+        }
+    };
+    let synced = sync_time(stack).await;
+    let mut samples = collect_samples(None, None, &cfg, board).await;
+    let mut cfg = match publish_samples(stack, &mut samples, cfg, synced).await {
+        Ok(drained) => drained.cfg,
+        // A failed first publish is not fatal: the lamp still has defaults and
+        // a clock, and the next round in five minutes tries again.
+        Err(e) => {
+            warn!("lamp: first publish failed ({e})");
+            cfg
+        }
+    };
+
+    // The clock only advances across sleeps (see `sleep_for`), so an evening
+    // spent awake would freeze it. Anchor once and carry the monotonic
+    // elapsed time on top.
+    let Some(anchor_ms) = state::clock_ms() else {
+        warn!("lamp: clock unset after NTP; retrying in an hour");
+        enter_deep_sleep(lpwr, CoreDuration::from_secs(3600));
+    };
+    let anchor = Instant::now();
+    let now_ms = || anchor_ms + anchor.elapsed().as_millis();
+
+    let mut step: usize = 0;
+    let mut last_publish = Instant::now();
+    loop {
+        let ms = now_ms();
+        let minute = solar::minute_of_day(ms);
+        let doy = solar::day_of_year(ms);
+
+        let cell = board
+            .battery
+            .as_mut()
+            .and_then(|b| b.read_millivolts())
+            .unwrap_or(LAMP_CELL_FALLBACK_MV);
+
+        let duty = lamp::duty(
+            step,
+            minute,
+            doy,
+            cell,
+            cfg.lamp_enabled,
+            cfg.lamp_brightness,
+        );
+        if let Some(l) = board.lamp.as_ref() {
+            l.set_duty(duty);
+        }
+
+        // Past the cutoff the evening is over, whatever the breath was doing.
+        // Dark first, so the string is off before the clock is written back
+        // and the board stops answering.
+        if minute >= lamp::CUTOFF_MINUTE_UTC {
+            if let Some(l) = board.lamp.as_ref() {
+                l.set_duty(0);
+            }
+            state::set_clock_ms(ms);
+            let mut samples = collect_samples(None, None, &cfg, board).await;
+            let _ = publish_samples(stack, &mut samples, cfg, Some(ms)).await;
+            info!("lamp: evening over, sleeping until dusk");
+            enter_deep_sleep(lpwr, CoreDuration::from_secs(lamp_sleep_secs(ms)));
+        }
+
+        if last_publish.elapsed() >= LAMP_PUBLISH_EVERY {
+            last_publish = Instant::now();
+            state::set_clock_ms(ms);
+            let mut samples = collect_samples(None, None, &cfg, board).await;
+            if let Ok(drained) = publish_samples(stack, &mut samples, cfg, Some(ms)).await {
+                cfg = drained.cfg;
+            }
+        }
+
+        Timer::after(LAMP_STEP).await;
+        step = step.wrapping_add(1);
+    }
+}
+
+/// Seconds from `now_ms` until the next evening starts.
+///
+/// Always at least a minute, so a clock that lands exactly on the boundary
+/// cannot produce a zero-length sleep and a boot loop with it.
+fn lamp_sleep_secs(now_ms: u64) -> u64 {
+    let minute = solar::minute_of_day(now_ms);
+    let doy = solar::day_of_year(now_ms);
+    // Tomorrow's sunset, since the cutoff has passed by the time this is asked.
+    let (_, sunset) = solar::sun(doy % 365 + 1);
+    let start = sunset + lamp::START_AFTER_SUNSET_MIN;
+    let minutes = (24 * 60 - minute) + start;
+    (minutes.max(1) as u64) * 60
 }
 
 /// Sleeping profile: one measurement per cold boot, then straight back to deep

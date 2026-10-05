@@ -29,7 +29,13 @@ use embedded_hal_async::i2c::{ErrorType, I2c as I2cTrait, Operation};
 use esp_hal::{
     gpio::GpioPin,
     i2c::master::{Config as I2cConfig, Error as I2cError, I2c},
-    peripherals::{I2C0, UART1},
+    ledc::{
+        channel::{self, ChannelIFace},
+        timer::{self, TimerIFace},
+        LSGlobalClkSource, Ledc, LowSpeed,
+    },
+    peripherals::{I2C0, LEDC, UART1},
+    prelude::*,
     uart::{Config as UartConfig, Uart},
     Async,
 };
@@ -138,6 +144,72 @@ pub struct Peripherals {
     pub uart1: UART1,
     pub uart_rx: GpioPin<5>,
     pub uart_tx: GpioPin<10>,
+}
+
+/// The LEDC block and the pin it drives, for the one node that has a lamp.
+///
+/// Separate from [`Peripherals`] because `Sensors::new` takes that whole struct
+/// and a lamp is not a sensor: it is an output, read by nothing and published
+/// as nothing.
+pub struct LampPeripherals {
+    pub ledc: LEDC,
+    pub pin: GpioPin<8>,
+}
+
+// The LEDC block and its timer outlive the channel that borrows them, and the
+// channel has to live for the whole evening. Same reasoning as `I2C_BUS` above:
+// a `StaticCell` is how a driver built in `main` reaches `'static` without
+// being a `static mut`.
+static LEDC_BLOCK: StaticCell<Ledc<'static>> = StaticCell::new();
+static LAMP_TIMER: StaticCell<timer::Timer<'static, LowSpeed>> = StaticCell::new();
+
+/// The LED string's PWM channel.
+///
+/// **1 kHz and 12 bits, and the frequency is not a free choice** — see
+/// [`crate::lamp`] for the arithmetic. Raising it makes the bottom of the fade
+/// worse, because the MOSFETs' switching time is fixed while one LSB shrinks
+/// with frequency, and gamma correction has spent most of its resolution
+/// exactly there.
+pub struct Lamp {
+    channel: channel::Channel<'static, LowSpeed>,
+}
+
+impl Lamp {
+    /// Configure LEDC low-speed timer 0 and channel 0 on `D8`.
+    ///
+    /// Panics if either refuses its configuration: both are compile-time
+    /// constants on a block with nothing else competing for it, so a failure
+    /// here means the firmware is wrong rather than the hardware.
+    pub fn new(p: LampPeripherals) -> Self {
+        let ledc = LEDC_BLOCK.init(Ledc::new(p.ledc));
+        ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+        let ledc: &'static Ledc<'static> = ledc;
+
+        let lstimer = LAMP_TIMER.init(ledc.timer::<LowSpeed>(timer::Number::Timer0));
+        lstimer
+            .configure(timer::config::Config {
+                duty: timer::config::Duty::Duty12Bit,
+                clock_source: timer::LSClockSource::APBClk,
+                frequency: 1u32.kHz(),
+            })
+            .expect("LEDC timer: 12 bit at 1 kHz is inside what APBClk divides to");
+
+        let mut channel = ledc.channel(channel::Number::Channel0, p.pin);
+        channel
+            .configure(channel::config::Config {
+                timer: lstimer,
+                duty_pct: 0,
+                pin_config: channel::config::PinConfig::PushPull,
+            })
+            .expect("LEDC channel 0 on GPIO8");
+
+        Self { channel }
+    }
+
+    /// Write a raw 12-bit duty. Clamped by [`crate::lamp::duty`], not here.
+    pub fn set_duty(&self, duty: u32) {
+        self.channel.set_duty_hw(duty);
+    }
 }
 
 /// The drivers populated on this node. Absent sensors are simply `None`, so the
