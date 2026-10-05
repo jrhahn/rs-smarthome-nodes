@@ -652,6 +652,43 @@ const LAMP_BREATH_MS: u64 = 25_000;
 /// ADC.
 const LAMP_CELL_FALLBACK_MV: u32 = 3_700;
 
+/// One publish round for the lamp, with the three things around it that
+/// [`connect_and_publish`] does and [`publish_samples`] alone does not.
+///
+/// Those three are not optional and leaving them out was a real bug, shipped
+/// in `d9ff3e9` and found on 2026-10-05 while trying to update the node it had
+/// stranded: without [`ota_begin_attempt`] and [`ota_confirm`] an image that
+/// arrives over the air is never marked good and is rolled back after
+/// [`ota::MAX_ATTEMPTS`], and without [`install_if_offered`] one never arrives
+/// at all. A node that cannot be updated over the air is a node that has to be
+/// fetched in off the garden.
+///
+/// Not reusing `connect_and_publish` itself because that one takes the radio by
+/// value and brings Wi-Fi up: it is a whole boot's worth of network, and this
+/// runs every five minutes on a stack that is already up.
+async fn lamp_publish(
+    stack: &'static WifiStack,
+    board: &mut Board<'_>,
+    cfg: Config,
+    now_ms: Option<u64>,
+) -> Config {
+    let on_trial = ota_begin_attempt();
+    let mut samples = collect_samples(None, None, &cfg, board).await;
+    let drained = match publish_samples(stack, &mut samples, cfg, now_ms).await {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("lamp: publish failed ({e})");
+            return cfg;
+        }
+    };
+    // Reaching the broker is the proof, and nothing weaker will do.
+    if on_trial {
+        ota_confirm();
+    }
+    install_if_offered(stack, &drained).await;
+    persist_if_changed(cfg, drained.cfg)
+}
+
 /// Lamp profile: one evening per boot, then sleep until the next dusk.
 ///
 /// The shape is the opposite of [`run_battery`], and deliberately so. That one
@@ -684,16 +721,9 @@ async fn run_lamp(
         }
     };
     let synced = sync_time(stack).await;
-    let mut samples = collect_samples(None, None, &cfg, board).await;
-    let mut cfg = match publish_samples(stack, &mut samples, cfg, synced).await {
-        Ok(drained) => drained.cfg,
-        // A failed first publish is not fatal: the lamp still has defaults and
-        // a clock, and the next round in five minutes tries again.
-        Err(e) => {
-            warn!("lamp: first publish failed ({e})");
-            cfg
-        }
-    };
+    // A failed first publish is not fatal: the lamp still has defaults and a
+    // clock, and the next round in five minutes tries again.
+    let mut cfg = lamp_publish(stack, board, cfg, synced).await;
 
     // The clock only advances across sleeps (see `sleep_for`), so an evening
     // spent awake would freeze it. Anchor once and carry the monotonic
@@ -739,8 +769,7 @@ async fn run_lamp(
             LAMP_GATE.signal(0);
             Timer::after(LAMP_STEP).await;
             state::set_clock_ms(ms);
-            let mut samples = collect_samples(None, None, &cfg, board).await;
-            let _ = publish_samples(stack, &mut samples, cfg, Some(ms)).await;
+            let _ = lamp_publish(stack, board, cfg, Some(ms)).await;
             info!("lamp: evening over, sleeping until dusk");
             enter_deep_sleep(lpwr, CoreDuration::from_secs(lamp_sleep_secs(ms)));
         }
@@ -748,10 +777,7 @@ async fn run_lamp(
         if last_publish.elapsed() >= LAMP_PUBLISH_EVERY {
             last_publish = Instant::now();
             state::set_clock_ms(ms);
-            let mut samples = collect_samples(None, None, &cfg, board).await;
-            if let Ok(drained) = publish_samples(stack, &mut samples, cfg, Some(ms)).await {
-                cfg = drained.cfg;
-            }
+            cfg = lamp_publish(stack, board, cfg, Some(ms)).await;
         }
 
         Timer::after(LAMP_TICK).await;
