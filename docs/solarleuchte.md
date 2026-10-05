@@ -1,6 +1,7 @@
 # Solarleuchte — replacing a bought garden light's electronics
 
-> **Nothing is built.** This is a diagnosis and a design, written 2026-09-22
+> **Built and running** as `solarleuchte-e3c08a2`, flashed 2026-10-05. This
+> page is the diagnosis and the design behind it, written 2026-09-22
 > and revised the same day twice: once when the LED output was measured, and
 > once when this repository's own notes killed the assumption the first version
 > rested on. **The LED current is still a guess and the panel is still
@@ -335,7 +336,6 @@ the SVG and re-export with
 | `D8` | 8 | LEDC → `TRIG/PWM` |
 
 ```
-   XIAO D1 (GPIO3) ──► panel divider tap (ADC1)
    XIAO D2 (GPIO4) ──► battery divider tap (ADC1), as on terrasse
 ```
 
@@ -396,52 +396,150 @@ A pouch cell outdoors is acceptable in a box built to be dry — the terrasse
 node already does exactly that — but it has no hard can. If the light's housing
 can pool water, an 18650 is the more forgiving choice.
 
-## Firmware notes
+## The firmware
 
-The node's shape is **not** the one this firmware already has. `run_battery` is
-built around cold boot, one round, deep sleep; this one wakes once at dusk and
-stays up for hours. The sleeping part is the day, not the gaps.
+Built 2026-10-05 and running as `solarleuchte-e3c08a2`. Three pieces, and the
+split between them is the design:
 
-- **LEDC, 12 bit, 1 kHz.** Native on the C3, nothing to add. See above for why
-  not faster.
-- **Gamma-correct the duty**, or a linear ramp jumps at the bottom and flattens
-  at the top. The table in
-  [`examples/lamp_bench.rs`](../examples/lamp_bench.rs) is the one that was
-  tried and looked right on hardware 2026-10-04 — 256 entries of
-  `round(((1 - cos(2πi/256))/2)^2.2 × 4095)`, whose largest neighbouring step is
-  1.23 % of perceived brightness, under the ~2 % that is noticeable. It is
-  independent of what drives the LEDs and carried over unchanged when the
-  PCA9685 was replaced by LEDC — confirmed smooth on hardware again
-  2026-10-04, driving the XY-MOS gate directly from `D8`.
-- **25 s per breath.** Under ~10 s reads as agitated.
-- **Dusk from [`solar.rs`](../src/solar.rs)**, not from a light sensor: it
-  already carries sunrise and sunset for 49.87 N / 8.65 E at 24 points through
-  the year, worst interpolation error two minutes. The 23:00 cutoff needs the
-  wall clock, which `state.rs` keeps across deep sleep and NTP anchors.
-- **Compensate against `battery_voltage`**, since the string runs off the cell
-  and dims as it discharges.
-- **Wi-Fi off while lit.** 25 mA assumes the radio is down; a connected station
-  is several times that. Connect on a schedule, not continuously.
-- **Expose the curve over MQTT** (`smarthome/solarleuchte/config/<key>`, the
-  mechanism README.md already describes) so the choice between breathing and a
-  flat low level is made in the garden rather than at the desk.
+| | |
+| --- | --- |
+| [`src/lamp.rs`](../src/lamp.rs) | the whole brightness rule, as pure arithmetic |
+| `lamp_task` in [`main.rs`](../src/main.rs) | writes a duty every 97 ms and does nothing else |
+| `run_lamp` in [`main.rs`](../src/main.rs) | the evening: clock, cell, network, sleep |
 
-Node name `solarleuchte`, following the fleet's German naming.
+**`lamp.rs` has no HAL, no floats and no clock of its own** — a duty is a
+function of the minute, the day and the cell voltage, which is what makes it
+testable on the host. Twenty tests cover the window edges, the clamps and the
+monotonicity.
 
-## Before you build any of this
+### The duty is a product of four things
 
-- **Trim the battery divider.** It reads and it is stable — 4064 mV at the
-  pin's own reckoning, moving 8 mV between idle and 640 mA, which also says the
-  cell's internal resistance is ~23 mΩ and healthy. What has not been done is
-  checking it against a multimeter at the cell; on terrasse the firmware read
-  4.09–4.12 V against a measured 4.05 V, and `R_TOP_KOHM` / `R_BOTTOM_KOHM` in
-  [`src/battery.rs`](../src/battery.rs) are what that trims.
-- **Check the module does not cycle colours by itself.** If it does, it has its
-  own IC, cannot be dimmed, and has to be replaced.
-- **Check what the XY-MOS module already has fitted**: gate series resistor,
-  pulldown, and the indicator LED that has to come off.
-- **Size the panel divider** for 18 V nominal and ~25 V `Voc` at −20 °C, not for
-  the 6 V an earlier draft of this page assumed.
-- The cell's **3.6 V after a sunny day** was never explained. It stops mattering
-  once the board is replaced, but if the original panel is reused anywhere, its
-  charge path is a suspect.
+```
+duty = BREATH[step] × MAX_DUTY_PCT × twilight × charge × (HA brightness)
+```
+
+- **`BREATH`** is the shape: the gamma-corrected half-cosine above, carried
+  over unchanged from the bench rig since it never depended on what drove the
+  LEDs.
+- **`MAX_DUTY_PCT` = 70 %**, compiled in and reachable by nothing. Home
+  Assistant's slider is a factor *on* it: 255 means "as bright as the ceiling
+  allows". A config able to reach 100 % would run 25 LEDs at a DC-equivalent
+  29 mA for months.
+- **`twilight_permille`** opens the window 45 minutes after sunset, ramps over
+  40, and fades out over the last 10 before the cutoff. An abrupt cut reads as
+  a failure.
+- **`charge_permille`** is the entire weather model. Aspect, shading and last
+  week's cloud all land in the cell, so reading the cell beats predicting any
+  of them — and it dims through a dark week instead of going out in the middle
+  of one.
+
+`lamp::window` is the single definition of when the lamp is lit, and a test
+asserts the direction that can strand a node: **nothing outside it is ever
+bright.** That test found a real off-by-one at the start minute on its first
+run.
+
+### Why the breath has its own task
+
+It was not built that way, and the first version was visibly jerky in the
+garden. The fade shared a loop with a battery conversion — which discards one
+sample and averages several more — so every step came out 97 ms *plus* an
+unpredictable ADC, and every five minutes a publish froze the string for
+seconds while MQTT talked.
+
+`lamp_task` now owns the channel and does nothing but write a duty and wait.
+`run_lamp` recomputes the gate every 30 s and hands it over through a `Signal`,
+newest value wins. `lamp.rs` splits to match — `gate_permille` for what moves
+in seconds, `shaped` for what moves in milliseconds — with a test that the two
+compose back into `duty`, so the split cannot drift.
+
+### Wi-Fi stays up, which the plan did not say
+
+An earlier draft of this page said "Wi-Fi off while lit". It is not, and cannot
+easily be: `bring_up_wifi` consumes the radio peripherals and runs once per
+boot, so an evening gets one association or none.
+
+What that buys is live control — every publish round returns the retained
+config, so a slider moved at nine is obeyed by five past. What it costs is a
+connected station in `modem sleep: max` for the evening, a few mA against the
+string's mean of ~69. The 3.1× margin above becomes roughly 3.0×.
+
+### Fail-safety
+
+The lamp is the first node here that stays awake for hours, which breaks
+assumptions the rest of the fleet never had to state. Found by review on
+2026-10-05, after two of them had already shipped:
+
+| Failure | What it did | What it does |
+| --- | --- | --- |
+| Router reboots | slept an hour — a dark router meant a dark garden | breathes unattended on the clock, publishes nothing |
+| Boot outside the window | idled awake with Wi-Fi until 22:00 UTC, ~420 mAh | sleeps at both ends of its window |
+| Broker down 15 min | rolled back a good image: an attempt per publish against `MAX_ATTEMPTS` of 3 | one attempt per boot |
+| Publish hangs | string lit all night; the watchdog feeds from its own task and `lamp_task` kept breathing | 20 s budget, same as `connect_and_publish` |
+| Cell below 3.73 V | dark, but still awake and talking: ~180 mAh of what was left | sleeps until the next dusk |
+| Image genuinely broken | three evenings to roll back, one attempt per daily boot | 30 minutes to reach the broker, then restart |
+
+**The one that nearly stranded it**: `run_lamp` called `publish_samples`
+directly, and the three things `connect_and_publish` does around it are not
+decoration. Without `install_if_offered` an offer is picked up and never acted
+on, and without `ota_begin_attempt`/`ota_confirm` an image that does arrive is
+never marked good. `d9ff3e9` was therefore a firmware that could only be
+replaced with a cable, on a node whose whole point is hanging in a garden. It
+was found by trying to update it.
+
+Checked and left alone: the watchdog (fed from its own task, so it feeds
+however long `run_lamp` blocks — which is *why* the publish needed its own
+budget); Wi-Fi reconnect (`StaDisconnected` with a 5 s backoff, so an AP reboot
+heals itself); `D8` floating in deep sleep and through boot, where the XY-MOS
+100 kΩ pulldown holds the gate down; NTP implausibility; a silent ADC, which
+falls back to 3700 mV rather than to the brightest evening the ceiling allows.
+
+### Home Assistant
+
+A `light` entity, not a slider and a switch beside each other — `components`
+gained `light` for it, and `ent_cat` is now derived from the component, since a
+knob is configuration and a lamp is the thing the device *is*. The brightness
+pair rides in `Control::spec`, which is free-form JSON, so no renderer changed.
+
+Neither `enabled` nor `brightness` is in the config blob. The retained MQTT
+topics already are the store, and the gap a second copy would cover — cold boot
+to first connect — is one where the ceiling and the charge factor are both
+still in force.
+
+## What is still open
+
+Everything this page once listed as "before you build" has been built. Two
+things are genuinely unfinished, and one of them is only unfinished because
+nobody has held a multimeter to it.
+
+**The battery divider is uncalibrated, and it now matters more than it did.**
+It reads and it is stable — 4160 mV once the charger had finished, moving 8 mV
+between idle and 640 mA, which also puts the cell's internal resistance at
+~23 mΩ and healthy. But the charger's own termination is only nominally
+4200 mV, ±1 %, so the ~40 mV gap is the same size as the reference's
+uncertainty and cannot be trimmed against it. A multimeter at the cell settles
+it in ten seconds.
+
+Why it matters here and not on terrasse: there `battery_voltage` is telemetry,
+and here [`lamp::charge_permille`](../src/lamp.rs) derives the evening's
+brightness ceiling from it. 40 mV is about four points of state of charge, so
+the ceiling sits ~6 % high — and it does that in exactly the conditions where
+the margin is thin.
+
+**`R_TOP_KOHM` and `R_BOTTOM_KOHM` are one pair for the whole fleet.** Trimming
+them for this lamp moves terrasse's reading too, whose divider is different
+resistors and which read *high* rather than low. A per-node calibration would
+need fields on `NodeConfig` and a `cell_millivolts` that is no longer a `const
+fn`. Worth doing once there are two measured dividers to calibrate, not before.
+
+### Settled on the way
+
+- **The string has no colour-cycle IC.** It dims cleanly under PWM, which a
+  module with its own controller could not.
+- **The XY-MOS carries `R3` 100 Ω and `R1` 100 kΩ.** Nothing had to be fitted,
+  and its indicator LED draws 0.65 mA, which is not worth an iron.
+- **No panel divider.** An earlier draft reserved `D1` for one;
+  [`solar.rs`](../src/solar.rs) gives dusk from the calendar and the pin stayed
+  free.
+- The cell's **3.6 V after a sunny day** is explained: the lamp's own charger
+  was holding it mid-charge against a continuous load, not finishing. It
+  stopped mattering when the board was replaced.
