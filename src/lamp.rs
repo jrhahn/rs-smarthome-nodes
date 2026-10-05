@@ -184,13 +184,32 @@ pub fn charge_permille(cell_mv: u32) -> u32 {
     (soc - DARK_BELOW_PCT) * 1000 / (FULL_FROM_PCT - DARK_BELOW_PCT)
 }
 
-/// The duty to write, 0..=[`FULL_SCALE`].
+/// The duty to write, 0..=[`MAX_DUTY`].
 ///
 /// `step` walks [`BREATH`] and wraps on its own, so a caller only has to count
-/// up. Rounds rather than truncates, which costs a handful of extra zeros at
-/// the dark end and buys back everything else.
-pub fn duty(step: usize, minute_utc: u32, doy: u32, cell_mv: u32) -> u32 {
-    let gate = twilight_permille(minute_utc, doy) * charge_permille(cell_mv) / 1000;
+/// up. `enabled` and `brightness` are Home Assistant's, straight off
+/// [`crate::config::Config`]; everything else is measured or computed.
+///
+/// **`brightness` scales the ceiling, it does not replace it.** 255 means "as
+/// bright as [`MAX_DUTY_PCT`] allows", which is why that one is a constant and
+/// this one is a slider.
+///
+/// Rounds rather than truncates, which costs a handful of extra zeros at the
+/// dark end and buys back everything else.
+pub fn duty(
+    step: usize,
+    minute_utc: u32,
+    doy: u32,
+    cell_mv: u32,
+    enabled: bool,
+    brightness: u8,
+) -> u32 {
+    if !enabled {
+        return 0;
+    }
+    let gate = twilight_permille(minute_utc, doy) * charge_permille(cell_mv) / 1000
+        * brightness as u32
+        / 255;
     if gate == 0 {
         return 0;
     }
@@ -289,7 +308,7 @@ mod tests {
         for step in 0..BREATH.len() {
             for minute in (0..1440).step_by(7) {
                 for doy in [1, 90, 171, 265, 354] {
-                    let d = duty(step, minute, doy, 4200);
+                    let d = duty(step, minute, doy, 4200, true, 255);
                     assert!(d <= cap, "duty {d} over cap {cap} at step {step}");
                 }
             }
@@ -301,16 +320,45 @@ mod tests {
         let (_, sunset) = solar::sun(WINTER_DOY);
         let minute = sunset + START_AFTER_SUNSET_MIN + RAMP_MIN + 30;
         let peak = (0..BREATH.len())
-            .map(|s| duty(s, minute, WINTER_DOY, FULL_CELL_MV))
+            .map(|s| duty(s, minute, WINTER_DOY, FULL_CELL_MV, true, 255))
             .max()
             .unwrap();
         assert_eq!(peak, MAX_DUTY);
     }
 
+    /// The minute of the winter evening where the twilight factor is 1.
+    fn winter_peak_minute() -> u32 {
+        let (_, sunset) = solar::sun(WINTER_DOY);
+        sunset + START_AFTER_SUNSET_MIN + RAMP_MIN + 30
+    }
+
+    #[test]
+    fn home_assistant_can_switch_the_lamp_off_entirely() {
+        let minute = winter_peak_minute();
+        for step in 0..BREATH.len() {
+            assert_eq!(duty(step, minute, WINTER_DOY, FULL_CELL_MV, false, 255), 0);
+        }
+    }
+
+    #[test]
+    fn the_brightness_slider_scales_the_ceiling_but_cannot_lift_it() {
+        let minute = winter_peak_minute();
+        let peak = |bri| {
+            (0..BREATH.len())
+                .map(|s| duty(s, minute, WINTER_DOY, FULL_CELL_MV, true, bri))
+                .max()
+                .unwrap()
+        };
+        assert_eq!(peak(255), MAX_DUTY);
+        assert!(peak(128) < peak(255));
+        assert!(peak(128) > peak(32));
+        assert_eq!(peak(0), 0);
+    }
+
     #[test]
     fn outside_the_window_every_step_is_dark() {
         for step in 0..BREATH.len() {
-            assert_eq!(duty(step, 12 * 60, WINTER_DOY, FULL_CELL_MV), 0);
+            assert_eq!(duty(step, 12 * 60, WINTER_DOY, FULL_CELL_MV, true, 255), 0);
         }
     }
 }

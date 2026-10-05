@@ -434,6 +434,28 @@ pub struct Control {
 /// announcements on the broker, the digest recording all fourteen, and the
 /// calibration controls therefore unreachable with no path back short of
 /// changing the entity set in the firmware. Hence a button.
+/// The lamp itself, as a Home Assistant `light` rather than a slider and a
+/// switch beside each other.
+///
+/// It fits the existing `Control` shape because [`Control::spec`] is free-form
+/// JSON members and the payload already defines `~`, so the brightness pair
+/// needs no renderer of its own. `on_cmd_type: brightness` is what stops Home
+/// Assistant sending a bare `ON` and then a brightness: one message, one duty.
+///
+/// **Brightness here is a factor on [`crate::lamp::MAX_DUTY_PCT`]**, not a
+/// replacement for it. 255 means "as bright as the compiled ceiling allows",
+/// which is the whole reason the ceiling is a constant and this is not.
+const LAMP_CONTROLS: &[Control] = &[Control {
+    component: "light",
+    key: "enabled",
+    name: "Licht",
+    reads_back: true,
+    spec: "\"bri_cmd_t\":\"~/config/brightness\",\
+           \"bri_stat_t\":\"~/config/brightness\",\
+           \"bri_scl\":255,\
+           \"on_cmd_type\":\"brightness\",",
+}];
+
 const REANNOUNCE_CONTROLS: &[Control] = &[Control {
     component: "button",
     key: "reannounce",
@@ -622,6 +644,7 @@ pub fn controls(node: &NodeConfig) -> Vec<&'static Control, MAX_CONTROLS> {
         .chain(SDS011_CONTROLS.iter().filter(|_| node.sds011.compensated))
         .chain(BATTERY_CONTROLS.iter().filter(|_| node.power.is_battery()))
         .chain(SLEEP_CONTROLS.iter().filter(|_| node.power.deep_sleeps()))
+        .chain(LAMP_CONTROLS.iter().filter(|_| node.lamp.enabled))
     {
         let _ = out.push(control);
     }
@@ -670,7 +693,16 @@ pub fn control_payload(
     }
     write!(
         p,
-        "\"ret\":true,\"ent_cat\":\"config\",{spec}{avty}",
+        "\"ret\":true,{cat}{spec}{avty}",
+        // A knob is configuration and belongs in the device page's collapsed
+        // section; a lamp is the thing the device *is*, and an `ent_cat` would
+        // keep it off every dashboard Home Assistant generates. The component
+        // decides it, so no table has to carry the distinction.
+        cat = if control.component == "light" {
+            ""
+        } else {
+            "\"ent_cat\":\"config\","
+        },
         spec = control.spec,
         avty = if avail.lwt {
             "\"avty_t\":\"~/status\","
@@ -1105,7 +1137,7 @@ mod tests {
                 assert_eq!(parts[0], PREFIX);
                 assert!(matches!(
                     parts[1],
-                    "sensor" | "number" | "switch" | "button"
+                    "sensor" | "number" | "switch" | "button" | "light"
                 ));
                 assert_eq!(parts[2], node.id);
                 assert_eq!(parts[4], "config");

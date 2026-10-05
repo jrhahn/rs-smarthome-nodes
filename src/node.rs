@@ -299,6 +299,10 @@ pub struct NodeConfig {
     /// only ever belongs on a node with [`PowerProfile::Battery`] — and never
     /// alongside `ds18b20`, which wants the same pin.
     pub battery: Slot,
+    /// The LED string on `solarleuchte`: a `light` entity in Home Assistant
+    /// and an LEDC channel on the board. Unlike every slot above it names no
+    /// bus and no sensor — it is an output, and the only one in the fleet.
+    pub lamp: Slot,
     /// Extra topic the weight is mirrored to, for a node whose Home Assistant
     /// entities predate MQTT discovery (the bird scale's `birds/scale/state`).
     pub legacy_weight_topic: Option<&'static str>,
@@ -432,6 +436,7 @@ const SCHLAFZIMMER: NodeConfig = NodeConfig {
     sds011: Slot::off(),
     sgp41: Slot::off(),
     battery: Slot::off(),
+    lamp: Slot::off(),
     legacy_weight_topic: None,
 };
 
@@ -471,6 +476,7 @@ const WOHNZIMMER: NodeConfig = NodeConfig {
     // of an SGP41 is detected at boot and simply never feeds it.
     sgp41: Slot::on().with_nox(),
     battery: Slot::off(),
+    lamp: Slot::off(),
     legacy_weight_topic: None,
 };
 
@@ -502,6 +508,7 @@ const KUECHE: NodeConfig = NodeConfig {
     sds011: Slot::off(),
     sgp41: Slot::off(),
     battery: Slot::off(),
+    lamp: Slot::off(),
     legacy_weight_topic: None,
 };
 
@@ -523,6 +530,7 @@ const BAD: NodeConfig = NodeConfig {
     sds011: Slot::off(),
     sgp41: Slot::off(),
     battery: Slot::off(),
+    lamp: Slot::off(),
     legacy_weight_topic: None,
 };
 
@@ -565,6 +573,35 @@ const TERRASSE: NodeConfig = NodeConfig {
     sds011: Slot::off(),
     sgp41: Slot::off(),
     battery: Slot::on_as("battery_", "Batterie"),
+    lamp: Slot::off(),
+    legacy_weight_topic: None,
+};
+
+/// The garden lamp: a rebuilt solar light, the only node in the fleet whose
+/// job is to *emit* rather than to measure.
+///
+/// Battery and deep-sleeping, but on a cadence nothing else here has: it wakes
+/// once at dusk, stays up for hours breathing, and sleeps through the day. See
+/// [`docs/solarleuchte.md`](../docs/solarleuchte.md).
+///
+/// No sensors. The cell voltage is not telemetry on this node but part of the
+/// control loop — [`crate::lamp::charge_permille`] derives the evening's
+/// brightness ceiling from it.
+const SOLARLEUCHTE: NodeConfig = NodeConfig {
+    id: "solarleuchte",
+    name: "Solarleuchte",
+    namespace: "smarthome",
+    power: PowerProfile::Battery,
+    // Only consulted by mains nodes; a battery cadence comes from `Config`.
+    sample_secs: 60,
+    scale: Slot::off(),
+    ds18b20: Slot::off(),
+    sht31: Slot::off(),
+    scd41: Slot::off(),
+    sds011: Slot::off(),
+    sgp41: Slot::off(),
+    battery: Slot::on_as("battery_", "Batterie"),
+    lamp: Slot::on(),
     legacy_weight_topic: None,
 };
 
@@ -577,6 +614,7 @@ pub const FLEET: &[(&str, NodeConfig)] = &[
     ("kueche", KUECHE),
     ("bad", BAD),
     ("terrasse", TERRASSE),
+    ("solarleuchte", SOLARLEUCHTE),
 ];
 
 // D2 / GPIO4 carries either the DS18B20's 1-Wire line or the battery divider's
@@ -652,7 +690,7 @@ const _: () = {
 /// The same names as one string, for error messages. Spelled out rather than
 /// built from [`FLEET`] because it is used in a const-eval `panic!`, which takes
 /// a literal; a test keeps the two in step.
-pub const KNOWN_NODES: &str = "schlafzimmer, wohnzimmer, kueche, bad, terrasse";
+pub const KNOWN_NODES: &str = "schlafzimmer, wohnzimmer, kueche, bad, terrasse, solarleuchte";
 
 /// The node this image was **built** for — the fallback when flash carries no
 /// provisioned identity. Use [`active`] for the identity actually in force.

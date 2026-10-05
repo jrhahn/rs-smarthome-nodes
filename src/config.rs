@@ -89,6 +89,17 @@ pub struct Config {
     /// at all — a node on [`crate::node::PowerProfile::Mains`] stays awake
     /// regardless.
     pub deep_sleep: bool,
+    /// Whether the lamp lights at all tonight, from Home Assistant's light
+    /// entity. The twilight window and the cell still decide *when* and *how
+    /// bright*; this only ever turns the whole evening off.
+    pub lamp_enabled: bool,
+    /// Home Assistant's brightness slider, 0..=255.
+    ///
+    /// A **factor on** [`crate::lamp::MAX_DUTY_PCT`], never a replacement for
+    /// it: 255 means "as bright as the compiled ceiling allows", not "full
+    /// duty". See the ceiling's own note for why that distinction is the whole
+    /// point.
+    pub lamp_brightness: u8,
     /// Seconds between periodic "heartbeat" publishes: even with no visitor, the
     /// firmware brings Wi-Fi up this often and publishes temperature + weight so
     /// Home Assistant keeps a fresh reading. Realised as a whole number of idle
@@ -180,6 +191,10 @@ impl Config {
         // so this needs no per-node value — which also keeps `DEFAULT` a plain
         // constant now that the node identity is resolved at runtime from flash.
         deep_sleep: true,
+        // On and as bright as the ceiling permits. Neither is persisted in the
+        // blob — see `the_lamp_knobs_are_deliberately_not_persisted`.
+        lamp_enabled: true,
+        lamp_brightness: 255,
         heartbeat_secs: 600, // 10 min
         // The sensor's own power-on value, so an un-calibrated node behaves
         // exactly as it did before this knob existed.
@@ -453,6 +468,22 @@ impl Config {
                         self.temp_coeff_centi =
                             centi.clamp(-MAX_TEMP_COEFF_CENTI, MAX_TEMP_COEFF_CENTI);
                     }
+                }
+            }
+            // Home Assistant's light entity, which sends the bare words rather
+            // than a number. Anything else leaves the lamp as it was: a garbled
+            // payload should not switch a light off in the garden.
+            "enabled" => match value {
+                "ON" | "on" | "true" | "1" => self.lamp_enabled = true,
+                "OFF" | "off" | "false" | "0" => self.lamp_enabled = false,
+                _ => {}
+            },
+            // The brightness slider, 0..=255. Clamped rather than dropped, the
+            // same argument as the offsets above — the slider has already
+            // moved, so keeping the old value would be the confusing answer.
+            "brightness" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.lamp_brightness = v.min(255) as u8;
                 }
             }
             // Seconds, like the other three intervals. `0` switches the night
@@ -826,6 +857,10 @@ mod tests {
 
     /// A config that differs from `DEFAULT` in every field, so a serialisation
     /// bug that drops or transposes one shows up.
+    ///
+    /// Two of those fields are not serialised at all — see
+    /// [`sample_after_round_trip`] — and they are set here anyway, so that the
+    /// exclusion is asserted somewhere rather than assumed everywhere.
     fn sample() -> Config {
         Config {
             offset: -12_345,
@@ -842,6 +877,21 @@ mod tests {
             tare_temp_tenths: 191,
             night_idle_secs: 300,
             night_margin_min: 45,
+            lamp_enabled: false,
+            lamp_brightness: 123,
+        }
+    }
+
+    /// [`sample`] with the two lamp knobs back at their defaults.
+    ///
+    /// They are the only fields the blob does not carry, so this is what a
+    /// round trip is allowed to return. See
+    /// [`the_lamp_knobs_are_deliberately_not_persisted`].
+    fn sample_after_round_trip() -> Config {
+        Config {
+            lamp_enabled: Config::DEFAULT.lamp_enabled,
+            lamp_brightness: Config::DEFAULT.lamp_brightness,
+            ..sample()
         }
     }
 
@@ -884,10 +934,38 @@ mod tests {
 
     #[test]
     fn config_blob_round_trips() {
-        for cfg in [Config::DEFAULT, sample()] {
+        for (cfg, expected) in [
+            (Config::DEFAULT, Config::DEFAULT),
+            (sample(), sample_after_round_trip()),
+        ] {
             let decoded = Config::from_bytes(&cfg.to_bytes()).expect("valid blob");
-            assert!(decoded == cfg);
+            assert!(decoded == expected);
         }
+    }
+
+    /// The lamp's two knobs are **not** in the blob, and that is a decision
+    /// rather than an omission.
+    ///
+    /// Their retained MQTT topics already are the store: Home Assistant holds
+    /// the slider, the broker holds the message, and the node reads it back on
+    /// the next connect. Spending a blob version and a flash write on a second
+    /// copy would buy only the gap between a cold boot and that connect — and
+    /// in that gap `MAX_DUTY_PCT` and `charge_permille` are both still in
+    /// force, so the worst case is an evening at the ceiling rather than at
+    /// whatever the slider said.
+    #[test]
+    fn the_lamp_knobs_are_deliberately_not_persisted() {
+        let cfg = sample();
+        assert_ne!(cfg.lamp_enabled, Config::DEFAULT.lamp_enabled);
+        assert_ne!(cfg.lamp_brightness, Config::DEFAULT.lamp_brightness);
+
+        let decoded = Config::from_bytes(&cfg.to_bytes()).expect("valid blob");
+        assert_eq!(decoded.lamp_enabled, Config::DEFAULT.lamp_enabled);
+        assert_eq!(decoded.lamp_brightness, Config::DEFAULT.lamp_brightness);
+        // Everything else still survives, or this test would be hiding a bug
+        // in the serialiser rather than documenting a choice.
+        assert_eq!(decoded.night_margin_min, cfg.night_margin_min);
+        assert_eq!(decoded.offset, cfg.offset);
     }
 
     #[test]
