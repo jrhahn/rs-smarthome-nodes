@@ -674,10 +674,25 @@ async fn lamp_publish(
     on_trial: &mut bool,
 ) -> Config {
     let mut samples = collect_samples(None, None, &cfg, board).await;
-    let drained = match publish_samples(stack, &mut samples, cfg, now_ms).await {
-        Ok(d) => d,
-        Err(e) => {
+    // **Budgeted, because nothing else here would catch it.** The watchdog is
+    // fed from its own task and keeps feeding however long this blocks, and
+    // `lamp_task` keeps breathing the last gate it was handed — so a socket
+    // that never answers would leave the string lit all night on a cell that
+    // has to last until tomorrow's sun. `connect_and_publish` has had this
+    // budget from the start; calling `publish_samples` directly dropped it.
+    let drained = match with_timeout(
+        WIFI_BUDGET,
+        publish_samples(stack, &mut samples, cfg, now_ms),
+    )
+    .await
+    {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => {
             warn!("lamp: publish failed ({e})");
+            return cfg;
+        }
+        Err(_) => {
+            warn!("lamp: publish exceeded its budget");
             return cfg;
         }
     };
@@ -692,6 +707,9 @@ async fn lamp_publish(
         ota_confirm();
         *on_trial = false;
     }
+    // Outside the budget on purpose: a download is allowed minutes where a
+    // publish gets twenty seconds, and wrapping both in the shorter one is the
+    // bug `connect_and_publish` documents at its own timeout.
     install_if_offered(stack, &drained).await;
     persist_if_changed(cfg, drained.cfg)
 }
@@ -789,6 +807,24 @@ async fn run_lamp(
         // Dark through the same signal the task is already watching, so exactly
         // one thing ever writes that duty, and give it a step to land before
         // the board stops answering.
+        // A cell too low to light is a cell too low to spend six hours
+        // talking about. The lamp is dark either way below
+        // `lamp::DARK_BELOW_PCT`; the difference is whether it also burns
+        // ~180 mAh of what is left doing it. Only the *charge* gate counts
+        // here — a lamp switched off in Home Assistant stays awake, or it
+        // could not be switched back on until tomorrow.
+        if lamp::charge_permille(cell) == 0 {
+            LAMP_GATE.signal(0);
+            Timer::after(LAMP_STEP).await;
+            state::set_clock_ms(ms);
+            if let Some(s) = stack {
+                let _ = lamp_publish(s, board, cfg, Some(ms), &mut on_trial).await;
+            }
+            let secs = lamp_sleep_secs(ms);
+            warn!("lamp: cell at {cell} mV is too low to light; sleeping {secs} s");
+            enter_deep_sleep(lpwr, CoreDuration::from_secs(secs));
+        }
+
         if !lamp::is_evening(minute, doy) {
             LAMP_GATE.signal(0);
             Timer::after(LAMP_STEP).await;
