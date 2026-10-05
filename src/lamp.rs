@@ -184,6 +184,39 @@ pub fn charge_permille(cell_mv: u32) -> u32 {
     (soc - DARK_BELOW_PCT) * 1000 / (FULL_FROM_PCT - DARK_BELOW_PCT)
 }
 
+/// Everything about tonight that is *not* the breath, in per mille.
+///
+/// Split out from [`duty`] because the two change on completely different
+/// timescales and, since 2026-10-05, in different tasks. This moves when the
+/// sky moves, when the cell moves or when someone touches Home Assistant —
+/// seconds at the fastest. [`shaped`] moves every 97 ms and must not wait for
+/// an ADC conversion or an MQTT round trip to do it.
+pub fn gate_permille(
+    minute_utc: u32,
+    doy: u32,
+    cell_mv: u32,
+    enabled: bool,
+    brightness: u8,
+) -> u32 {
+    if !enabled {
+        return 0;
+    }
+    twilight_permille(minute_utc, doy) * charge_permille(cell_mv) / 1000 * brightness as u32 / 255
+}
+
+/// The breath at `step`, scaled by a gate from [`gate_permille`].
+///
+/// Pure arithmetic on two numbers already in hand, so the task that drives the
+/// PWM can run on a fixed cadence and nothing else.
+pub fn shaped(step: usize, gate_permille: u32) -> u32 {
+    if gate_permille == 0 {
+        return 0;
+    }
+    let shape = BREATH[step % BREATH.len()] as u32;
+    // Largest intermediate is 4095 × 70 × 1000 ≈ 2.9e8, well inside u32.
+    ((shape * MAX_DUTY_PCT * gate_permille + 50_000) / 100_000).min(MAX_DUTY)
+}
+
 /// The duty to write, 0..=[`MAX_DUTY`].
 ///
 /// `step` walks [`BREATH`] and wraps on its own, so a caller only has to count
@@ -204,18 +237,10 @@ pub fn duty(
     enabled: bool,
     brightness: u8,
 ) -> u32 {
-    if !enabled {
-        return 0;
-    }
-    let gate = twilight_permille(minute_utc, doy) * charge_permille(cell_mv) / 1000
-        * brightness as u32
-        / 255;
-    if gate == 0 {
-        return 0;
-    }
-    let shape = BREATH[step % BREATH.len()] as u32;
-    // Largest intermediate is 4095 × 70 × 1000 ≈ 2.9e8, well inside u32.
-    ((shape * MAX_DUTY_PCT * gate + 50_000) / 100_000).min(MAX_DUTY)
+    shaped(
+        step,
+        gate_permille(minute_utc, doy, cell_mv, enabled, brightness),
+    )
 }
 
 #[cfg(test)]
@@ -353,6 +378,27 @@ mod tests {
         assert!(peak(128) < peak(255));
         assert!(peak(128) > peak(32));
         assert_eq!(peak(0), 0);
+    }
+
+    /// The split that keeps the PWM task free of the ADC and the radio: the
+    /// two halves recombined must be the whole.
+    #[test]
+    fn the_gate_and_the_shape_compose_back_into_the_duty() {
+        let minute = winter_peak_minute();
+        for step in [0, 7, 64, 128, 200, 255] {
+            for (enabled, bri, mv) in [
+                (true, 255, FULL_CELL_MV),
+                (true, 128, 3800),
+                (true, 32, FULL_CELL_MV),
+                (false, 255, FULL_CELL_MV),
+            ] {
+                let gate = gate_permille(minute, WINTER_DOY, mv, enabled, bri);
+                assert_eq!(
+                    shaped(step, gate),
+                    duty(step, minute, WINTER_DOY, mv, enabled, bri)
+                );
+            }
+        }
     }
 
     #[test]

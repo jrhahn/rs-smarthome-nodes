@@ -35,6 +35,7 @@ use core::time::Duration as CoreDuration;
 
 use embassy_executor::Spawner;
 use embassy_net::{tcp::TcpSocket, Config as NetConfig, Ipv4Address, Stack, StackResources};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_hal::delay::DelayNs as _;
 use esp_backtrace as _;
@@ -593,6 +594,43 @@ async fn main(spawner: Spawner) {
     run_battery(spawner, radio, peripherals.LPWR, &mut board, cfg).await;
 }
 
+/// What the PWM task is told, in per mille — see [`lamp::gate_permille`].
+///
+/// A `Signal` rather than a channel because only the newest value has any
+/// meaning: if the breath task missed an update it does not want the backlog,
+/// it wants where the evening is *now*.
+static LAMP_GATE: Signal<CriticalSectionRawMutex, u32> = Signal::new();
+
+/// Drive the LED string, and do nothing else.
+///
+/// **Its own task because the breath has a deadline and the rest of the node
+/// does not.** The first version ran the fade in [`run_lamp`]'s loop beside
+/// the ADC read and the MQTT publish, and it was visibly jerky on hardware
+/// (2026-10-05): a battery conversion discards one sample and averages several
+/// more, so every step came out 97 ms *plus* an unpredictable ADC, and every
+/// five minutes a publish froze the lamp for seconds. Here the only thing
+/// between two steps is a timer.
+#[embassy_executor::task]
+async fn lamp_task(lamp: platform::Lamp) {
+    let mut gate = 0;
+    let mut step: usize = 0;
+    loop {
+        if let Some(fresh) = LAMP_GATE.try_take() {
+            gate = fresh;
+        }
+        lamp.set_duty(lamp::shaped(step, gate));
+        Timer::after(LAMP_STEP).await;
+        step = step.wrapping_add(1);
+    }
+}
+
+/// How often [`run_lamp`] recomputes the gate: reads the cell, asks the clock
+/// where the evening is, and signals [`lamp_task`].
+///
+/// Far slower than a step and far faster than a publish. The fade-out is ten
+/// minutes long, so half a minute of granularity is invisible in it.
+const LAMP_TICK: Duration = Duration::from_secs(30);
+
 /// How often the lamp re-publishes during an evening.
 ///
 /// Each one is also how Home Assistant's light reaches the board: the reply
@@ -667,7 +705,13 @@ async fn run_lamp(
     let anchor = Instant::now();
     let now_ms = || anchor_ms + anchor.elapsed().as_millis();
 
-    let mut step: usize = 0;
+    // The PWM moves to its own task, and the string with it.
+    if let Some(l) = board.lamp.take() {
+        if spawner.spawn(lamp_task(l)).is_err() {
+            warn!("lamp: PWM task already running");
+        }
+    }
+
     let mut last_publish = Instant::now();
     loop {
         let ms = now_ms();
@@ -680,25 +724,20 @@ async fn run_lamp(
             .and_then(|b| b.read_millivolts())
             .unwrap_or(LAMP_CELL_FALLBACK_MV);
 
-        let duty = lamp::duty(
-            step,
+        LAMP_GATE.signal(lamp::gate_permille(
             minute,
             doy,
             cell,
             cfg.lamp_enabled,
             cfg.lamp_brightness,
-        );
-        if let Some(l) = board.lamp.as_ref() {
-            l.set_duty(duty);
-        }
+        ));
 
-        // Past the cutoff the evening is over, whatever the breath was doing.
-        // Dark first, so the string is off before the clock is written back
-        // and the board stops answering.
+        // Past the cutoff the evening is over. Dark through the same signal the
+        // task is already watching, so exactly one thing ever writes that duty,
+        // and give it a step to land before the board stops answering.
         if minute >= lamp::CUTOFF_MINUTE_UTC {
-            if let Some(l) = board.lamp.as_ref() {
-                l.set_duty(0);
-            }
+            LAMP_GATE.signal(0);
+            Timer::after(LAMP_STEP).await;
             state::set_clock_ms(ms);
             let mut samples = collect_samples(None, None, &cfg, board).await;
             let _ = publish_samples(stack, &mut samples, cfg, Some(ms)).await;
@@ -715,8 +754,7 @@ async fn run_lamp(
             }
         }
 
-        Timer::after(LAMP_STEP).await;
-        step = step.wrapping_add(1);
+        Timer::after(LAMP_TICK).await;
     }
 }
 
