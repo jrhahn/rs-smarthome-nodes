@@ -139,6 +139,23 @@ pub const DARK_BELOW_PCT: u32 = 20;
 /// State of charge from which the lamp is allowed its full [`MAX_DUTY_PCT`].
 pub const FULL_FROM_PCT: u32 = 90;
 
+/// Tonight's lit window as minutes past midnight UTC, `[start, cutoff)`.
+///
+/// One place that decides it, because two would drift: `twilight_permille`
+/// shapes the brightness inside the window and the firmware's sleep decides
+/// when to be awake for it, and a lamp awake outside its own window is a node
+/// burning a fifth of its cell for nothing.
+pub fn window(doy: u32) -> (u32, u32) {
+    let (_sunrise, sunset) = solar::sun(doy);
+    (sunset + START_AFTER_SUNSET_MIN, CUTOFF_MINUTE_UTC)
+}
+
+/// Whether `minute_utc` falls inside [`window`].
+pub fn is_evening(minute_utc: u32, doy: u32) -> bool {
+    let (start, cutoff) = window(doy);
+    minute_utc >= start && minute_utc < cutoff
+}
+
 /// How far into the evening the lamp has got, in per mille of full brightness.
 ///
 /// Zero before [`START_AFTER_SUNSET_MIN`] past sunset and from
@@ -398,6 +415,41 @@ mod tests {
                     duty(step, minute, WINTER_DOY, mv, enabled, bri)
                 );
             }
+        }
+    }
+
+    /// Never asleep while lit, which is the direction that can break something.
+    ///
+    /// Not an equality: at the very first minute the ramp is still at zero and
+    /// the window is already open, which is right — the lamp has to be awake to
+    /// start rising. The converse is what matters, and it is asserted both
+    /// ways round: nothing outside the window is ever lit.
+    #[test]
+    fn the_lamp_is_never_lit_outside_its_own_window() {
+        for doy in [1, 60, 171, 265, 354, 365] {
+            let (start, cutoff) = window(doy);
+            for minute in 0..1440 {
+                let lit = twilight_permille(minute, doy) > 0;
+                if lit {
+                    assert!(
+                        is_evening(minute, doy),
+                        "day {doy} minute {minute}: lit outside the window"
+                    );
+                }
+                if !is_evening(minute, doy) {
+                    assert_eq!(
+                        twilight_permille(minute, doy),
+                        0,
+                        "day {doy} minute {minute}: brightness outside the window"
+                    );
+                }
+            }
+            // And the window is the span it claims to be, not a point.
+            assert!(cutoff > start, "day {doy}: empty window {start}..{cutoff}");
+            assert_eq!(twilight_permille(start, doy), 0);
+            assert!(twilight_permille(start + 1, doy) > 0);
+            assert!(twilight_permille(cutoff - 1, doy) > 0);
+            assert_eq!(twilight_permille(cutoff, doy), 0);
         }
     }
 

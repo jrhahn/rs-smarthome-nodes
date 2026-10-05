@@ -671,8 +671,8 @@ async fn lamp_publish(
     board: &mut Board<'_>,
     cfg: Config,
     now_ms: Option<u64>,
+    on_trial: &mut bool,
 ) -> Config {
-    let on_trial = ota_begin_attempt();
     let mut samples = collect_samples(None, None, &cfg, board).await;
     let drained = match publish_samples(stack, &mut samples, cfg, now_ms).await {
         Ok(d) => d,
@@ -682,8 +682,15 @@ async fn lamp_publish(
         }
     };
     // Reaching the broker is the proof, and nothing weaker will do.
-    if on_trial {
+    //
+    // **Once per boot, not once per round**, which is where this differs from
+    // `connect_and_publish` and has to. There an attempt is a whole wake cycle;
+    // here rounds come every five minutes, so counting each one against
+    // `ota::MAX_ATTEMPTS` would roll a perfectly good image back after fifteen
+    // minutes of broker trouble.
+    if *on_trial {
         ota_confirm();
+        *on_trial = false;
     }
     install_if_offered(stack, &drained).await;
     persist_if_changed(cfg, drained.cfg)
@@ -710,26 +717,37 @@ async fn run_lamp(
 ) -> ! {
     // Up front and once: the radio is consumed here, and the clock has to be
     // anchored before any question about dusk means anything.
+    // **A dark router must not mean a dark garden.** The network is how the
+    // lamp is told things and how it tells anyone anything, but it is not how
+    // it decides to light: that is the clock, and the clock survives a sleep.
+    // So a failure here is degradation, not an outage — unless there is no
+    // clock either, below.
     let stack = match bring_up_wifi(spawner, radio).await {
-        Ok(stack) => stack,
+        Ok(stack) => Some(stack),
         Err(e) => {
-            // No network means no NTP, and without a clock the lamp cannot
-            // know whether it is evening. Sleeping an hour and trying again is
-            // better than lighting at an arbitrary time or not at all.
-            warn!("lamp: no network ({e}); retrying in an hour");
-            enter_deep_sleep(lpwr, CoreDuration::from_secs(3600));
+            warn!("lamp: no network ({e}); running the evening unattended");
+            None
         }
     };
-    let synced = sync_time(stack).await;
+    let synced = match stack {
+        Some(s) => sync_time(s).await,
+        None => None,
+    };
+    let mut on_trial = ota_begin_attempt();
     // A failed first publish is not fatal: the lamp still has defaults and a
     // clock, and the next round in five minutes tries again.
-    let mut cfg = lamp_publish(stack, board, cfg, synced).await;
+    let mut cfg = match stack {
+        Some(s) => lamp_publish(s, board, cfg, synced, &mut on_trial).await,
+        None => cfg,
+    };
 
     // The clock only advances across sleeps (see `sleep_for`), so an evening
     // spent awake would freeze it. Anchor once and carry the monotonic
     // elapsed time on top.
     let Some(anchor_ms) = state::clock_ms() else {
-        warn!("lamp: clock unset after NTP; retrying in an hour");
+        // Never set, and nothing to set it from. Without this the lamp would
+        // light at an arbitrary hour, which is worse than not lighting.
+        warn!("lamp: no clock and no NTP; retrying in an hour");
         enter_deep_sleep(lpwr, CoreDuration::from_secs(3600));
     };
     let anchor = Instant::now();
@@ -762,22 +780,33 @@ async fn run_lamp(
             cfg.lamp_brightness,
         ));
 
-        // Past the cutoff the evening is over. Dark through the same signal the
-        // task is already watching, so exactly one thing ever writes that duty,
-        // and give it a step to land before the board stops answering.
-        if minute >= lamp::CUTOFF_MINUTE_UTC {
+        // Outside its own window the lamp has no business being awake, and
+        // that covers both ends: after the cutoff, and before dusk on a boot
+        // that landed in the morning — an OTA restart, or a cell reconnected
+        // over breakfast. Idling through a winter day costs ~420 mAh of a
+        // 2000 mAh cell to light nothing.
+        //
+        // Dark through the same signal the task is already watching, so exactly
+        // one thing ever writes that duty, and give it a step to land before
+        // the board stops answering.
+        if !lamp::is_evening(minute, doy) {
             LAMP_GATE.signal(0);
             Timer::after(LAMP_STEP).await;
             state::set_clock_ms(ms);
-            let _ = lamp_publish(stack, board, cfg, Some(ms)).await;
-            info!("lamp: evening over, sleeping until dusk");
-            enter_deep_sleep(lpwr, CoreDuration::from_secs(lamp_sleep_secs(ms)));
+            if let Some(s) = stack {
+                let _ = lamp_publish(s, board, cfg, Some(ms), &mut on_trial).await;
+            }
+            let secs = lamp_sleep_secs(ms);
+            info!("lamp: outside the window, sleeping {secs} s until dusk");
+            enter_deep_sleep(lpwr, CoreDuration::from_secs(secs));
         }
 
         if last_publish.elapsed() >= LAMP_PUBLISH_EVERY {
             last_publish = Instant::now();
             state::set_clock_ms(ms);
-            cfg = lamp_publish(stack, board, cfg, Some(ms)).await;
+            if let Some(s) = stack {
+                cfg = lamp_publish(s, board, cfg, Some(ms), &mut on_trial).await;
+            }
         }
 
         Timer::after(LAMP_TICK).await;
@@ -786,15 +815,25 @@ async fn run_lamp(
 
 /// Seconds from `now_ms` until the next evening starts.
 ///
+/// Both directions, because the lamp sleeps at both ends of its window: before
+/// dusk it waits for tonight, after the cutoff for tomorrow.
+///
 /// Always at least a minute, so a clock that lands exactly on the boundary
 /// cannot produce a zero-length sleep and a boot loop with it.
 fn lamp_sleep_secs(now_ms: u64) -> u64 {
     let minute = solar::minute_of_day(now_ms);
     let doy = solar::day_of_year(now_ms);
-    // Tomorrow's sunset, since the cutoff has passed by the time this is asked.
-    let (_, sunset) = solar::sun(doy % 365 + 1);
-    let start = sunset + lamp::START_AFTER_SUNSET_MIN;
-    let minutes = (24 * 60 - minute) + start;
+    let (start_today, _) = lamp::window(doy);
+    let minutes = if minute < start_today {
+        start_today - minute
+    } else {
+        // `doy % 365 + 1` is tomorrow, give or take a day across a leap year's
+        // end. Sunset moves about a minute a day, so that is worth less than
+        // the civil calendar it would take to be exact — the same trade
+        // `solar` itself makes.
+        let (start_tomorrow, _) = lamp::window(doy % 365 + 1);
+        (24 * 60 - minute) + start_tomorrow
+    };
     (minutes.max(1) as u64) * 60
 }
 
