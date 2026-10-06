@@ -729,6 +729,7 @@ a pin:
 | `schlafzimmer` | D0, D1, D2, D3, D8, D10 |
 | `wohnzimmer` | D0, D1, D2, D8 |
 | `terrasse` | D3, D8, D10 |
+| `solarleuchte` | D0, D1, D3, D10 |
 
 `D6`, `D7` and `D9` are excluded everywhere: console UART and the BOOT button.
 

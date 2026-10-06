@@ -317,22 +317,29 @@ the SVG and re-export with
 
 ```
                       BMS P+ ──┬── XIAO  B+
-                               ├── CN3791 BAT+
+                               ├── charger BAT+
                                ├── XY-MOS VIN+ ──► OUT+ ──► string ──► OUT−
                                └── 100 kΩ ──┬── XIAO D2 (GPIO4)
                                             ├── 100 kΩ ──► P−
                                             └── 100 nF ──► P−
                       BMS P− ──┬── XIAO  GND
-                               ├── CN3791 GND
+                               ├── charger GND
                                └── XY-MOS VIN− and GND
 
    XIAO D8 (GPIO8) ──────────────► XY-MOS TRIG/PWM
                                    (100 Ω and 100 kΩ are on the module)
+
+   XIAO 3V3 ─────────────────────► SHT31-D VCC
+   XIAO D4 (GPIO6) ──────────────► SHT31-D SDA
+   XIAO D5 (GPIO7) ──────────────► SHT31-D SCL
+                                   SHT31-D GND ──► P−
 ```
 
 | Pad | GPIO | What |
 | --- | --- | --- |
 | `D2` | 4 | battery divider tap (ADC1) |
+| `D4` | 6 | I²C SDA — SHT31-D |
+| `D5` | 7 | I²C SCL — SHT31-D |
 | `D8` | 8 | LEDC → `TRIG/PWM` |
 
 ```
@@ -347,8 +354,78 @@ to `VIN+` and the switching happens in `OUT−`. The signal header is labelled
 `TRIG/PWM` and `GND`, and both are needed — `GND` is what makes the gate
 voltage mean anything.
 
-I²C is not used. There is no PCA9685 in the final circuit — it was the fallback
-for a small panel, and the panel is not small.
+There is no PCA9685 in the final circuit — it was the fallback for a small
+panel, and the panel is not small. I²C carries only the thermometer.
+
+### The charger has a trimpot, and it is the dangerous kind
+
+Not the Soldered CN3791 [`solar.md`](solar.md#charger-cn3791-and-why-not-the-obvious-modules)
+specifies for terrasse, but the class of module that page *rejected*: an 18 V
+MPPT variant whose **charge voltage is a continuously adjustable trimpot,
+shipped at an arbitrary setting**. Its own documentation says to set the output
+before connecting a battery, and that warning is the whole reason terrasse got
+a board whose 4.2 V is fixed by the chip.
+
+So, in this order and no other:
+
+1. **No cell connected.** Panel on `VIN`/`GND`, in daylight.
+2. Meter on `BAT+` to `GND`, turn the pot to **4.20 V**. Not 3.6 V — that is
+   LiFePO4, and this cell is not.
+3. Only then connect the cell.
+
+Verified on the board in hand: the electrolytics are **47 µF / 63 V**, against
+22.3 V `Voc` rising to ~25.3 V at −20 °C. Ample, and the one thing about this
+module that needed no attention.
+
+### `RCS` ships at 0.12 Ω, and 1 Ω is the wrong answer here
+
+`120 mV / RCS`, the same rule as terrasse's `R8`. The board carries `R120` —
+0.120 Ω in the decimal-point notation, confirmed by measurement once the
+meter's own 0.4 Ω of leads was subtracted. That is **1 A**, or 0.5 C into this
+cell.
+
+The terrasse value does not transfer, and the reason is the load: that node
+draws 240 mAh a day, this one 650 mAh an evening.
+
+| `RCS` | current | December harvest | limited by | margin | rate |
+| --- | --- | --- | --- | --- | --- |
+| 0.12 Ω (as shipped) | 1000 mA | 1890 mAh | the panel | 2.9× | C/2 |
+| **0.5 Ω** | **240 mA** | **1680 mAh** | `RCS` | **2.6×** | **C/8** |
+| 1.0 Ω (terrasse's) | 120 mA | 840 mAh | `RCS` | 1.3× | C/17 |
+
+Above 0.33 Ω the panel is the limit rather than the resistor, so **0.5 Ω costs
+11 % of the harvest and halves the charge rate** — which is the trade worth
+making, because rate is what makes sub-zero charging dangerous. At 1 Ω the lamp
+would run out in November.
+
+**Not urgent, and dated.** The risk is charging below freezing, which starts in
+December; until then 1 A is simply the better harvest. Fit it before the first
+frost.
+
+### Why there is a thermometer on a lamp
+
+Nothing here reads the weather. The SHT31-D is on `D4`/`D5` to answer one
+question nobody has measured: **is this cell ever actually charged below
+freezing?**
+
+Two things argue it is not, and both are currently assumption. Charging happens
+at midday, the warmest part of the day — the case that blocks is an *Eistag*,
+not a frost night. And the cell sits in a dark enclosure in the sun during
+exactly those hours, so it can be above zero while the air is at −3 °C.
+
+**What was considered and not built: a firmware charge inhibit.** The circuit is
+already drawn in [`solar.md`](solar.md#optional-a-firmware-charge-inhibit) — a
+P-channel high-side switch in the panel line. It is much weaker here than
+there, because **this node is asleep for the whole charging window**. Making it
+work would mean latching the pin through deep sleep with `RTC_CNTL.PAD_HOLD`,
+the way `park_scale` holds the HX711's, plus waking hourly through the day to
+re-evaluate. And that inverts the safety property that page insists on: with a
+latched pad the default is no longer "charging on" but "whatever was last
+written", so a firmware that hangs while inhibiting leaves a cell that never
+charges again.
+
+Measure first. A winter of temperature data costs one part and no firmware; an
+inhibit built for an unmeasured problem costs a new way to kill the node.
 
 ### The battery divider is not telemetry here
 
@@ -386,7 +463,8 @@ The list in [`wiring.md`](wiring.md#before-you-power-it-up) applies.
 | Fallback switch | AO3400A, SOT-23 | ~€0.10, buy two against a mushy fade |
 | Cell | 2000 mAh LiPo pouch | on hand, ×2 |
 | Protection | BMS board | on hand |
-| Charger | CN3791 | on hand; `R8` → 1 Ω, MPPT jumper to 18 V |
+| Charger | MPPT module, 18 V variant | on hand; **set the pot, swap `RCS`** — below |
+| Thermometer | SHT31-D breakout | on hand; `D4`/`D5`, telemetry only |
 | Panel | Waveshare 18 V / 10 W | on hand, its own — see [`solar.md`](solar.md) |
 
 Nothing else. No boost module, no sense resistor, no PWM expander, no gate

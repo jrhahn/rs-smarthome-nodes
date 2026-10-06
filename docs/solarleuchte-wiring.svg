@@ -18,7 +18,7 @@
   </style>
 
   <text class="ttl" x="40" y="36">Solarleuchte — Verdrahtung</text>
-  <text class="sub" x="40" y="58">XIAO ESP32-C3 · XY-MOS (D4184) · Lichterkette</text>
+  <text class="sub" x="40" y="58">XIAO ESP32-C3 · XY-MOS (D4184) · Lichterkette · SHT31-D</text>
 
   <line class="pos" x1="290" y1="215" x2="1180" y2="215"/>
   <text class="pin" x="1188" y="220" fill="#c0392b">P+</text>
@@ -34,9 +34,9 @@
   <text class="pin e" x="234" y="131">VIN−</text>
 
   <rect class="blk" x="240" y="78" width="170" height="100"/>
-  <text class="lbl" x="258" y="112">CN3791</text>
-  <text class="sub" x="258" y="132">MPPT-Lader</text>
-  <text class="sub" x="258" y="150">MPPT 18 V · R8 = 1 Ω</text>
+  <text class="lbl" x="258" y="112">MPPT-Lader</text>
+  <text class="sub" x="258" y="132">18 V-Variante</text>
+  <text class="sub" x="258" y="150">RCS 0,5 Ω · Poti 4,20 V</text>
   <line class="pos" x1="290" y1="178" x2="290" y2="215"/>
   <circle class="dotp" cx="290" cy="215" r="5"/>
   <text class="pin e" x="284" y="200">BAT+</text>
@@ -122,6 +122,21 @@
   <text class="sub" x="1216" y="616">3,6–3,7 V gemessen</text>
   <text class="sub" x="1216" y="634">Strom ungemessen</text>
 
+  <line class="sig" x1="620" y1="490" x2="620" y2="560"/>
+  <line class="sig" x1="660" y1="490" x2="660" y2="560"/>
+  <line class="sig" x1="700" y1="490" x2="700" y2="560"/>
+  <text class="pin" x="626" y="528">3V3</text>
+  <text class="pin" x="666" y="528">D4</text>
+  <text class="pin" x="706" y="528">D5</text>
+  <rect class="blk" x="600" y="560" width="170" height="110"/>
+  <text class="lbl" x="616" y="598">SHT31-D</text>
+  <text class="sub" x="616" y="618">I²C 0x44</text>
+  <text class="sub" x="616" y="636">Temperatur</text>
+  <text class="sub" x="616" y="654">nur Telemetrie</text>
+  <line class="neg" x1="680" y1="670" x2="680" y2="760"/>
+  <circle class="dotn" cx="680" cy="760" r="5"/>
+  <text class="pin" x="686" y="690">GND</text>
+
   <rect x="40" y="520" width="400" height="215" fill="#fbfbf9" stroke="#bbb" stroke-width="1.5"/>
   <text class="lbl" x="58" y="550">Hinweise</text>
   <line class="pos" x1="58" y1="572" x2="96" y2="572"/>
@@ -131,8 +146,8 @@
   <line class="sig" x1="58" y1="620" x2="96" y2="620"/>
   <text class="note" x="104" y="625">Signal</text>
   <circle class="dotn" cx="77" cy="644" r="5"/>
-  <text class="note" x="104" y="649">Punkt = Verbindung</text>
-  <text class="note" x="58" y="673">Kreuzung ohne Punkt = keine Verbindung</text>
+  <text class="note" x="104" y="649">Punkt = Verbindung, Kreuzung ohne = keine</text>
+  <text class="note" x="58" y="673">Poti VOR dem Akku auf 4,20 V stellen</text>
   <text class="note" x="58" y="695">Kette an P+, nicht am XIAO</text>
   <text class="note" x="58" y="717">Gate-Widerstände sitzen auf dem XY-MOS</text>
 </svg>

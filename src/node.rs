@@ -596,7 +596,12 @@ const SOLARLEUCHTE: NodeConfig = NodeConfig {
     sample_secs: 60,
     scale: Slot::off(),
     ds18b20: Slot::off(),
-    sht31: Slot::off(),
+    // Not for the lamp's sake — nothing here reads the weather. It is the only
+    // way to find out whether this cell is ever charged below freezing, which
+    // is the one risk the charger's sense resistor is sized against and which
+    // nobody has measured. `D4`/`D5` were free, so it costs a part and no
+    // firmware.
+    sht31: Slot::on(),
     scd41: Slot::off(),
     sds011: Slot::off(),
     sgp41: Slot::off(),
