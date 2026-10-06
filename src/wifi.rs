@@ -57,6 +57,45 @@ pub const PLACEHOLDER_SSID: &str = "your-ssid";
 /// is credentials that do not work.
 pub const FALLBACK_AFTER: u32 = 3;
 
+/// First wait after the radio driver refuses a call, in milliseconds.
+pub const RADIO_BACKOFF_FIRST_MS: u64 = 500;
+
+/// Longest wait between retries of a refused radio call, in milliseconds.
+///
+/// Thirty seconds rather than something larger: bringing the controller up is
+/// the only route back onto the network, so a node that is retrying it is a
+/// node that is off the air. Backing off further would save nothing — the radio
+/// is already idle — and would only lengthen the outage once the condition that
+/// caused the refusal has passed.
+pub const RADIO_BACKOFF_MAX_MS: u64 = 30_000;
+
+/// How long to wait before retrying a radio call that the driver refused, after
+/// `failures` consecutive refusals.
+///
+/// Doubling from [`RADIO_BACKOFF_FIRST_MS`] up to [`RADIO_BACKOFF_MAX_MS`].
+/// `failures` is the count *including* the one just seen, so the first wait is
+/// the first constant and not zero.
+///
+/// Exponential rather than the flat five seconds the join path uses, because
+/// the two failures are not the same thing. A refused join is usually a wrong
+/// passphrase or an absent AP — a condition that does not clear on its own, and
+/// one the node escalates by counting towards [`FALLBACK_AFTER`]. A refused
+/// `set_configuration` or `start_async` is the driver saying "not now": out of
+/// memory, mid-teardown, a previous call still unwinding. Those clear by
+/// themselves, so the first retry should be quick, and only a persistent
+/// refusal deserves a long wait.
+pub fn radio_backoff_ms(failures: u32) -> u64 {
+    // Clamp the exponent, not the result. `failures` only resets on success, so
+    // it is unbounded, and shifting by it is the trap: `checked_shl` guards the
+    // shift *width* and not the value, so `500 << 63` is `Some(0)` rather than
+    // `None` — a backoff of nothing, which is a busy loop against a driver that
+    // has just said it is not ready. Six doublings already pass the ceiling
+    // (500 ms → 32 s), so nothing beyond them can change the answer.
+    const MAX_DOUBLINGS: u32 = 6;
+    let doublings = failures.saturating_sub(1).min(MAX_DOUBLINGS);
+    (RADIO_BACKOFF_FIRST_MS << doublings).min(RADIO_BACKOFF_MAX_MS)
+}
+
 /// One network's credentials.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Credentials {
@@ -634,5 +673,39 @@ mod tests {
             block_on(provision(&mut c, Duration::from_millis(50))),
             Outcome::Save(credentials("MyNetwork", ""))
         );
+    }
+
+    // --- Radio backoff ------------------------------------------------------
+
+    #[test]
+    fn the_radio_backoff_doubles_from_the_first_wait() {
+        // The count includes the refusal just seen, so one failure waits the
+        // first constant rather than nothing at all.
+        assert_eq!(radio_backoff_ms(1), RADIO_BACKOFF_FIRST_MS);
+        assert_eq!(radio_backoff_ms(2), 1_000);
+        assert_eq!(radio_backoff_ms(3), 2_000);
+        assert_eq!(radio_backoff_ms(4), 4_000);
+        assert_eq!(radio_backoff_ms(5), 8_000);
+        assert_eq!(radio_backoff_ms(6), 16_000);
+    }
+
+    #[test]
+    fn the_radio_backoff_stops_at_the_ceiling() {
+        // Sixth doubling would be 32 s, which is past the cap.
+        assert_eq!(radio_backoff_ms(7), RADIO_BACKOFF_MAX_MS);
+        assert_eq!(radio_backoff_ms(8), RADIO_BACKOFF_MAX_MS);
+        // And it stays there however long the radio keeps refusing. A node off
+        // the air for a week must still be retrying every thirty seconds, not
+        // once a century -- the shift is what would overflow.
+        assert_eq!(radio_backoff_ms(64), RADIO_BACKOFF_MAX_MS);
+        assert_eq!(radio_backoff_ms(u32::MAX), RADIO_BACKOFF_MAX_MS);
+    }
+
+    #[test]
+    fn a_zero_count_still_waits() {
+        // Not reachable from the connection task, which increments before it
+        // asks -- but a backoff of zero would be a busy loop against a driver
+        // that has just said it is not ready, so it is pinned here.
+        assert_eq!(radio_backoff_ms(0), RADIO_BACKOFF_FIRST_MS);
     }
 }

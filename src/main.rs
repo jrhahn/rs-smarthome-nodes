@@ -2817,6 +2817,14 @@ async fn connection(mut controller: WifiController<'static>) {
     // casually. `reset_reason::latch` still clears it on a power-on, which is
     // the "give them another try" the original comment meant.
     let mut refusals = state::join_refusals();
+    // Consecutive refusals from the *driver* — `set_configuration` or
+    // `start_async` saying no — as opposed to `refusals` above, which counts a
+    // network turning the credentials down. Deliberately a second counter:
+    // folding driver errors into the first one would walk a healthy node
+    // towards `FALLBACK_AFTER` and have it abandon correct stored credentials
+    // because the radio was busy. Task-local rather than in RTC RAM, because
+    // unlike a mistyped passphrase this condition does not survive a reboot.
+    let mut radio_failures: u32 = 0;
     let mut configured: Option<heapless::String<{ config::SSID_MAX }>> = None;
 
     loop {
@@ -2856,11 +2864,44 @@ async fn connection(mut controller: WifiController<'static>) {
                 password: credentials.psk.as_str().try_into().unwrap_or_default(),
                 ..Default::default()
             });
-            controller.set_configuration(&client_config).unwrap();
+            // The driver can refuse either of the next two calls, and used to
+            // be unwrapped on the assumption that it would not: out of memory,
+            // mid-teardown, a previous call still unwinding. On a node that
+            // stays associated that is a once-per-boot risk; on a duty-cycled
+            // one the radio comes up again on every wake-up, which is some
+            // hundreds of times a day, and `bad` collected eight panics that
+            // way. A refusal is not fatal and not permanent -- wait and ask
+            // again, the way the join below already does.
+            if let Err(e) = controller.set_configuration(&client_config) {
+                radio_failures = radio_failures.saturating_add(1);
+                let wait = wifi::radio_backoff_ms(radio_failures);
+                warn!(
+                    "Wi-Fi: set_configuration refused: {:?} (attempt {}), retrying in {} ms",
+                    e, radio_failures, wait
+                );
+                Timer::after(Duration::from_millis(wait)).await;
+                continue;
+            }
+            // Only once it took, so a refusal is retried rather than recorded
+            // as the configuration the controller is running.
             configured = Some(credentials.ssid.clone());
             if !matches!(controller.is_started(), Ok(true)) {
                 info!("Starting Wi-Fi controller");
-                controller.start_async().await.unwrap();
+                if let Err(e) = controller.start_async().await {
+                    radio_failures = radio_failures.saturating_add(1);
+                    let wait = wifi::radio_backoff_ms(radio_failures);
+                    warn!(
+                        "Wi-Fi: controller start refused: {:?} (attempt {}), retrying in {} ms",
+                        e, radio_failures, wait
+                    );
+                    // The controller did not start, so the configuration it is
+                    // holding means nothing yet. Forgetting it sends the next
+                    // pass back through `set_configuration` instead of
+                    // skipping straight to a join on a controller that is down.
+                    configured = None;
+                    Timer::after(Duration::from_millis(wait)).await;
+                    continue;
+                }
                 // Modem sleep, set on every start because it is the radio's
                 // own state and a restart is exactly when it would be lost.
                 //
@@ -2885,6 +2926,10 @@ async fn connection(mut controller: WifiController<'static>) {
                     Err(e) => warn!("Wi-Fi modem sleep refused: {:?}; running without it", e),
                 }
             }
+            // Configured and started: whatever the driver was busy with has
+            // passed, so the next refusal starts its backoff from the short
+            // wait again rather than inheriting an old streak.
+            radio_failures = 0;
         }
 
         match controller.connect_async().await {
