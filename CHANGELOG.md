@@ -12,16 +12,26 @@ assumption — written when it happens. A commit that fixes a join retry belongs
 here; the evening it went on `kueche` and `bad` belongs there, and the two link
 to each other rather than repeating.
 
-**The version here is not `FW_VERSION`.** A node publishes `<node>-<commit>`
-(`build.rs`), which names an exact build and is what an over-the-air offer must
-match. The number below names a set of changes. Wiring the two together is
-worth doing and has not been done.
+**The version here is part of `FW_VERSION`.** A node publishes
+`<node>-<release>-<commit>` (`build.rs`), e.g. `kueche-0.2.0-6c81631`: the
+release is `version` from `Cargo.toml`, the commit names the exact build and is
+what an over-the-air offer must match. Images built before #39 publish
+`<node>-<commit>` only.
 
 Entries start at 0.2.0. Earlier history is in `git log` and in the fleet log;
 nothing was backfilled, because a changelog written after the fact is a
 reconstruction and reads like one.
 
 ## [Unreleased]
+
+### Changed
+
+- **`FW_VERSION` now carries the release: `<node>-<release>-<commit>`**, e.g.
+  `kueche-0.2.0-6c81631`, with `-dirty` still last. The release is read from
+  `Cargo.toml`, so `ota/version`, `meta/board` and the Home Assistant `sw`
+  field say which changelog entry a board is on. OTA offers must use the new
+  string; the comparison stays exact, and a node on an old-format version takes
+  a new-format offer and then recognises it as running (#39).
 
 ## [0.2.0] — 2026-10-07
 

@@ -946,6 +946,20 @@ mod tests {
     }
 
     #[test]
+    fn the_first_rollout_across_the_format_change_is_not_a_loop() {
+        // #39 put the release into the version. A node still on the old
+        // `<node>-<commit>` string must take a new-format offer, and the image
+        // it boots must then recognise the same retained offer as itself.
+        let json = offer_json("kueche-0.2.0-425e2c4", "738528");
+        assert!(parse_offer(&json, "kueche-6c81631", "kueche").is_ok());
+        assert_eq!(
+            parse_offer(&json, "kueche-0.2.0-425e2c4", "kueche"),
+            Err(OfferError::AlreadyRunning)
+        );
+        assert!(is_for_node("kueche-0.2.0-425e2c4-dirty", "kueche"));
+    }
+
+    #[test]
     fn offers_that_cannot_be_acted_on_are_refused() {
         // An image larger than the slot, and one of zero length.
         assert_eq!(

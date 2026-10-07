@@ -772,7 +772,10 @@ mod tests {
     fn four_join_attempts_fit_inside_the_wifi_budget() {
         let waited: u64 = (1..=4).map(join_backoff_ms).sum();
         assert_eq!(waited, 500 + 1_000 + 2_000 + 4_000);
-        assert!(waited < 20_000, "{waited} ms of backoff inside a 20 s budget");
+        assert!(
+            waited < 20_000,
+            "{waited} ms of backoff inside a 20 s budget"
+        );
         // What it replaced, for the same four attempts.
         assert!(waited < 4 * 5_000);
     }

@@ -133,10 +133,10 @@ here, for reasons specific to this house:
 So MQTT carries the *decision* and HTTP carries the *bytes*:
 
 ```
-smarthome/<node>/ota/offer     {"version":"kueche-425e2c4",
-                                "url":"http://192.168.1.67/fw/kueche-425e2c4.bin",
+smarthome/<node>/ota/offer     {"version":"kueche-0.2.0-425e2c4",
+                                "url":"http://192.168.1.67/fw/kueche-0.2.0-425e2c4.bin",
                                 "sha256":"…64 hex…","size":738528}
-smarthome/<node>/ota/version   kueche-425e2c4          (retained, by the node)
+smarthome/<node>/ota/version   kueche-0.2.0-425e2c4    (retained, by the node)
 ```
 
 **Four levels deep, not three**, which is the detail that decides whether this
@@ -147,7 +147,7 @@ entirely.
 
 The version topic is the other half of the deal. A node saying which commit it
 is running is the answer to the question that cost an hour on 2026-09-17, and
-`version` is `<node>-<commit>` rather than a bare hash on purpose: **a node
+`version` is `<node>-<release>-<commit>` rather than a bare hash on purpose: **a node
 refuses an image whose version does not name it**, so the wrong-image mistake
 that started this cannot be made over the air.
 
@@ -301,8 +301,8 @@ Built:
   exercised on the host against canned responses: a 404 that arrives with a
   perfectly valid HTML body, a server that ignores `Range`, a connection that
   dies mid-header.
-- `build.rs` stamps `FW_VERSION` as `<node>-<commit>`, `-dirty` when the tree
-  does not match, and the node publishes it retained on `ota/version`.
+- `build.rs` stamps `FW_VERSION` as `<node>-<release>-<commit>` (release from
+  `Cargo.toml`, #39), `-dirty` when the tree does not match, and the node publishes it retained on `ota/version`.
 - The publish round subscribes to `ota/offer`, installs what it finds, and
   reboots into it.
 
