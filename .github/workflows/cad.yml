@@ -1,0 +1,66 @@
+name: CAD
+
+# Its own workflow so it can be path-filtered: only a change to the source or
+# the exported models can make them disagree, and a firmware PR should not wait
+# on a CadQuery install to find that out.
+on:
+  push:
+    branches: [develop, main]
+    paths: ['models.py', 'cad-models/**', '.github/workflows/cad.yml']
+  pull_request:
+    paths: ['models.py', 'cad-models/**', '.github/workflows/cad.yml']
+  workflow_dispatch:
+
+jobs:
+  # The enclosure CAD. Nothing used to run models.py here at all, so a tracked
+  # model could drift from the source that produced it and nothing said so --
+  # which is exactly what `terrasse_floor.stl` had been doing since 2026-09-18.
+  #
+  # **STEPs only, and that is the whole design of this job.** A STEP is exact
+  # geometry and has been byte-identical across every environment this repo has
+  # been exported from. An STL is a mesh, and its triangulation is a tie that
+  # different OpenCASCADE builds break differently -- same points, same count,
+  # different diagonals. Diffing meshes here would pin the repo to whichever
+  # machine GitHub happens to run, and would fail for a part that is correct.
+  # See `_export` in models.py for the measurements behind that.
+  models:
+    name: Enclosure STEPs match models.py
+    runs-on: ubuntu-latest
+    # Normally under two minutes. An apt mirror that stops answering held it at
+    # `apt-get update` for 20+ minutes on 2026-10-07; fail instead of waiting.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # OCP is a manylinux wheel with a real OpenCASCADE inside; it wants the
+      # GL and X libraries even though nothing here opens a window.
+      - name: System libraries for OpenCASCADE
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1 libglu1-mesa libxrender1 libxext6
+
+      # The same pins flake.nix installs into the `cad` shell's venv. Exact,
+      # because CadQuery moves its API between minor releases and a different
+      # OpenCASCADE writes a different STEP.
+      - name: Install CadQuery
+        run: pip install --quiet 'cadquery==2.8.0' 'cadquery-ocp==7.9.3.1.1' 'numpy>=2.0'
+
+      - name: Regenerate the models
+        run: python models.py
+
+      - name: STEPs must match what models.py produces
+        run: |
+          # Covers modified, deleted and newly appeared parts alike; the STL
+          # churn this deliberately ignores never reaches the filter.
+          dirty=$(git status --porcelain -- cad-models | grep '\.step$' || true)
+          if [ -n "$dirty" ]; then
+            echo "::error::cad-models/*.step do not match models.py — re-run it and commit the result"
+            echo "$dirty"
+            git diff --stat -- '*.step'
+            exit 1
+          fi
+          echo "all STEPs match models.py"
