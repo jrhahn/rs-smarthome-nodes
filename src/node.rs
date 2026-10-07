@@ -632,7 +632,8 @@ const TERRASSE: NodeConfig = NodeConfig {
 /// once at dusk, stays up for hours breathing, and sleeps through the day. See
 /// [`docs/solarleuchte.md`](../docs/solarleuchte.md).
 ///
-/// No sensors. The cell voltage is not telemetry on this node but part of the
+/// One sensor, the SHT31-D, and only to find out whether the cell is charged
+/// below freezing. The cell voltage is not telemetry on this node but part of the
 /// control loop — [`crate::lamp::charge_permille`] derives the evening's
 /// brightness ceiling from it.
 const SOLARLEUCHTE: NodeConfig = NodeConfig {
