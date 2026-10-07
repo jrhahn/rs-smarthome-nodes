@@ -39,14 +39,14 @@ the build rather than flashing the wrong personality onto a board. A board can
 also be **provisioned** to another identity afterwards, without a rebuild — see
 [below](#provisioning-a-board).
 
-| `NODE=` | Room | Sensors | Power |
-| --- | --- | --- | --- |
-| `terrasse` (default) | Terrasse | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
-| `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains |
-| `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 + SGP41 | mains (fan) |
-| `kueche` | Küche | SHT31-D | mains, duty-cycled |
-| `bad` | Bad | SHT31-D | mains, duty-cycled |
-| `terrasse` | Terrasse | none yet — the board is on the network while it is wired up | battery, deep sleep |
+| `NODE=` | Room | Sensors | Outputs | Power |
+| --- | --- | --- | --- | --- |
+| `terrasse` (default) | Terrasse | HX711 load cell + SHT31-D + cell voltage | — | battery, deep sleep |
+| `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | — | mains |
+| `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 + SGP41 | — | mains (fan) |
+| `kueche` | Küche | SHT31-D | — | mains, duty-cycled |
+| `bad` | Bad | SHT31-D | — | mains, duty-cycled |
+| `solarleuchte` | Garten | SHT31-D + cell voltage | LED string (LEDC) | battery, deep sleep |
 
 ### Provisioning a board
 

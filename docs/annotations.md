@@ -619,3 +619,14 @@ on the first round that lands.
 is the 2026-09-29 note repeating itself rather than a fault: RTC RAM survives a
 restart only while the statics land at the same addresses, so the count is only
 meaningful between updates. `boot_count` is the one that spans them.
+
+## 2026-10-07 22:33 — solarleuchte — no temperature because the image predates it
+
+The archive has `battery_*`, `rssi` and the reset counters from `solarleuchte`
+but no temperature or humidity, although `src/node.rs` has `sht31: Slot::on()`
+for it (#40). Read off the broker: the board publishes
+`solarleuchte-e3c08a2` on `ota/version` and announces no temperature entity at
+all. `e3c08a2` is older than `d82fd60` (2026-10-06), the commit that switched
+the slot on, so **the SHT31 has never been flashed to this board**. There is no
+evidence yet on whether the sensor itself is fitted or wired correctly; the
+next flash will answer that.
