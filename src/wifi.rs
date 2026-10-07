@@ -76,24 +76,76 @@ pub const RADIO_BACKOFF_MAX_MS: u64 = 30_000;
 /// `failures` is the count *including* the one just seen, so the first wait is
 /// the first constant and not zero.
 ///
-/// Exponential rather than the flat five seconds the join path uses, because
-/// the two failures are not the same thing. A refused join is usually a wrong
-/// passphrase or an absent AP — a condition that does not clear on its own, and
-/// one the node escalates by counting towards [`FALLBACK_AFTER`]. A refused
-/// `set_configuration` or `start_async` is the driver saying "not now": out of
-/// memory, mid-teardown, a previous call still unwinding. Those clear by
-/// themselves, so the first retry should be quick, and only a persistent
-/// refusal deserves a long wait.
+/// The join path now backs off the same way — see [`join_backoff_ms`], which
+/// carries the measurement that corrected this note. It used to argue that the
+/// two failures differ, a refused join being "a wrong passphrase or an absent
+/// AP, a condition that does not clear on its own", and left the join on a flat
+/// five seconds on that basis. The archive disagreed: on a duty-cycled node a
+/// refused join clears within the round after it, every time it was observed.
+/// What still differs is the *consequence*, not the pace — a refused join
+/// counts towards [`FALLBACK_AFTER`] and a refused driver call does not.
 pub fn radio_backoff_ms(failures: u32) -> u64 {
-    // Clamp the exponent, not the result. `failures` only resets on success, so
-    // it is unbounded, and shifting by it is the trap: `checked_shl` guards the
-    // shift *width* and not the value, so `500 << 63` is `Some(0)` rather than
-    // `None` — a backoff of nothing, which is a busy loop against a driver that
-    // has just said it is not ready. Six doublings already pass the ceiling
-    // (500 ms → 32 s), so nothing beyond them can change the answer.
-    const MAX_DOUBLINGS: u32 = 6;
-    let doublings = failures.saturating_sub(1).min(MAX_DOUBLINGS);
-    (RADIO_BACKOFF_FIRST_MS << doublings).min(RADIO_BACKOFF_MAX_MS)
+    backoff_ms(failures, RADIO_BACKOFF_FIRST_MS, RADIO_BACKOFF_MAX_MS)
+}
+
+/// First wait after the access point refuses a join, in milliseconds.
+///
+/// The same 500 ms the radio path uses, and for a reason the archive supplied
+/// rather than a guess. `radio_backoff_ms` above argues that a refused join is
+/// "a condition that does not clear on its own" and leaves the join on a flat
+/// five seconds. On a node that stays associated that holds, because the join
+/// happens once per boot. On a duty-cycled one it does not: `kueche` lost 47
+/// rounds in 22 hours on 2026-10-07, and **42 of them were followed by a
+/// perfectly normal round two minutes later**. The refusal had cleared by
+/// itself every time.
+///
+/// Five seconds flat is the wrong answer to that in both directions. Against a
+/// [`crate::WIFI_BUDGET`] of twenty seconds it fits two retries, so one
+/// transient refusal costs the whole round; and against an access point that is
+/// really gone it keeps knocking every five seconds for ever.
+pub const JOIN_BACKOFF_FIRST_MS: u64 = 500;
+
+/// Longest wait between join attempts, in milliseconds.
+///
+/// Same ceiling and same argument as [`RADIO_BACKOFF_MAX_MS`]: a node retrying
+/// a join is a node off the air, and waiting longer than half a minute saves
+/// nothing once the condition has passed. A duty-cycled node never reaches it
+/// anyway — its round dies at [`crate::WIFI_BUDGET`] long before.
+pub const JOIN_BACKOFF_MAX_MS: u64 = 30_000;
+
+/// How long to wait before retrying a join the access point refused, after
+/// `attempts` consecutive refusals.
+///
+/// **`attempts` is not [`FALLBACK_AFTER`]'s counter**, and keeping the two
+/// apart is the whole point. That one lives in RTC RAM so it can accumulate
+/// across a sleeping node's rounds; driving the backoff from it would have
+/// every round after the first start out already backed off, which is the
+/// opposite of what the measurement above asks for. This one is a task local:
+/// it starts at zero on every boot, so each round gets its fast first retry,
+/// and it only grows on a node that stays up long enough to keep failing.
+pub fn join_backoff_ms(attempts: u32) -> u64 {
+    backoff_ms(attempts, JOIN_BACKOFF_FIRST_MS, JOIN_BACKOFF_MAX_MS)
+}
+
+/// Doubling from `first_ms`, capped at `max_ms`. `failures` counts the one just
+/// seen, so the first wait is `first_ms` rather than zero.
+///
+/// A loop rather than a shift, and that is deliberate. `failures` only resets
+/// on success, so it is unbounded, and shifting by it is the trap the first
+/// version of this fell into: `checked_shl` guards the shift *width* and not
+/// the value, so `500u64 << 63` is `Some(0)` — a backoff of nothing, which is a
+/// busy loop against something that has just said no. Doubling with
+/// `saturating_mul` and leaving early at the ceiling cannot express that bug,
+/// and runs at most sixty-odd times.
+fn backoff_ms(failures: u32, first_ms: u64, max_ms: u64) -> u64 {
+    let mut ms = first_ms;
+    for _ in 1..failures.min(64) {
+        ms = ms.saturating_mul(2);
+        if ms >= max_ms {
+            return max_ms;
+        }
+    }
+    ms.min(max_ms)
 }
 
 /// One network's credentials.
@@ -707,5 +759,42 @@ mod tests {
         // asks -- but a backoff of zero would be a busy loop against a driver
         // that has just said it is not ready, so it is pinned here.
         assert_eq!(radio_backoff_ms(0), RADIO_BACKOFF_FIRST_MS);
+    }
+
+    /// The whole reason this exists: a transient refusal must be retried inside
+    /// the round, not after it.
+    ///
+    /// `kueche` lost 47 rounds in 22 hours to the flat five seconds, because
+    /// two of them plus the attempts themselves overrun the twenty-second
+    /// `WIFI_BUDGET`. Four attempts now cost 3.5 s of waiting where two used to
+    /// cost 10 s, so a round survives a streak that used to end it.
+    #[test]
+    fn four_join_attempts_fit_inside_the_wifi_budget() {
+        let waited: u64 = (1..=4).map(join_backoff_ms).sum();
+        assert_eq!(waited, 500 + 1_000 + 2_000 + 4_000);
+        assert!(waited < 20_000, "{waited} ms of backoff inside a 20 s budget");
+        // What it replaced, for the same four attempts.
+        assert!(waited < 4 * 5_000);
+    }
+
+    #[test]
+    fn join_backoff_doubles_to_its_ceiling() {
+        assert_eq!(join_backoff_ms(1), JOIN_BACKOFF_FIRST_MS);
+        assert_eq!(join_backoff_ms(2), 1_000);
+        assert_eq!(join_backoff_ms(7), 30_000);
+        assert_eq!(join_backoff_ms(8), JOIN_BACKOFF_MAX_MS);
+        // The shift trap `backoff_ms` is written as a loop to avoid: a count
+        // this large must still wait, not return zero.
+        assert_eq!(join_backoff_ms(u32::MAX), JOIN_BACKOFF_MAX_MS);
+        assert_eq!(join_backoff_ms(0), JOIN_BACKOFF_FIRST_MS);
+    }
+
+    /// The two counters pace independently, which is the point of keeping
+    /// `join_attempts` out of RTC RAM: a sleeping node that failed last round
+    /// must still get its fast first retry this round.
+    #[test]
+    fn the_join_pace_does_not_inherit_a_previous_round() {
+        assert_eq!(join_backoff_ms(1), JOIN_BACKOFF_FIRST_MS);
+        assert_ne!(join_backoff_ms(1), join_backoff_ms(FALLBACK_AFTER + 1));
     }
 }

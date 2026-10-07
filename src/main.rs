@@ -2825,6 +2825,12 @@ async fn connection(mut controller: WifiController<'static>) {
     // because the radio was busy. Task-local rather than in RTC RAM, because
     // unlike a mistyped passphrase this condition does not survive a reboot.
     let mut radio_failures: u32 = 0;
+    // Consecutive refusals from the *network*, this boot. A third counter, and
+    // for the same reason the second one exists: `refusals` above lives in RTC
+    // RAM so it can accumulate across a sleeping node's rounds, and pacing the
+    // retries from it would have every round after the first open already
+    // backed off. See `wifi::join_backoff_ms`.
+    let mut join_attempts: u32 = 0;
     let mut configured: Option<heapless::String<{ config::SSID_MAX }>> = None;
 
     loop {
@@ -2936,19 +2942,22 @@ async fn connection(mut controller: WifiController<'static>) {
             Ok(_) => {
                 info!("Connected to Wi-Fi '{}'", credentials.ssid);
                 refusals = 0;
+                join_attempts = 0;
                 state::set_join_refusals(0);
             }
             Err(e) => {
                 refusals = refusals.saturating_add(1);
+                join_attempts = join_attempts.saturating_add(1);
                 state::set_join_refusals(refusals);
+                let backoff = wifi::join_backoff_ms(join_attempts);
                 warn!(
-                    "Wi-Fi connect to '{}' failed: {:?} (attempt {}), retrying",
-                    credentials.ssid, e, refusals
+                    "Wi-Fi connect to '{}' failed: {:?} (attempt {}), retrying in {} ms",
+                    credentials.ssid, e, refusals, backoff
                 );
                 if refusals == wifi::FALLBACK_AFTER {
                     warn!("Wi-Fi: falling back to the built-in credentials");
                 }
-                Timer::after(Duration::from_millis(5000)).await;
+                Timer::after(Duration::from_millis(backoff)).await;
             }
         }
     }
