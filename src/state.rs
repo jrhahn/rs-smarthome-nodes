@@ -123,6 +123,20 @@ const FLAG_BOOTED: u32 = 1 << 3;
 /// software reset, which is also what an over-the-air update looks like -- and
 /// the two want very different reactions.
 const FLAG_PANICKED: u32 = 1 << 4;
+/// Set while a battery node is parked on a low cell; see
+/// [`crate::battery::should_park`]. Bit 2 is skipped: RTC RAM survives a
+/// reflash, so a bit an older image used could still be standing.
+const FLAG_PARKED: u32 = 1 << 5;
+
+/// Whether this node is parked on a low cell.
+pub fn parked() -> bool {
+    flags() & FLAG_PARKED != 0
+}
+
+/// Record whether it is.
+pub fn set_parked(value: bool) {
+    set_flag(FLAG_PARKED, value);
+}
 
 /// Whether the last restart was this firmware giving up on itself.
 pub fn panicked() -> bool {
