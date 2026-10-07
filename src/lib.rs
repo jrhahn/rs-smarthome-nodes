@@ -32,7 +32,7 @@
 // protocol constants kept for symmetry); that is not dead code, it is the API.
 #![allow(dead_code)]
 
-/// Which image this is: `<node>-<commit>`, stamped in by `build.rs`, with
+/// Which image this is: `<node>-<release>-<commit>`, stamped in by `build.rs`, with
 /// `-dirty` when the working tree did not match the commit.
 ///
 /// Lives here rather than in `main` because three things need it: the retained

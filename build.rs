@@ -14,8 +14,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=NTP_SERVER");
 
     // `FW_VERSION` is what the node publishes about itself and what an update
-    // offer is matched against: `<node>-<commit>`, e.g. `kueche-425e2c4`. The
-    // node half is not decoration -- `ota::is_for_node` refuses an image built
+    // offer is matched against: `<node>-<release>-<commit>`, e.g.
+    // `kueche-0.2.0-425e2c4`. The release is `version` from `Cargo.toml`, so
+    // the string answers "which release is this board on" without a checkout;
+    // the commit still names the exact build. The node half is not decoration -- `ota::is_for_node` refuses an image built
     // for another room, which is the over-the-air answer to the wrong image
     // that ran on the terrasse board for eleven hours on 2026-09-17.
     //
@@ -24,13 +26,16 @@ fn main() {
     // is unidentified: the whole point is that the string answers "which code
     // is this?" without anyone having to remember.
     let node = std::env::var("NODE").unwrap_or_else(|_| "terrasse".into());
-    println!("cargo:rustc-env=FW_VERSION={node}-{}", commit());
+    let release = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    println!("cargo:rustc-env=FW_VERSION={node}-{release}-{}", commit());
     // A new commit changes the version, so the stamp has to be re-evaluated.
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
+    println!("cargo:rerun-if-changed=Cargo.toml");
 }
 
-/// The short commit, plus `-dirty` when the tree does not match it. `unknown`
+/// The short commit, plus `-dirty` when the tree does not match it -- last, next
+/// to the commit it qualifies. `unknown`
 /// when there is no git to ask -- a tarball build, say, which is not something
 /// to fail over.
 fn commit() -> String {
