@@ -334,11 +334,30 @@ static mut RESET_TAG: u32 = 0;
 #[ram(rtc_fast, persistent)]
 static mut JOIN_REFUSALS: u32 = 0;
 
+/// Consecutive publish rounds that never reached the broker; see
+/// [`crate::node::sleep_backoff_factor`].
+///
+/// Rounds rather than attempts, and that is why it is not [`JOIN_REFUSALS`]
+/// read a second time: with an exponential join backoff a single failed round
+/// now spends four or five refusals, so that counter measures how hard the
+/// round tried and this one measures how many rounds went nowhere. Only the
+/// second is a sane thing to stretch a sleep by.
+#[ram(rtc_fast, persistent)]
+static mut FAILED_ROUNDS: u32 = 0;
+
 /// Record this boot's reset cause. Call once, early. A deep-sleep wake is the
 /// steady state and is ignored, so what stays latched is the last thing that
 /// was not routine.
 pub fn note_reset(code: u32) {
     unsafe {
+        // Cleared on the same two occasions `latch` clears `JOIN_REFUSALS`: a
+        // region that was never ours holds whatever the last firmware left
+        // there, and a power-on is somebody standing at the board. Letting
+        // either survive would have the first round after it sleep at a
+        // backoff earned by a previous run -- half an hour, on a battery node.
+        if !reset_state_is_ours() || code == crate::reset_reason::POWER_ON {
+            core::ptr::addr_of_mut!(FAILED_ROUNDS).write(0);
+        }
         let (tag, count, latched, refusals) = crate::reset_reason::latch(
             core::ptr::addr_of!(RESET_TAG).read(),
             core::ptr::addr_of!(RESET_COUNT).read(),
@@ -365,6 +384,20 @@ pub fn join_refusals() -> u32 {
 /// Record the running total. Called by the connection task on each outcome.
 pub fn set_join_refusals(value: u32) {
     unsafe { core::ptr::addr_of_mut!(JOIN_REFUSALS).write(value) }
+}
+
+/// Consecutive rounds that did not reach the broker, across sleeps. Zero if the
+/// region is not ours, so a garbage read cannot stretch a sleep.
+pub fn failed_rounds() -> u32 {
+    if !reset_state_is_ours() {
+        return 0;
+    }
+    unsafe { core::ptr::addr_of!(FAILED_ROUNDS).read() }
+}
+
+/// Record the running total. Called once per publish round, on each outcome.
+pub fn set_failed_rounds(value: u32) {
+    unsafe { core::ptr::addr_of_mut!(FAILED_ROUNDS).write(value) }
 }
 
 /// Whether the words hold a history of ours. False before [`note_reset`] has

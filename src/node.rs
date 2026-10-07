@@ -95,6 +95,54 @@ impl PowerProfile {
             PowerProfile::MainsDutyCycled => "mains, duty-cycled",
         }
     }
+
+    /// How far a publish round may be stretched while the network is gone, as a
+    /// multiple of the normal interval.
+    ///
+    /// The ceiling is a property of what a wake-up *costs*, which is why it
+    /// hangs off the profile rather than being one number.
+    ///
+    /// On mains the wake-up is free and the only thing backing off buys is not
+    /// knocking on a dead access point every two minutes, so one doubling is
+    /// the whole benefit; stretching further would trade readings for nothing.
+    /// On a cell the wake-up is the expensive part of the day — bringing the
+    /// radio up to be refused is close to the worst way to spend it — so this
+    /// goes considerably further.
+    ///
+    /// **Both ceilings are bounded by over-the-air reach, not by power.** A
+    /// node that has backed off is a node that cannot be updated for that long,
+    /// and the fix for whatever is wrong usually arrives that way. Sixteen
+    /// rounds of a ten-minute heartbeat is already most of a day's patience.
+    pub const fn sleep_backoff_ceiling(self) -> u32 {
+        match self {
+            PowerProfile::Mains | PowerProfile::MainsDutyCycled => 2,
+            PowerProfile::Battery => 16,
+        }
+    }
+}
+
+/// How much to stretch the next publish round, after `failed_rounds`
+/// consecutive rounds that never reached the broker.
+///
+/// Doubling, capped at [`PowerProfile::sleep_backoff_ceiling`]. Zero failed
+/// rounds is a factor of one, so a healthy node's cadence is untouched — this
+/// has to be invisible on every node that is working, which is nearly always
+/// all of them.
+///
+/// Doubling by rounds rather than by refusals: a single failed round now spends
+/// four or five join attempts (see [`crate::wifi::join_backoff_ms`]), so pacing
+/// off the refusal count would reach the ceiling inside one bad round and
+/// stretch a cadence that nothing is actually wrong with.
+pub fn sleep_backoff_factor(failed_rounds: u32, profile: PowerProfile) -> u32 {
+    let ceiling = profile.sleep_backoff_ceiling();
+    let mut factor: u32 = 1;
+    for _ in 0..failed_rounds.min(32) {
+        if factor >= ceiling {
+            break;
+        }
+        factor = factor.saturating_mul(2);
+    }
+    factor.min(ceiling)
 }
 
 /// One sensor slot on a node: whether it is populated, plus how its readings are
@@ -923,6 +971,58 @@ const _: () = {
 mod tests {
     use super::*;
     use crate::config::NODE_NAME_MAX;
+
+    /// The bar this has to clear: a working fleet must not feel it at all.
+    #[test]
+    fn a_healthy_node_keeps_its_cadence() {
+        for profile in [
+            PowerProfile::Mains,
+            PowerProfile::MainsDutyCycled,
+            PowerProfile::Battery,
+        ] {
+            assert_eq!(sleep_backoff_factor(0, profile), 1, "{}", profile.label());
+        }
+    }
+
+    #[test]
+    fn the_sleep_doubles_to_the_profile_ceiling() {
+        // Mains: one doubling and no more. 120 s becomes 240 s and stays there,
+        // because waking costs nothing and the readings do.
+        assert_eq!(sleep_backoff_factor(1, PowerProfile::MainsDutyCycled), 2);
+        assert_eq!(sleep_backoff_factor(2, PowerProfile::MainsDutyCycled), 2);
+        assert_eq!(sleep_backoff_factor(99, PowerProfile::MainsDutyCycled), 2);
+
+        // Battery: four doublings to the ceiling, where the radio is the
+        // expensive part of the day.
+        assert_eq!(sleep_backoff_factor(1, PowerProfile::Battery), 2);
+        assert_eq!(sleep_backoff_factor(2, PowerProfile::Battery), 4);
+        assert_eq!(sleep_backoff_factor(4, PowerProfile::Battery), 16);
+        assert_eq!(sleep_backoff_factor(5, PowerProfile::Battery), 16);
+    }
+
+    /// A garbage or runaway count must saturate at the ceiling, never overflow
+    /// into a short sleep -- the same class of bug as the shift in
+    /// `wifi::backoff_ms`, where too large a count produced no wait at all.
+    #[test]
+    fn a_runaway_count_cannot_shorten_the_sleep() {
+        for profile in [PowerProfile::MainsDutyCycled, PowerProfile::Battery] {
+            let ceiling = profile.sleep_backoff_ceiling();
+            assert_eq!(sleep_backoff_factor(u32::MAX, profile), ceiling);
+            assert!(sleep_backoff_factor(u32::MAX, profile) >= 1);
+        }
+    }
+
+    /// What the ceilings mean in minutes, so changing one has to be deliberate.
+    #[test]
+    fn the_ceilings_stay_inside_over_the_air_reach() {
+        // `kueche` and `bad`: 120 s rounds, so at worst four minutes dark.
+        let mains = KUECHE.sample_secs * u64::from(KUECHE.power.sleep_backoff_ceiling());
+        assert_eq!(mains, 240);
+        // `terrasse`: a ten-minute heartbeat, so at worst 160 minutes. Long,
+        // and the reason the ceiling is not higher.
+        let battery = 600 * u64::from(TERRASSE.power.sleep_backoff_ceiling());
+        assert_eq!(battery, 9_600);
+    }
 
     #[test]
     fn an_exempt_key_keeps_its_plain_form() {

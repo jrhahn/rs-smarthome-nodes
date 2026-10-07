@@ -1540,11 +1540,29 @@ fn baseline_is_stranded(wake_secs: u32) -> bool {
 /// published at means the change leaves no step in the Home Assistant history
 /// and needs no new knob to explain.
 fn publish_interval(node: &NodeConfig, cfg: &Config) -> CoreDuration {
-    if node.power.is_battery() {
+    let base = if node.power.is_battery() {
         cfg.heartbeat_interval()
     } else {
         CoreDuration::from_secs(node.sample_secs.max(1))
+    };
+    // Stretched only while rounds are going nowhere, and back to `base` on the
+    // first one that lands. A node with a working network never takes this
+    // branch in any visible way -- the factor is 1 -- which is the bar it has
+    // to clear: the cadence of a healthy fleet is not something to spend on a
+    // failure mode.
+    //
+    // Only the publish round is stretched. A battery node's idle poll is a
+    // load-cell read with the radio off, so backing *that* off would cost
+    // presence detection to save nothing.
+    let factor = node::sleep_backoff_factor(state::failed_rounds(), node.power);
+    if factor > 1 {
+        info!(
+            "{} rounds without the broker: sleeping {}x the usual",
+            state::failed_rounds(),
+            factor
+        );
     }
+    base.saturating_mul(factor)
 }
 
 fn sample_period_secs(cfg: &Config) -> u64 {
@@ -1773,10 +1791,18 @@ async fn publish(
     cfg: Config,
     board: &mut Board<'_>,
 ) -> Config {
+    // Every duty-cycled round goes through here, so this is the one place that
+    // knows whether the broker was reached -- and the one place the sleep
+    // backoff needs to be told about it. Put in each caller instead, it would
+    // be four places and the next one would forget.
     let drained = match connect_and_publish(spawner, radio, samples, cfg).await {
-        Ok(d) => d,
+        Ok(d) => {
+            state::set_failed_rounds(0);
+            d
+        }
         Err(e) => {
             warn!("publish failed: {}", e);
+            state::set_failed_rounds(state::failed_rounds().saturating_add(1));
             Drained {
                 cfg,
                 tare: false,
