@@ -546,3 +546,76 @@ The two were picked first on purpose. They are the nodes the fix is *for* —
 terrace a power cycle means a ladder. `wohnzimmer`, `schlafzimmer` and `kueche`
 carry the same defect and have not yet been bitten by it, so they wait for these
 two to run a night.
+
+## 2026-10-06 18:59 / 19:05 — kueche — an unrecorded flash, and deep sleep back on
+
+Two changes within six minutes of each other, neither written down at the time.
+This entry exists because the gap cost an evening on 2026-10-07: the archive
+showed a node misbehaving from 18:59 onwards and there was nothing anywhere
+saying what had been done to it.
+
+- **18:59:12** — firmware went on over the air. `boot_count` appears for the
+  first time on this node and `reset_reason` reads 3, the software reset an
+  update performs on itself.
+- **19:05:05** — `switch.kuche_deep_sleep` went `off` → `on`, undoing the
+  2026-09-14 workaround above.
+
+**Deep sleep is really in effect**, and the two numbers that prove it are worth
+keeping because neither is the one you would reach for first. The cadence moved
+from 120.6 s to 125.2 s — those five seconds are the boot the node does again —
+and the temperature fell from a 23.00 °C median to 22.70 °C, because the board
+stopped warming its own SHT31. That is the 2026-09-14 entry's prediction running
+backwards, and it is the cheapest available proof that a node is duty-cycling.
+
+**What it cost, measured over the 22 hours to 17:07 on 10-07:** 635 rounds, 47
+of them with no publish at all (7.4 %), and four watchdog resets. Before the
+switch: nine days, zero gaps.
+
+**Every gap is one whole round, and the arithmetic says so.** 42 of them are
+266 s against a computed 20 s `WIFI_BUDGET` + 120 s sleep + 5 s awake + 120 s
+sleep = 265 s, and five are 406 s against two failed rounds at 405 s. The
+distribution is bimodal — the good rounds sit at 125.2 s within 0.1 s — so this
+is not a link that is sometimes slow. The join is refused outright, and the flat
+five-second retry then spends the rest of the budget.
+
+**And the refusal clears by itself.** 42 of the 47 lost rounds were followed by
+an entirely normal one two minutes later. That is what `3fe9c6b` is for.
+
+**`bad` is not innocent, it is quieter.** Same `MainsDutyCycled` profile, same
+120 s, same firmware in the shared path, and it also carries `reset_reason` 7
+and a `boot_count` of 11 — but 0 to 2 gaps a day against `kueche`'s 47. RSSI is
+−62 against −59 dBm and flat on both. **Why one node's joins are refused and the
+other's are not is still unanswered**, and it is not in this repository.
+
+## 2026-10-07 21:19 / 21:21 — kueche, bad — the join-backoff build
+
+`…-6c81631` went on over the air, `kueche` first and `bad` two minutes later,
+both confirmed by a full round within one cadence:
+
+| | took it | `boot_count` after | `reset_count` after |
+| --- | --- | --- | --- |
+| `kueche` | 21:19:43 | 6 | 6 |
+| `bad` | 21:21:11 | 12 | 4 |
+
+It carries two changes. `3fe9c6b` retries a refused join at 500 ms doubling to
+30 s instead of a flat five seconds, paced by a task-local counter so each round
+keeps its fast first retry. `6c81631` doubles the *sleep* after a round that
+never reached the broker — one doubling on mains, four on a cell — and resets it
+on the first round that lands.
+
+**What to read in a day**, and the honest version of each:
+
+- **Gaps per day on `kueche`.** 47 in 22 hours is the number to beat. Anything
+  above zero still means joins are being refused; the fix only stops a refusal
+  from costing the whole round.
+- **`reset_count` on both.** The four watchdog resets are **not** addressed by
+  either commit. An expired `with_timeout` is a clean abort, not a stopped
+  executor, so if 7s keep arriving the hang is a second bug and still open.
+- **`bad` as a control is gone.** It was updated in the same minutes, which was
+  asked for and is worth knowing when reading the next week: there is no longer
+  a node on the old firmware to compare against.
+
+`reset_count` reads differently on the two afterwards — 6 against 4 — and that
+is the 2026-09-29 note repeating itself rather than a fault: RTC RAM survives a
+restart only while the statics land at the same addresses, so the count is only
+meaningful between updates. `boot_count` is the one that spans them.
