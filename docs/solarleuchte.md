@@ -377,6 +377,43 @@ Verified on the board in hand: the electrolytics are **47 µF / 63 V**, against
 22.3 V `Voc` rising to ~25.3 V at −20 °C. Ample, and the one thing about this
 module that needed no attention.
 
+**Done 2026-10-08.** Pot set to **4.20 V** at `BAT+` with no cell connected,
+panel reading 22.8 V on the input — above the label's 22.3 V `Voc`, which is
+what a cool October day does to it, and a second confirmation that 63 V of
+capacitor is not close to anything. Partly cloudy at the time, which does not
+matter: above the regulation point the output does not follow the irradiance.
+
+**Seal the screw, and not with threadlocker.** The adjuster is part of the
+wiper, not a fastener — anaerobic threadlocker and thin cyanoacrylate both
+creep into the element, where they shift the resistance or seize the wiper so
+it tears on the next adjustment. A drop of lacquer (plumbing seal, torque seal,
+nail polish) on the outside edge between screw head and body is the usual
+answer, and it doubles as a tamper indicator: a contrasting colour against this
+dark board shows a cracked seal at a glance. Let it cure for hours rather than
+minutes before closing the enclosure — solvent vapour in a sealed box with
+electronics buys nothing — and **re-measure afterwards**, since lacquer shrinks
+as it dries and can drag the wiper a few millivolts with it.
+
+### Which hands us the divider calibration
+
+[What is still open](#what-is-still-open) said the divider could not be trimmed
+because the only available reference — the charger's own termination — carried
+the same ±1 % uncertainty as the error being measured. That is no longer true.
+**The termination is now set to 4.20 V against a multimeter**, deliberately,
+and the firmware's reading of the same voltage is the comparison.
+
+So let the cell charge full on a sunny day and read the plateau off
+`smarthome/solarleuchte/battery_voltage`:
+
+| Plateau | What it means |
+| --- | --- |
+| 4.20 V | the divider is right; nothing to trim |
+| ~4.16 V | reads ~40 mV low, which is what the 2026-10-05 reading suggested |
+| above 4.25 V | the *pot* is too high, not the divider — turn it down |
+
+The caveat from that section still stands: `R_TOP_KOHM` and `R_BOTTOM_KOHM` are
+one pair for the whole fleet, so a trim here moves terrasse too.
+
 ### `RCS` ships at 0.12 Ω, and 1 Ω is the wrong answer here
 
 `120 mV / RCS`, the same rule as terrasse's `R8`. The board carries `R120` —
