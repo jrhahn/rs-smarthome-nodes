@@ -321,6 +321,8 @@ mod tests {
             name: "CO₂".into(),
             unit: "ppm".into(),
             device_class: "carbon_dioxide".into(),
+            state_class: "measurement".into(),
+            entity_category: String::new(),
             node_name: "Schlafzimmer".into(),
         };
         s.set_meta("schlafzimmer", "co2", meta.clone());

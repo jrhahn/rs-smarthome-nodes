@@ -18,7 +18,7 @@ use tracing::warn;
 
 use crate::config::Settings;
 use crate::model::{now_micros, Channel, Micros};
-use crate::questdb::{annotations, series, Client};
+use crate::questdb::{annotations, periods, series, Client};
 use crate::state::{Shared, StatsSnapshot};
 
 #[derive(Clone)]
@@ -36,6 +36,7 @@ pub fn router(app: App) -> Router {
         .route("/api/channels", get(channels))
         .route("/api/series", get(series_handler))
         .route("/api/overview", get(overview))
+        .route("/api/periods", get(periods_handler))
         .route(
             "/api/annotations",
             get(annotations_handler).post(add_annotation),
@@ -323,6 +324,87 @@ async fn overview(
     Ok(Json(out))
 }
 
+#[derive(Debug, Deserialize)]
+struct PeriodParams {
+    period: Option<periods::Period>,
+    /// How many periods, newest last. Bounded like `points` elsewhere.
+    count: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct PeriodChannel {
+    node: String,
+    sensor: String,
+    #[serde(flatten)]
+    meta: crate::model::ChannelMeta,
+    decimals: Option<u8>,
+    /// A running total, so `delta` on each period is its consumption.
+    meter: bool,
+    periods: Vec<periods::Bucket>,
+}
+
+#[derive(Serialize)]
+struct PeriodsResponse {
+    period: periods::Period,
+    time_zone: &'static str,
+    source: String,
+    channels: Vec<PeriodChannel>,
+}
+
+/// Every channel per day, week or month in local time -- the meters as
+/// consumption, everything else as min / mean / max. See `questdb::periods`.
+async fn periods_handler(
+    State(app): State<App>,
+    Query(params): Query<PeriodParams>,
+) -> ApiResult<Json<PeriodsResponse>> {
+    let period = params.period.unwrap_or(periods::Period::Day);
+    let count = params.count.unwrap_or(period.default_count()).clamp(1, 120);
+    // Which channels are meters is what their discovery message said.
+    let meters: Vec<(String, String)> = app
+        .shared
+        .known_channels()
+        .into_iter()
+        .filter(|(n, s)| {
+            app.shared
+                .meta(n, s)
+                .is_some_and(|m| periods::is_meter(&m.state_class))
+        })
+        .collect();
+    let (source, rows) = periods::fetch_rows(
+        &app.client,
+        &app.settings.questdb.table,
+        &app.shared.views(),
+        &meters,
+        period,
+        count,
+        now_micros(),
+    )
+    .await?;
+
+    let mut channels: Vec<PeriodChannel> = rows
+        .into_iter()
+        .map(|((node, sensor), rows)| {
+            let meta = app.shared.meta(&node, &sensor).unwrap_or_default();
+            let meter = periods::is_meter(&meta.state_class);
+            PeriodChannel {
+                periods: periods::buckets(&rows, count),
+                decimals: app.shared.precision(&node, &sensor),
+                meta,
+                meter,
+                node,
+                sensor,
+            }
+        })
+        .collect();
+    channels.sort_by(|a, b| (&a.node, &a.sensor).cmp(&(&b.node, &b.sensor)));
+    Ok(Json(PeriodsResponse {
+        period,
+        time_zone: periods::TIME_ZONE,
+        source,
+        channels,
+    }))
+}
+
 /// The notes that explain the readings, for the window on screen.
 async fn annotations_handler(
     State(app): State<App>,
@@ -439,6 +521,7 @@ mod tests {
         "/api/channels",
         "/api/series",
         "/api/overview",
+        "/api/periods",
         "/api/annotations",
         "/api/annotations/void",
         "/api/health",
@@ -475,6 +558,7 @@ mod tests {
         let js = include_str!("../assets/app.js");
         for route in [
             "/api/overview",
+            "/api/periods",
             "/api/series",
             "/api/annotations",
             "/api/health",
