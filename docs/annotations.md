@@ -716,3 +716,38 @@ and the shared I²C bus with three devices on it:
 
 Rounds at ~63 s, still slot 0 after the third, so confirmed. Four of six nodes
 are on the port; `terrasse` and `solarleuchte` remain.
+
+## 2026-10-08 11:24 / 11:46 — terrasse — esp-hal 1.1, and `visits` back to 0
+
+`terrasse-0.2.0-adee5d9` offered at 11:24:39. The node is on its cell and only
+reaches the broker on its heartbeat, so it found the offer at the end of the
+11:35:13 round, wrote the slot and restarted, and reported from the new image on
+the next heartbeat at 11:46:46: slot 1 → **slot 0**, `seq` 6 → **7**. That
+first publish is the confirmation. Heartbeat spacing 11:23:07 → 11:35:13 →
+11:46:46, about 12 minutes, unchanged by the update.
+
+| | before | after |
+| --- | --- | --- |
+| version | `terrasse-29a4d62` | `terrasse-0.2.0-adee5d9` |
+| `boot_count` | 1 | 2 (the update's own reset) |
+| `reset_count` | 2 | 1 (RTC RAM re-layout) |
+| `visits` | 202 | **0** |
+| weight | −60.4 / −61.4 | −60.0 |
+| cell | 4.00 V, 77 % | 4.00 V, 78 % |
+
+**`visits` dropping to 0 is the same re-layout, not lost birds.** The counter
+lives in RTC RAM behind a checked pair (`scale::VISITS_MAGIC`); at its new
+address the pair did not check out, so it started again from zero, as designed.
+It is a `total_increasing` entity, so Home Assistant books the drop as a meter
+reset and its statistics carry on. Anything summing the raw series across this
+line has to treat it as two.
+
+First run of the HX711 and the battery path on the 1.1 port. The weight reads
+where it read before, which says `release_scale_pad` let go of the pad and the
+driver clocks normally. Whether `park_scale` still holds the pad through deep
+sleep — the ~4.5 mA it saves — is not visible in one round; the cell voltage over
+the next days is the evidence, against the drain before the update. SHT31-D 14.2
+°C / 92 %, RSSI −71. `reset_reason` read 3, not the 256 the two nodes from
+`c0b36ee` showed.
+
+Five of six nodes on the port; `solarleuchte` remains.
