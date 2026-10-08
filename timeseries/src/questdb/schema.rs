@@ -223,29 +223,75 @@ pub async fn ensure(
         warn!(error = %e, "could not list materialized views; assuming none");
         Vec::new()
     });
-    Ok(views)
+    Ok(usable_views(table, &views))
 }
 
-/// Every materialized view QuestDB currently holds, by name.
+/// Every materialized view QuestDB currently holds *and is keeping up to
+/// date*, by name.
 ///
 /// Asked of the database rather than assumed from `TIERS`, because "the DDL was
 /// issued" and "the view exists" are different claims -- a view can also be
-/// dropped by hand, or invalidated.
+/// dropped by hand, or invalidated. An `invalid` view stops refreshing but
+/// still answers queries, with whatever it held when it stopped: after the
+/// unclean power loss on 2026-10-07 every chart of a day or more read data
+/// that ended there, and nothing said so (#53). So only `valid` views count.
 pub async fn list_views(client: &Client) -> Result<Vec<String>> {
     let data = client
-        .exec("SELECT view_name FROM materialized_views()")
+        .exec("SELECT view_name, view_status FROM materialized_views()")
         .await?;
-    let idx = data.require("view_name")?;
+    let (name, status) = (data.require("view_name")?, data.require("view_status")?);
     Ok(data
         .rows()
         .iter()
-        .filter_map(|row| row.get(idx).and_then(as_str).map(str::to_string))
+        .filter(|row| row.get(status).and_then(as_str) == Some("valid"))
+        .filter_map(|row| row.get(name).and_then(as_str).map(str::to_string))
         .collect())
+}
+
+/// The views a read may use: the valid ones whose whole chain back to the base
+/// table is valid too.
+///
+/// A tier reads the next finer one, so a valid `_1h` over an invalid `_1m`
+/// reports itself healthy while holding exactly what `_1m` stopped at -- or
+/// nothing, once `_1m` has been truncated for a rebuild.
+pub fn usable_views(table: &str, valid: &[String]) -> Vec<String> {
+    let mut usable: Vec<String> = Vec::new();
+    for tier in TIERS {
+        let view = tier.view(table);
+        let source_ok = match tier.source_suffix {
+            None => true,
+            Some(_) => usable.contains(&tier.source(table)),
+        };
+        if source_ok && valid.contains(&view) {
+            usable.push(view);
+        }
+    }
+    usable
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_over_a_broken_view_is_not_usable() {
+        let all = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // What family-server showed after the 2026-10-07 power loss and a
+        // rebuild attempt: the coarse views valid, the minute view not.
+        assert!(usable_views("readings", &all(&["readings_1h", "readings_1d"])).is_empty());
+        assert_eq!(
+            usable_views("readings", &all(&["readings_1m", "readings_1h"])),
+            all(&["readings_1m", "readings_1h"])
+        );
+        assert_eq!(
+            usable_views(
+                "readings",
+                &all(&["readings_1m", "readings_1h", "readings_1d"])
+            )
+            .len(),
+            3
+        );
+    }
 
     fn ttl() -> Retention {
         Retention::parse("3y").unwrap()

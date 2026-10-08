@@ -291,9 +291,17 @@ pub async fn fetch_overview(
     let (width, bucket) = choose_bucket(from, to, points);
     let (from, to) = snap(from, to, width);
     let tier = rollup::pick(width, views, base);
-    let data = client
+    let mut data = client
         .exec(&overview_sql(base, tier, from, to, bucket))
         .await?;
+    // As in `fetch_series`: a view with nothing in the window is not proof
+    // there is nothing. Without this the overview went blank while every chart
+    // behind it still drew, because only the chart had the fallback.
+    if tier.is_some() && data.rows().is_empty() {
+        data = client
+            .exec(&overview_sql(base, None, from, to, bucket))
+            .await?;
+    }
     let (ti, n, s, av) = (
         data.require("t")?,
         data.require("node")?,

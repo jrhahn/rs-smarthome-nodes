@@ -24,6 +24,16 @@ reconstruction and reads like one.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The dashboard no longer reads rollup views QuestDB has invalidated** (#53).
+  The service lists only `valid` views, drops any view whose source view is not
+  usable, and re-checks every minute, so a broken view stops being read and a
+  rebuilt one is picked up without a restart. The overview's sparklines now fall
+  back to the base table when a view has nothing for the window, as the detail
+  chart already did: after the 2026-10-07 power loss the overview showed "no
+  data" on every tile while each chart behind it drew.
+
 ### Added
 
 - **The dashboard has a second view: values per day, week and month** (#52).
