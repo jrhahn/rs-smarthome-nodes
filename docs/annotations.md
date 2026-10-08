@@ -850,3 +850,28 @@ answers, and that night is also the `temp_coeff` measurement.
 
 Still to do for this mount: check `scale_factor` (1862.8) with a known weight if
 the cell itself changed, and read the night for `temp_coeff`.
+
+## 2026-10-08 17:06 — solarleuchte — the SHT31-D is fitted, and survived reverse polarity
+
+The breakout was wired to `D4`/`D5` and the first round carrying it reported at
+17:06:02: **24.3 °C / 44.4 % RH**, cell 4.15 V, RSSI −42. Indoor values, on an
+indoor bench, so they are plausible rather than merely present.
+
+**This closes the question the 13:35 entry left open.** That entry could not
+distinguish "breakout not fitted" from "`D4`/`D5` not connected to it"; the
+answer was the first. No firmware change was needed — the image already on the
+node, `solarleuchte-0.2.0-a2115c4`, has carried `sht31: Slot::on()` since the
+esp-hal 1.1 update. `reset_reason` 1 and `boot_count` 16 → 20 across the
+fitting, i.e. power-on boots from the bench work, not a fault.
+
+**Read these two channels with suspicion for a while.** The breakout was
+connected reverse-polarity once before this round. The SHT31-D's absolute
+maximum on `VDD` is −0.3 V to 6 V, so −3.3 V was outside it, and a part stressed
+that way can answer correctly today and drift later rather than fail outright.
+The failure to watch for is a constant offset or a humidity channel that stops
+responding to weather, not a dropout — a dropout would be obvious. Once the lamp
+is outdoors, `terrasse`'s SHT31-D is the comparison: both see the same garden
+air, and a divergence that grows is the sensor, not the weather.
+
+That also unblocks what this thermometer is for — whether the cell is ever
+charged below freezing, the measurement the `RCS` swap is being timed against.
