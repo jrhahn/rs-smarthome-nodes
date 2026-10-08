@@ -27,15 +27,15 @@ use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{with_timeout, Duration, Instant, TimeoutError};
 use embedded_hal_async::i2c::{ErrorType, I2c as I2cTrait, Operation};
 use esp_hal::{
-    gpio::GpioPin,
+    gpio::DriveMode,
     i2c::master::{Config as I2cConfig, Error as I2cError, I2c},
     ledc::{
-        channel::{self, ChannelIFace},
+        channel::{self, ChannelHW, ChannelIFace},
         timer::{self, TimerIFace},
         LSGlobalClkSource, Ledc, LowSpeed,
     },
-    peripherals::{I2C0, LEDC, UART1},
-    prelude::*,
+    peripherals::{GPIO10, GPIO5, GPIO6, GPIO7, GPIO8, I2C0, LEDC, UART1},
+    time::Rate,
     uart::{Config as UartConfig, Uart},
     Async,
 };
@@ -127,7 +127,7 @@ impl I2cTrait for SharedI2c {
                 warn!(
                     "I²C transaction to 0x{address:02X} timed out after {I2C_TIMEOUT_MS} ms;                      treating it as a bus fault rather than waiting for the watchdog"
                 );
-                Err(I2cError::TimeOut)
+                Err(I2cError::Timeout)
             }
         }
     }
@@ -138,12 +138,12 @@ impl I2cTrait for SharedI2c {
 /// The peripherals the sensor platform can take over. `main` hands these across
 /// wholesale; which of them are actually touched depends on the identity.
 pub struct Peripherals {
-    pub i2c0: I2C0,
-    pub sda: GpioPin<6>,
-    pub scl: GpioPin<7>,
-    pub uart1: UART1,
-    pub uart_rx: GpioPin<5>,
-    pub uart_tx: GpioPin<10>,
+    pub i2c0: I2C0<'static>,
+    pub sda: GPIO6<'static>,
+    pub scl: GPIO7<'static>,
+    pub uart1: UART1<'static>,
+    pub uart_rx: GPIO5<'static>,
+    pub uart_tx: GPIO10<'static>,
 }
 
 /// The LEDC block and the pin it drives, for the one node that has a lamp.
@@ -152,8 +152,8 @@ pub struct Peripherals {
 /// and a lamp is not a sensor: it is an output, read by nothing and published
 /// as nothing.
 pub struct LampPeripherals {
-    pub ledc: LEDC,
-    pub pin: GpioPin<8>,
+    pub ledc: LEDC<'static>,
+    pub pin: GPIO8<'static>,
 }
 
 // The LEDC block and its timer outlive the channel that borrows them, and the
@@ -181,8 +181,9 @@ impl Lamp {
     /// constants on a block with nothing else competing for it, so a failure
     /// here means the firmware is wrong rather than the hardware.
     pub fn new(p: LampPeripherals) -> Self {
-        let ledc = LEDC_BLOCK.init(Ledc::new(p.ledc));
+        let mut ledc = Ledc::new(p.ledc);
         ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+        let ledc = LEDC_BLOCK.init(ledc);
         let ledc: &'static Ledc<'static> = ledc;
 
         let lstimer = LAMP_TIMER.init(ledc.timer::<LowSpeed>(timer::Number::Timer0));
@@ -190,7 +191,7 @@ impl Lamp {
             .configure(timer::config::Config {
                 duty: timer::config::Duty::Duty12Bit,
                 clock_source: timer::LSClockSource::APBClk,
-                frequency: 1u32.kHz(),
+                frequency: Rate::from_khz(1),
             })
             .expect("LEDC timer: 12 bit at 1 kHz is inside what APBClk divides to");
 
@@ -199,7 +200,7 @@ impl Lamp {
             .configure(channel::config::Config {
                 timer: lstimer,
                 duty_pct: 0,
-                pin_config: channel::config::PinConfig::PushPull,
+                drive_mode: DriveMode::PushPull,
             })
             .expect("LEDC channel 0 on GPIO8");
 
@@ -255,7 +256,10 @@ impl Sensors {
         let node = node::active();
 
         let bus = if node.uses_i2c() {
+            // The default config is 100 kHz, which is what the drivers' timing
+            // assumes. `new` only fails on a frequency it cannot divide to.
             let i2c = I2c::new(p.i2c0, I2cConfig::default())
+                .expect("I²C at the default 100 kHz")
                 .with_sda(p.sda)
                 .with_scl(p.scl)
                 .into_async();
@@ -280,15 +284,11 @@ impl Sensors {
         let sds011 = if node.uses_uart() {
             // A UART that fails to configure is a wiring/build mistake, not a
             // runtime condition, so log it and carry on without the sensor.
-            match Uart::new_with_config(
-                p.uart1,
-                UartConfig::default().baudrate(SDS011_BAUD),
-                p.uart_rx,
-                p.uart_tx,
-            ) {
-                Ok(uart) => {
-                    Some(Sds011::new(uart.into_async()).compensated(node.sds011.compensated))
-                }
+            match Uart::new(p.uart1, UartConfig::default().with_baudrate(SDS011_BAUD)) {
+                Ok(uart) => Some(
+                    Sds011::new(uart.with_rx(p.uart_rx).with_tx(p.uart_tx).into_async())
+                        .compensated(node.sds011.compensated),
+                ),
                 Err(e) => {
                     warn!("SDS011 UART init failed: {:?}; sensor disabled", e);
                     None
@@ -622,7 +622,7 @@ impl Sensors {
 /// Round 0 is every slot's, so the first publish after a boot is complete
 /// rather than missing whichever sensors happen to be on a slow cadence.
 fn due(round: u32, slot: Slot, node: &node::NodeConfig) -> bool {
-    round % slot.rounds_between(node.sample_secs) == 0
+    round.is_multiple_of(slot.rounds_between(node.sample_secs))
 }
 
 /// Does a device acknowledge `addr`? `probe_cmd` must be a command with no side

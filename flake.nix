@@ -3,15 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # espflash 4.x refuses to flash an image without an ESP-IDF app descriptor,
-    # which esp-hal 0.22 does not emit (`esp_app_desc!` arrived in 0.23).
-    # Forcing it through with `--ignore-app-descriptor` writes garbage into the
-    # image header's min-efuse-revision fields, and the second-stage bootloader
-    # then rejects the app on every boot:
-    #   Image requires efuse blk rev >= v145.58, but chip is v1.3
-    #   No bootable app partitions in the partition table
-    # So pin the flasher to the 3.x line until esp-hal is bumped.
-    nixpkgs-espflash.url = "github:NixOS/nixpkgs/nixos-24.11";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -19,7 +10,7 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, nixpkgs-espflash, fenix, flake-utils }:
+  outputs = { self, nixpkgs, fenix, flake-utils }:
     # `nixosModules` is not per-system, so it sits outside `eachDefaultSystem`
     # -- the home server imports it and picks its own `pkgs`.
     {
@@ -29,14 +20,13 @@
     // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        pkgsEspflash = import nixpkgs-espflash { inherit system; };
 
         # Reuse the existing rust-toolchain.toml as the single source of
-        # truth: it pins Rust 1.83.0 (required for esp-wifi 0.11's c_char
-        # bindings) plus the riscv32imc-unknown-none-elf target.
+        # truth: it pins the Rust version (the esp-hal 1.1 MSRV) plus the
+        # riscv32imc-unknown-none-elf target.
         rustToolchain = fenix.packages.${system}.fromToolchainFile {
           file = ./rust-toolchain.toml;
-          sha256 = "sha256-s1RPtyvDGJaX/BisLT+ifVfuhDT1nZkZ1NcK8sbwELM=";
+          sha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
         };
 
         # CadQuery is not in nixpkgs -- only the `opencascade-occt` kernel is,
@@ -68,7 +58,10 @@
         devShells.default = pkgs.mkShell {
           packages = [
             rustToolchain
-            pkgsEspflash.espflash # flash + serial monitor over USB-C (3.x, see above)
+            # Flash + serial monitor over USB-C. 4.x since the image carries an
+            # ESP-IDF app descriptor (`esp_app_desc!`, #32); before that it had
+            # to be pinned to 3.x.
+            pkgs.espflash
             pkgs.gitleaks # secret scanning (see .githooks/pre-commit)
           ];
 
@@ -82,9 +75,8 @@
           '';
         };
 
-        # The archiver's own shell. The firmware's 1.83.0 pin exists for
-        # esp-wifi's C bindings and is older than what tokio, axum and rumqttc
-        # ask for, so this one takes nixpkgs' rustc instead -- see
+        # The archiver's own shell. It shares nothing with the firmware's
+        # pinned toolchain, so this one takes nixpkgs' rustc instead -- see
         # `timeseries/rust-toolchain.toml`.
         #
         #   nix develop .#timeseries

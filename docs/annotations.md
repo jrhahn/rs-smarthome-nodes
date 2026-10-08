@@ -630,3 +630,147 @@ all. `e3c08a2` is older than `d82fd60` (2026-10-06), the commit that switched
 the slot on, so **the SHT31 has never been flashed to this board**. There is no
 evidence yet on whether the sensor itself is fitted or wired correctly; the
 next flash will answer that.
+
+## 2026-10-08 04:11 / 04:13 — bad — first image on esp-hal 1.1
+
+`bad-0.2.0-42dd3b7`, the esp-hal 1.1 port (#32), offered over the air at
+04:11:54 and running at 04:13:24: slot 1 → **slot 0**, `seq` 6 → **7**. It is
+the first image built with espflash 4.x (`save-image`) and the first carrying an
+ESP-IDF app descriptor; the board's bootloader, flashed by espflash 3 on
+2026-09-17, took it without complaint. Header bytes match the old images
+(chip id 5, min rev v0.3).
+
+| | before | after |
+| --- | --- | --- |
+| version | `bad-6c81631` | `bad-0.2.0-42dd3b7` |
+| `boot_count` | 12 | 13 (the update's own reset) |
+| `reset_count` | 4 | **1** |
+| round spacing | ~125 s | 123–132 s |
+
+**`reset_count` dropping to 1 is the RTC RAM re-layout, not an event.** The
+statics moved with the HAL, so the counter restarted; `boot_count`, which lives
+in flash, carried on. Read `reset_count` across this line as two series.
+
+Seen working on the first four rounds: deep-sleep wake (no new boots), Wi-Fi
+join, NTP timestamps, RSSI through `esp-wifi-sys-esp32c3`, the SHT31-D, the
+version topic in the new `<node>-<release>-<commit>` form (#39), and no
+rollback — still slot 0 after the third attempt, so the trial was confirmed.
+The other five nodes are still on their old images.
+
+## 2026-10-08 10:21 / 10:22 — kueche — esp-hal 1.1
+
+`kueche-0.2.0-58aaadd`, the same port as `bad` six hours earlier (only the fleet
+log differs between the two commits), offered at 10:21:31 and running at
+10:22:38: slot 1 → **slot 0**, `seq` 4 → **5**.
+
+| | before | after |
+| --- | --- | --- |
+| version | `kueche-6c81631` | `kueche-0.2.0-58aaadd` |
+| `boot_count` | 7 | 8 (the update's own reset) |
+| `reset_count` | 7 | **1** (RTC RAM re-layout, as on `bad`) |
+
+Three rounds by 10:26 at 133 s and 123 s apart, no new boots, still slot 0 after
+the third attempt, so confirmed. `bad` had by then run six hours on the port
+with `boot_count` unchanged at 13.
+
+## 2026-10-08 10:49 / 10:51 — schlafzimmer — esp-hal 1.1, and a `reset_reason` 256 that is not a panic
+
+`schlafzimmer-0.2.0-6f2c56e` offered at 10:49:30, picked up at the end of the
+10:50:29 round, running at 10:51:00: slot 1 → **slot 0**, `seq` 2 → **3**. The
+node came from `c0b36ee` (2026-09-18), older than `boot_count`, so that counter
+starts here at 1.
+
+**`reset_reason` reads 256 (`PANIC`), and the evidence says it is RTC RAM, not a
+crash.** The new image's `FLAGS` word sits where the old image left other data,
+and bit 4 happened to be set. A panic in the new image would have meant a second
+boot, and `boot_count` stayed at 1 across the next three rounds. What it cannot
+rule out is a panic *before* `note_boot` on the very first start — the same
+init path ran clean on `bad` and `kueche`, which makes that unlikely. The value
+is latched and will read 256 until the next reset; it is not repeating.
+
+CO₂ was missing from the first round only — periodic mode had not produced its
+first sample yet — and present from 10:52 (569, 592 ppm), which is the SCD41's
+first run on the 1.1 port. Rounds at 60 s, still slot 0 after the third, so
+confirmed.
+
+## 2026-10-08 11:15 / 11:16 — wohnzimmer — esp-hal 1.1
+
+`wohnzimmer-0.2.0-22b9205` offered at 11:15:37, picked up at the end of the
+11:15:53 round, running at 11:16:25: slot 1 → **slot 0**, `seq` 4 → **5**.
+Like `schlafzimmer` it came from `c0b36ee`, so `boot_count` starts at 1 here.
+
+**`reset_reason` 256 again, and that makes the RTC RAM reading stronger.** Both
+nodes that came from `c0b36ee` show it on their first boot with `boot_count` 1
+and never again; neither node that came from `6c81631` does. That is what a
+layout artefact looks like — the old image's data at the new `FLAGS` address,
+the same data on both boards — and not what a crash looks like.
+
+This is the first run of the SDS011 and the SGP41 on the 1.1 port, so the UART
+and the shared I²C bus with three devices on it:
+
+- **SDS011:** PM2.5 0.6 µg/m³ in the very first round.
+- **SCD41:** absent from the first round, as on `schlafzimmer`, then 660–664 ppm.
+- **SGP41:** `voc_index` read 3 at 11:17 and 87 at 11:18 against 80–81 before
+  the update. The gas-index algorithm restarts its learning on every boot; the
+  dip is that, not the port.
+
+Rounds at ~63 s, still slot 0 after the third, so confirmed. Four of six nodes
+are on the port; `terrasse` and `solarleuchte` remain.
+
+## 2026-10-08 11:24 / 11:46 — terrasse — esp-hal 1.1, and `visits` back to 0
+
+`terrasse-0.2.0-adee5d9` offered at 11:24:39. The node is on its cell and only
+reaches the broker on its heartbeat, so it found the offer at the end of the
+11:35:13 round, wrote the slot and restarted, and reported from the new image on
+the next heartbeat at 11:46:46: slot 1 → **slot 0**, `seq` 6 → **7**. That
+first publish is the confirmation. Heartbeat spacing 11:23:07 → 11:35:13 →
+11:46:46, about 12 minutes, unchanged by the update.
+
+| | before | after |
+| --- | --- | --- |
+| version | `terrasse-29a4d62` | `terrasse-0.2.0-adee5d9` |
+| `boot_count` | 1 | 2 (the update's own reset) |
+| `reset_count` | 2 | 1 (RTC RAM re-layout) |
+| `visits` | 202 | **0** |
+| weight | −60.4 / −61.4 | −60.0 |
+| cell | 4.00 V, 77 % | 4.00 V, 78 % |
+
+**`visits` dropping to 0 is the same re-layout, not lost birds.** The counter
+lives in RTC RAM behind a checked pair (`scale::VISITS_MAGIC`); at its new
+address the pair did not check out, so it started again from zero, as designed.
+It is a `total_increasing` entity, so Home Assistant books the drop as a meter
+reset and its statistics carry on. Anything summing the raw series across this
+line has to treat it as two.
+
+First run of the HX711 and the battery path on the 1.1 port. The weight reads
+where it read before, which says `release_scale_pad` let go of the pad and the
+driver clocks normally. Whether `park_scale` still holds the pad through deep
+sleep — the ~4.5 mA it saves — is not visible in one round; the cell voltage over
+the next days is the evidence, against the drain before the update. SHT31-D 14.2
+°C / 92 %, RSSI −71. `reset_reason` read 3, not the 256 the two nodes from
+`c0b36ee` showed.
+
+Five of six nodes on the port; `solarleuchte` remains.
+
+## 2026-10-08 13:35 / 13:36 — solarleuchte — esp-hal 1.1, and the SHT31 does not answer
+
+`solarleuchte-0.2.0-a2115c4` offered at 11:50:14, 70 s after the lamp had
+already reported and gone to sleep until dusk (it had been power-cycled at
+11:49). Power-cycled again at 13:35: the old image reported at 13:35:53, found
+the offer, and the new one was on the air at 13:36:10 — slot 0 → **slot 1**,
+`seq` 1 → **2**. Its first over-the-air update: `seq 1` was the cabled flash.
+Confirmed by that publish. Cell 4.14 V, RSSI −48. `reset_reason` 3, no 256.
+
+**The SHT31 question from the 2026-10-07 entry is answered: the slot is on and
+the sensor does not answer.** This is the first image on this board with
+`sht31: Slot::on()`, and it announces `temperature` and `humidity` to Home
+Assistant — but neither carried a value. The SHT31 is read on every round
+(`Slot::on`, `rounds_between` 1), the same I²C bring-up reads one on three other
+nodes on this port, so the bus code is not the suspect. Either the breakout is
+not fitted yet (`docs/solarleuchte.md` lists it as "on hand") or `D4`/`D5` are
+not connected to it. The node's serial log would show the bus sweep that runs
+when an expected sensor is missing.
+
+**LEDC is not exercised yet.** The lamp went straight back to sleep outside its
+window; the first evening on this image is the first test of the PWM on the
+1.1 port. Six of six nodes are now on the port.

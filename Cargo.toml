@@ -58,12 +58,13 @@ host-tests = ["drivers", "embassy-time/std", "embassy-time/generic-queue-16"]
 hal = [
     "drivers",
     "dep:esp-hal",
-    "dep:esp-hal-embassy",
+    "dep:esp-rtos",
+    "dep:esp-bootloader-esp-idf",
     "dep:esp-backtrace",
     "dep:esp-println",
     "dep:esp-alloc",
-    "dep:esp-wifi",
-    "dep:esp-wifi-sys",
+    "dep:esp-radio",
+    "dep:esp-wifi-sys-esp32c3",
     "dep:esp-storage",
     "dep:embedded-storage",
     "dep:embassy-net",
@@ -79,8 +80,24 @@ heapless = "0.8.0"
 log = "0.4.22"
 
 # --- ESP32-C3 HAL & async runtime ---
-esp-hal = { version = "0.22.0", features = ["esp32c3"], optional = true }
-esp-hal-embassy = { version = "0.5.0", features = ["esp32c3"], optional = true }
+# The esp-hal 1.1 set, chosen over 1.2 because it is the newest one with a
+# non-beta radio crate: esp-radio 0.18 pairs with esp-hal ~1.1, esp-rtos 0.3 and
+# esp-bootloader-esp-idf 0.5, while 1.2's radio is 1.0.0-beta (#32). The set
+# moves together; bump all of it or none of it.
+#
+# `unstable` is what exposes RTC sleep, LEDC, ADC, the RTC-RAM attribute and
+# the async UART -- esp-radio requires it anyway.
+esp-hal = { version = "~1.1.2", features = ["esp32c3", "unstable", "log-04"], optional = true }
+esp-rtos = { version = "0.3.0", features = [
+    "esp32c3",
+    "embassy",
+    "esp-radio",
+    "esp-alloc",
+    "log-04",
+], optional = true }
+# Emits the ESP-IDF app descriptor (`esp_app_desc!`), which is what espflash 4
+# insists on and the whole reason for this bump.
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"], optional = true }
 # `custom-halt` is the whole point of this dependency's configuration. Without
 # it both handlers end in `halt()` -- `loop { continue; }` -- and a panic or a
 # CPU exception parks the board for ever: powered, LED lit, no radio, and no
@@ -88,37 +105,34 @@ esp-hal-embassy = { version = "0.5.0", features = ["esp32c3"], optional = true }
 # is what `bad` did four times in a fortnight and `terrasse` twice before it,
 # and it is why `reset_reason` never had anything to report. See `custom_halt`
 # in src/main.rs.
-esp-backtrace = { version = "0.14.2", features = [
+esp-backtrace = { version = "0.19.0", features = [
     "esp32c3",
     "panic-handler",
     "println",
-    "exception-handler",
     "custom-halt",
 ], optional = true }
-esp-println = { version = "0.12.0", features = [
+esp-println = { version = "0.17.0", features = [
     "esp32c3",
-    "log",
+    "log-04",
 ], optional = true }
-esp-alloc = { version = "0.5.0", optional = true }
+esp-alloc = { version = "0.10.0", optional = true }
 
 # --- Wi-Fi + TCP/IP stack ---
-esp-wifi = { version = "0.11.0", features = [
+# `unstable` for modem sleep (`set_power_saving`) and `is_connected`, both of
+# which this firmware used under esp-wifi.
+esp-radio = { version = "0.18.0", features = [
     "esp32c3",
     "wifi",
-    "utils",
     "esp-alloc",
+    "log-04",
+    "unstable",
 ], optional = true }
-# The connected AP's RSSI. `esp-wifi` keeps its bindings in a private `binary`
-# module and exposes signal strength only through `AccessPointInfo`, i.e. only
-# from a scan -- which costs a radio sweep and disturbs the association. The
-# same generated bindings are a crate of their own, where
-# `esp_wifi_sta_get_ap_info` is public and reads the value the driver already
-# holds. Pinned to the version `esp-wifi` itself depends on, so features unify
-# and no second copy is built.
-esp-wifi-sys = { version = "0.7.1", features = [
-    "esp32c3",
-], optional = true }
-embassy-net = { version = "0.4.0", features = [
+# The connected AP's RSSI, read without the `WifiController` (which the
+# connection task owns). The same generated bindings `esp-radio` links, as a
+# crate of their own; pinned to the version `esp-radio` itself depends on, so no
+# second copy is built.
+esp-wifi-sys-esp32c3 = { version = "0.2.0", optional = true }
+embassy-net = { version = "0.9.1", features = [
     "tcp",
     "udp",
     "dhcpv4",
@@ -127,12 +141,9 @@ embassy-net = { version = "0.4.0", features = [
 ], optional = true }
 
 # --- Embassy core ---
-embassy-executor = { version = "0.6.3", features = [
-    "task-arena-size-32768",
-    "integrated-timers",
-], optional = true }
-embassy-time = { version = "0.3.2", optional = true }
-embassy-sync = { version = "0.6.1", optional = true }
+embassy-executor = { version = "0.10.0", optional = true }
+embassy-time = { version = "0.5.1", optional = true }
+embassy-sync = { version = "0.8.0", optional = true }
 
 # --- Sensor bus traits (keep the drivers HAL-agnostic) ---
 embedded-hal = { version = "1.0.0", optional = true }
@@ -154,7 +165,7 @@ rust-mqtt = { version = "=0.3.0", default-features = false, optional = true }
 static_cell = { version = "2.1.0", optional = true }
 
 # --- Config persistence (NVS flash) ---
-esp-storage = { version = "0.4.0", features = ["esp32c3"], optional = true }
+esp-storage = { version = "0.9.0", features = ["esp32c3"], optional = true }
 embedded-storage = { version = "0.3", optional = true }
 
 # Host-only, and only for `cargo test`: the discovery payloads are assembled by

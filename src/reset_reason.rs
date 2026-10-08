@@ -274,9 +274,7 @@ pub fn decode_boot_log(b: &[u8; BOOT_LOG_LEN]) -> Option<(u32, u32)> {
 pub fn load_boot_log() -> Option<(u32, u32)> {
     use embedded_storage::ReadStorage as _;
     let mut b = [0u8; BOOT_LOG_LEN];
-    esp_storage::FlashStorage::new()
-        .read(BOOT_LOG_OFFSET, &mut b)
-        .ok()?;
+    crate::flash().read(BOOT_LOG_OFFSET, &mut b).ok()?;
     decode_boot_log(&b)
 }
 
@@ -292,7 +290,7 @@ pub fn note_boot(code: u32) {
     let Some((count, reason)) = record_boot(load_boot_log(), code) else {
         return;
     };
-    if esp_storage::FlashStorage::new()
+    if crate::flash()
         .write(BOOT_LOG_OFFSET, &encode_boot_log(count, reason))
         .is_err()
     {
@@ -305,7 +303,7 @@ pub fn note_boot(code: u32) {
 /// rather than guessed at.
 #[cfg(feature = "hal")]
 pub fn code() -> u32 {
-    esp_hal::reset::reset_reason().map_or(0, |reason| reason as u32)
+    esp_hal::system::reset_reason().map_or(0, |reason| reason as u32)
 }
 
 /// Format a code for publishing: a bare integer, since it is an enumeration

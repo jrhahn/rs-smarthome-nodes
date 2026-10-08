@@ -41,6 +41,19 @@
 /// running.
 pub const FW_VERSION: &str = env!("FW_VERSION");
 
+/// The flash, for whichever module needs it this moment.
+///
+/// esp-storage 0.9 wants the `FLASH` peripheral token, which `main` would
+/// otherwise have to thread through every config, OTA and reset-log call. The
+/// token is zero-sized and guards nothing here: all of those calls run on the
+/// one executor thread, one after another, and none holds the storage across an
+/// `.await`.
+#[cfg(feature = "hal")]
+pub(crate) fn flash() -> esp_storage::FlashStorage<'static> {
+    // SAFETY: see above -- no two `FlashStorage`s are ever used concurrently.
+    esp_storage::FlashStorage::new(unsafe { esp_hal::peripherals::FLASH::steal() })
+}
+
 pub mod battery;
 pub mod clock;
 pub mod config;
