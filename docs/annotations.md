@@ -751,3 +751,26 @@ the next days is the evidence, against the drain before the update. SHT31-D 14.2
 `c0b36ee` showed.
 
 Five of six nodes on the port; `solarleuchte` remains.
+
+## 2026-10-08 13:35 / 13:36 — solarleuchte — esp-hal 1.1, and the SHT31 does not answer
+
+`solarleuchte-0.2.0-a2115c4` offered at 11:50:14, 70 s after the lamp had
+already reported and gone to sleep until dusk (it had been power-cycled at
+11:49). Power-cycled again at 13:35: the old image reported at 13:35:53, found
+the offer, and the new one was on the air at 13:36:10 — slot 0 → **slot 1**,
+`seq` 1 → **2**. Its first over-the-air update: `seq 1` was the cabled flash.
+Confirmed by that publish. Cell 4.14 V, RSSI −48. `reset_reason` 3, no 256.
+
+**The SHT31 question from the 2026-10-07 entry is answered: the slot is on and
+the sensor does not answer.** This is the first image on this board with
+`sht31: Slot::on()`, and it announces `temperature` and `humidity` to Home
+Assistant — but neither carried a value. The SHT31 is read on every round
+(`Slot::on`, `rounds_between` 1), the same I²C bring-up reads one on three other
+nodes on this port, so the bus code is not the suspect. Either the breakout is
+not fitted yet (`docs/solarleuchte.md` lists it as "on hand") or `D4`/`D5` are
+not connected to it. The node's serial log would show the bus sweep that runs
+when an expected sensor is missing.
+
+**LEDC is not exercised yet.** The lamp went straight back to sleep outside its
+window; the first evening on this image is the first test of the PWM on the
+1.1 port. Six of six nodes are now on the port.
