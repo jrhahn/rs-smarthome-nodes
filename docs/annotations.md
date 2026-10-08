@@ -692,3 +692,27 @@ CO₂ was missing from the first round only — periodic mode had not produced i
 first sample yet — and present from 10:52 (569, 592 ppm), which is the SCD41's
 first run on the 1.1 port. Rounds at 60 s, still slot 0 after the third, so
 confirmed.
+
+## 2026-10-08 11:15 / 11:16 — wohnzimmer — esp-hal 1.1
+
+`wohnzimmer-0.2.0-22b9205` offered at 11:15:37, picked up at the end of the
+11:15:53 round, running at 11:16:25: slot 1 → **slot 0**, `seq` 4 → **5**.
+Like `schlafzimmer` it came from `c0b36ee`, so `boot_count` starts at 1 here.
+
+**`reset_reason` 256 again, and that makes the RTC RAM reading stronger.** Both
+nodes that came from `c0b36ee` show it on their first boot with `boot_count` 1
+and never again; neither node that came from `6c81631` does. That is what a
+layout artefact looks like — the old image's data at the new `FLAGS` address,
+the same data on both boards — and not what a crash looks like.
+
+This is the first run of the SDS011 and the SGP41 on the 1.1 port, so the UART
+and the shared I²C bus with three devices on it:
+
+- **SDS011:** PM2.5 0.6 µg/m³ in the very first round.
+- **SCD41:** absent from the first round, as on `schlafzimmer`, then 660–664 ppm.
+- **SGP41:** `voc_index` read 3 at 11:17 and 87 at 11:18 against 80–81 before
+  the update. The gas-index algorithm restarts its learning on every boot; the
+  dip is that, not the port.
+
+Rounds at ~63 s, still slot 0 after the third, so confirmed. Four of six nodes
+are on the port; `terrasse` and `solarleuchte` remain.
