@@ -85,6 +85,34 @@ async fn main() -> Result<()> {
     let shared = Shared::new();
     shared.set_views(views);
 
+    // A view can go invalid while this runs -- QuestDB does that to a view whose
+    // base table moves backwards, as after an unclean power loss -- and come back
+    // after a rebuild. Asked again every minute, so reads stop using a broken
+    // view without a restart, and pick a repaired one up the same way.
+    {
+        let (client, shared, table) = (
+            client.clone(),
+            shared.clone(),
+            settings.questdb.table.clone(),
+        );
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                match schema::list_views(&client).await {
+                    Ok(valid) => {
+                        let usable = schema::usable_views(&table, &valid);
+                        if usable != shared.views() {
+                            warn!(views = ?usable, "usable rollup views changed");
+                        }
+                        shared.set_views(usable);
+                    }
+                    Err(e) => warn!(error = %e, "could not re-check the rollup views"),
+                }
+            }
+        });
+    }
+
     // What the database already knows about who is online, so the retained
     // last-wills that arrive on connect are recognised as old news.
     match questdb::series::fetch_status(&client, &settings.questdb.status_table).await {
