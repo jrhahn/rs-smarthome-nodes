@@ -61,7 +61,7 @@ pub const DESCRIPTORS: &[EntityDescriptor] = &[
 
 /// Distinguishes a real visit count in RTC RAM from uninitialised memory.
 ///
-/// A `#[ram(rtc_fast, persistent)]` word is never zeroed by the startup code,
+/// A `#[ram(unstable(rtc_fast, persistent))]` word is never zeroed by the startup code,
 /// so one that has just been *added to the firmware* comes up holding whatever
 /// was in that slot. A cold-boot check does not cover it: a reflash preserves
 /// RTC RAM (see FLASHING.md), so the first boot on new firmware is not a cold

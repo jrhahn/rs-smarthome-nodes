@@ -22,8 +22,6 @@ use core::time::Duration as CoreDuration;
 
 #[cfg(feature = "hal")]
 use embedded_storage::{ReadStorage, Storage};
-#[cfg(feature = "hal")]
-use esp_storage::FlashStorage;
 use heapless::String;
 
 use crate::sensors::{scd41, sds011};
@@ -622,7 +620,7 @@ impl Config {
 /// with Wi-Fi idle).
 #[cfg(feature = "hal")]
 pub fn load() -> Config {
-    let mut flash = FlashStorage::new();
+    let mut flash = crate::flash();
     let mut buf = [0u8; BLOB_LEN];
     match flash.read(FLASH_OFFSET, &mut buf) {
         Ok(()) => Config::from_bytes(&buf).unwrap_or(Config::DEFAULT),
@@ -638,7 +636,7 @@ pub fn load() -> Config {
 /// change is lost, not corruption.
 #[cfg(feature = "hal")]
 pub fn store(config: &Config) -> Result<(), &'static str> {
-    let mut flash = FlashStorage::new();
+    let mut flash = crate::flash();
     flash
         .write(FLASH_OFFSET, &config.to_bytes())
         .map_err(|_| "nvs write")
@@ -698,7 +696,7 @@ fn encode_node_name(name: &str) -> Result<[u8; NODE_BLOB_LEN], &'static str> {
 /// was built with.
 #[cfg(feature = "hal")]
 pub fn load_node_name() -> Option<String<NODE_NAME_MAX>> {
-    let mut flash = FlashStorage::new();
+    let mut flash = crate::flash();
     let mut b = [0u8; NODE_BLOB_LEN];
     flash.read(NODE_OFFSET, &mut b).ok()?;
     decode_node_name(&b)
@@ -710,7 +708,7 @@ pub fn load_node_name() -> Option<String<NODE_NAME_MAX>> {
 #[cfg(feature = "hal")]
 pub fn store_node_name(name: &str) -> Result<(), &'static str> {
     let b = encode_node_name(name)?;
-    FlashStorage::new()
+    crate::flash()
         .write(NODE_OFFSET, &b)
         .map_err(|_| "node nvs write")
 }
@@ -718,7 +716,7 @@ pub fn store_node_name(name: &str) -> Result<(), &'static str> {
 /// Drop the override, returning the board to its build-time identity.
 #[cfg(feature = "hal")]
 pub fn clear_node_name() -> Result<(), &'static str> {
-    FlashStorage::new()
+    crate::flash()
         .write(NODE_OFFSET, &[0u8; NODE_BLOB_LEN])
         .map_err(|_| "node nvs erase")
 }
@@ -828,7 +826,7 @@ fn encode_credentials(ssid: &str, psk: &str) -> Result<[u8; WIFI_BLOB_LEN], &'st
 /// with.
 #[cfg(feature = "hal")]
 pub fn load_credentials() -> Option<(String<SSID_MAX>, String<PSK_MAX>)> {
-    let mut flash = FlashStorage::new();
+    let mut flash = crate::flash();
     let mut b = [0u8; WIFI_BLOB_LEN];
     flash.read(WIFI_OFFSET, &mut b).ok()?;
     decode_credentials(&b)
@@ -838,7 +836,7 @@ pub fn load_credentials() -> Option<(String<SSID_MAX>, String<PSK_MAX>)> {
 #[cfg(feature = "hal")]
 pub fn store_credentials(ssid: &str, psk: &str) -> Result<(), &'static str> {
     let b = encode_credentials(ssid, psk)?;
-    FlashStorage::new()
+    crate::flash()
         .write(WIFI_OFFSET, &b)
         .map_err(|_| "wifi nvs write")
 }
@@ -846,7 +844,7 @@ pub fn store_credentials(ssid: &str, psk: &str) -> Result<(), &'static str> {
 /// Drop the stored credentials, returning the board to its build-time ones.
 #[cfg(feature = "hal")]
 pub fn clear_credentials() -> Result<(), &'static str> {
-    FlashStorage::new()
+    crate::flash()
         .write(WIFI_OFFSET, &[0u8; WIFI_BLOB_LEN])
         .map_err(|_| "wifi nvs erase")
 }

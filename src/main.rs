@@ -33,33 +33,33 @@
 
 use core::time::Duration as CoreDuration;
 
+extern crate alloc;
+
 use embassy_executor::Spawner;
-use embassy_net::{tcp::TcpSocket, Config as NetConfig, Ipv4Address, Stack, StackResources};
+use embassy_net::{
+    tcp::TcpSocket, Config as NetConfig, Ipv4Address, Runner, Stack, StackResources,
+};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_hal::delay::DelayNs as _;
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
-    config::WatchdogStatus,
     delay::Delay,
-    efuse::Efuse,
-    gpio::{GpioPin, Input, Level, Output, OutputOpenDrain, Pull},
-    peripherals::{LPWR, RADIO_CLK, RNG, TIMG0, TIMG1, WIFI},
-    reset::software_reset,
+    efuse,
+    gpio::{DriveMode, Flex, Input, InputConfig, Level, Output, OutputConfig, Pull},
+    interrupt::software::SoftwareInterruptControl,
+    peripherals::{GPIO2, LPWR, TIMG0, WIFI},
     rng::Rng,
     rtc_cntl::{sleep::TimerWakeupSource, Rtc},
+    system::software_reset,
     time::Duration as HalDuration,
-    timer::timg::{TimerGroup, Wdt},
+    timer::timg::{MwdtStage, TimerGroup, Wdt},
     usb_serial_jtag::UsbSerialJtag,
 };
-use esp_wifi::{
-    config::PowerSaveMode,
-    wifi::{
-        ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiStaDevice,
-        WifiState,
-    },
-    EspWifiController,
+use esp_radio::wifi::{
+    sta::StationConfig, Config as WifiConfig, ControllerConfig, Interface, PowerSaveMode,
+    WifiController,
 };
 use log::{info, warn};
 use rust_mqtt::{
@@ -80,8 +80,48 @@ use ds18b20::Ds18b20;
 use hx711::Hx711;
 use platform::{Samples, Sensors};
 
-/// The concrete network-stack type used throughout the firmware.
-type WifiStack = Stack<WifiDevice<'static, WifiStaDevice>>;
+// The ESP-IDF application descriptor: what espflash 4 checks for, and the
+// reason the HAL had to move past 0.22 (#32).
+esp_bootloader_esp_idf::esp_app_desc!();
+
+/// A handle on the network stack. `Copy` since embassy-net 0.6, so it is passed
+/// by value rather than as a `&'static`.
+type WifiStack = Stack<'static>;
+
+/// rust-mqtt 0.3 and `http` speak embedded-io-async **0.6**; embassy-net 0.9's
+/// socket speaks 0.7. Rather than move the MQTT client to a newer major -- whose
+/// API is a rewrite, against a broker this one is known to work with -- the
+/// socket is adapted here, through its own inherent methods.
+struct Io06<'a, 'b>(&'a mut TcpSocket<'b>);
+
+impl embedded_io_async::ErrorType for Io06<'_, '_> {
+    type Error = embedded_io_async::ErrorKind;
+}
+
+impl embedded_io_async::Read for Io06<'_, '_> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.0
+            .read(buf)
+            .await
+            .map_err(|_| embedded_io_async::ErrorKind::ConnectionReset)
+    }
+}
+
+impl embedded_io_async::Write for Io06<'_, '_> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.0
+            .write(buf)
+            .await
+            .map_err(|_| embedded_io_async::ErrorKind::ConnectionReset)
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.0
+            .flush()
+            .await
+            .map_err(|_| embedded_io_async::ErrorKind::ConnectionReset)
+    }
+}
 
 /// Staging buffer for a firmware download, one flash sector wide.
 ///
@@ -301,10 +341,7 @@ struct Board<'d> {
 /// The peripherals needed to bring the radio up, bundled so they can be handed
 /// down the call chain in one piece.
 struct Radio {
-    timg1: TIMG1,
-    rng: RNG,
-    radio_clk: RADIO_CLK,
-    wifi: WIFI,
+    wifi: WIFI<'static>,
 }
 
 /// Where a panic or a CPU exception ends up, because `esp-backtrace` is built
@@ -333,13 +370,7 @@ extern "Rust" fn custom_halt() -> ! {
     // can be written from a panic context, where nothing may allocate, lock or
     // await.
     state::set_panicked(true);
-    software_reset();
-    // `software_reset` is typed as returning, and does not. The loop is here to
-    // satisfy `-> !` and is the one place in this firmware where spinning is
-    // correct: the reset is already in flight.
-    loop {
-        core::hint::spin_loop();
-    }
+    software_reset()
 }
 
 /// Feed the watchdog for as long as the executor is still turning.
@@ -350,15 +381,15 @@ extern "Rust" fn custom_halt() -> ! {
 /// still deserves to be restarted -- a board waiting for ever on a bus that
 /// will not answer is no more use than one that has panicked.
 #[embassy_executor::task]
-async fn feed_watchdog(mut watchdog: Wdt<TIMG0>) {
+async fn feed_watchdog(mut watchdog: Wdt<TIMG0<'static>>) {
     loop {
         watchdog.feed();
         Timer::after(Duration::from_secs(WATCHDOG_FEED_SECS)).await;
     }
 }
 
-#[esp_hal_embassy::main]
-async fn main(spawner: Spawner) {
+#[esp_rtos::main]
+async fn main(spawner: Spawner) -> ! {
     // --- 1. HAL & async runtime --------------------------------------------
     let hal_config = {
         let mut c = esp_hal::Config::default();
@@ -380,7 +411,7 @@ async fn main(spawner: Spawner) {
         // unchanged. On a battery node the trade is roughly neutral rather than
         // a win — half the clock means twice as long awake for the same work —
         // but the radio-idle stretches, which dominate a wake, still cost less.
-        c.cpu_clock = CpuClock::Clock80MHz;
+        c = c.with_cpu_clock(CpuClock::_80MHz);
 
         // Arm a watchdog. Every one of them is off by default -- esp-hal's
         // `WatchdogConfig` derives `Default` and `WatchdogStatus::Disabled` is
@@ -399,29 +430,34 @@ async fn main(spawner: Spawner) {
         // enough that a hang costs a minute rather than a day. The longest
         // legitimate stretch is an over-the-air write, measured at seventeen
         // seconds end to end on 2026-09-17.
-        c.watchdog.timg0 = WatchdogStatus::Enabled(HalDuration::secs(WATCHDOG_SECS));
+        // (Armed below, on the driver: esp-hal 1.x dropped the field from
+        // `Config`, and `init` now disables every watchdog on its way through.)
         c
     };
     let peripherals = esp_hal::init(hal_config);
 
     esp_println::logger::init_logger_from_env();
-    esp_alloc::heap_allocator!(72 * 1024);
+    esp_alloc::heap_allocator!(size: 72 * 1024);
 
-    // TIMG0 drives the global Embassy executor (per the hardware spec).
+    // TIMG0's timer drives esp-rtos, which both the executor and the radio run
+    // on; its watchdog is the one armed here.
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let watchdog = timg0.wdt;
-    esp_hal_embassy::init(timg0.timer0);
+    let mut watchdog = timg0.wdt;
+    watchdog.set_timeout(MwdtStage::Stage0, HalDuration::from_secs(WATCHDOG_SECS));
+    watchdog.enable();
+    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
     // Spawned before anything else can block, because everything below this
     // line is inside the watchdog's window -- including the console wait, which
     // is two minutes on a board that cannot join.
-    spawner.must_spawn(feed_watchdog(watchdog));
+    spawner.spawn(feed_watchdog(watchdog).expect("watchdog task spawns once"));
 
     // Who am I? A provisioned identity in flash wins over the one this image was
     // built with. Must happen before any peripheral is touched: the sensor set
     // decides which buses come up at all.
     node::init();
-    node::set_mac(Efuse::read_base_mac_address());
+    node::set_mac(mac_address());
     let node = node::active();
 
     info!(
@@ -521,8 +557,11 @@ async fn main(spawner: Spawner) {
         // the GPIO peripheral tries to drive. Configuring first and releasing
         // afterwards would leave the driver clocking a line that cannot move.
         release_scale_pad();
-        let dt = Input::new(peripherals.GPIO3, Pull::Up);
-        let sck = Output::new(peripherals.GPIO2, Level::Low);
+        let dt = Input::new(
+            peripherals.GPIO3,
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let sck = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
         Hx711::new(dt, sck, Delay::new())
     });
 
@@ -534,14 +573,7 @@ async fn main(spawner: Spawner) {
     // `node.rs` fails the build if a node asks for both, so the order here can
     // never silently decide it.
     let (probe, battery) = match (node.ds18b20.enabled, node.battery.enabled) {
-        (true, _) => (
-            Some(Ds18b20::new(OutputOpenDrain::new(
-                peripherals.GPIO4,
-                Level::High,
-                Pull::Up,
-            ))),
-            None,
-        ),
+        (true, _) => (Some(Ds18b20::new(one_wire(peripherals.GPIO4))), None),
         (_, true) => (
             None,
             Some(Battery::new(peripherals.ADC1, peripherals.GPIO4)),
@@ -570,9 +602,6 @@ async fn main(spawner: Spawner) {
     };
 
     let radio = Radio {
-        timg1: peripherals.TIMG1,
-        rng: peripherals.RNG,
-        radio_clk: peripherals.RADIO_CLK,
         wifi: peripherals.WIFI,
     };
 
@@ -680,7 +709,7 @@ const LAMP_CELL_FALLBACK_MV: u32 = 3_700;
 /// value and brings Wi-Fi up: it is a whole boot's worth of network, and this
 /// runs every five minutes on a stack that is already up.
 async fn lamp_publish(
-    stack: &'static WifiStack,
+    stack: WifiStack,
     board: &mut Board<'_>,
     cfg: Config,
     now_ms: Option<u64>,
@@ -742,7 +771,7 @@ async fn lamp_publish(
 async fn run_lamp(
     spawner: Spawner,
     radio: Radio,
-    lpwr: LPWR,
+    lpwr: LPWR<'static>,
     board: &mut Board<'_>,
     cfg: Config,
 ) -> ! {
@@ -787,8 +816,9 @@ async fn run_lamp(
 
     // The PWM moves to its own task, and the string with it.
     if let Some(l) = board.lamp.take() {
-        if spawner.spawn(lamp_task(l)).is_err() {
-            warn!("lamp: PWM task already running");
+        match lamp_task(l) {
+            Ok(token) => spawner.spawn(token),
+            Err(_) => warn!("lamp: PWM task already running"),
         }
     }
 
@@ -924,7 +954,7 @@ fn lamp_sleep_secs(now_ms: u64) -> u64 {
 async fn run_battery(
     spawner: Spawner,
     radio: Radio,
-    lpwr: LPWR,
+    lpwr: LPWR<'static>,
     board: &mut Board<'_>,
     cfg: Config,
 ) -> ! {
@@ -1330,7 +1360,7 @@ async fn watch_visit(
 async fn run_awake(
     spawner: Spawner,
     radio: Radio,
-    lpwr: LPWR,
+    lpwr: LPWR<'static>,
     board: &mut Board<'_>,
     mut cfg: Config,
 ) -> ! {
@@ -1955,43 +1985,38 @@ async fn retare(board: &mut Board<'_>, cfg: Config) -> Config {
     }
 }
 
-/// Initialise esp-wifi (STA + DHCP), spawn the background tasks, and wait for a
-/// link + lease. Returns the `'static` network stack. Both the one-shot
-/// deep-sleep publish and the stay-awake loop bring Wi-Fi up through here; only
-/// one runs per boot, so the `mk_static!` cells are initialised exactly once.
-async fn bring_up_wifi(spawner: Spawner, radio: Radio) -> Result<&'static WifiStack, &'static str> {
-    // esp-wifi needs its own timer; TIMG0 is already owned by the executor, so
-    // hand it TIMG1.
-    let mut rng = Rng::new(radio.rng);
-    let timg1 = TimerGroup::new(radio.timg1);
-    let esp_wifi_ctrl = &*mk_static!(
-        EspWifiController<'static>,
-        esp_wifi::init(timg1.timer0, rng, radio.radio_clk).map_err(|_| "wifi init")?
-    );
-
-    let (wifi_interface, controller) =
-        esp_wifi::wifi::new_with_mode(esp_wifi_ctrl, radio.wifi, WifiStaDevice)
-            .map_err(|_| "wifi mode")?;
+/// Initialise the radio (STA + DHCP), spawn the background tasks, and wait for a
+/// link + lease. Returns the network stack. Both the one-shot deep-sleep publish
+/// and the stay-awake loop bring Wi-Fi up through here; only one runs per boot,
+/// so the `mk_static!` cells are initialised exactly once.
+async fn bring_up_wifi(spawner: Spawner, radio: Radio) -> Result<WifiStack, &'static str> {
+    // No configuration yet: the connection task sets it, because which
+    // credentials to use is its decision (see the fallback there), and
+    // `set_config` is also what starts the driver.
+    let (controller, interfaces) =
+        esp_radio::wifi::new(radio.wifi, ControllerConfig::default()).map_err(|_| "wifi init")?;
 
     let net_config = NetConfig::dhcpv4(Default::default());
+    let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
     // Four sockets, not three: the MQTT connection, DHCP, DNS -- and the UDP
     // socket `ntp::query` opens for one round trip. smoltcp refuses to add a
     // socket beyond this, so a stack sized for three would have made every
     // time sync fail at `bind` rather than on the wire.
-    let stack = &*mk_static!(
-        WifiStack,
-        Stack::new(
-            wifi_interface,
-            net_config,
-            mk_static!(StackResources<4>, StackResources::<4>::new()),
-            seed,
-        )
+    let (stack, runner) = embassy_net::new(
+        interfaces.station,
+        net_config,
+        mk_static!(StackResources<4>, StackResources::<4>::new()),
+        seed,
     );
 
-    spawner.spawn(connection(controller)).ok();
-    spawner.spawn(net_task(stack)).ok();
+    if let Ok(token) = connection(controller) {
+        spawner.spawn(token);
+    }
+    if let Ok(token) = net_task(runner) {
+        spawner.spawn(token);
+    }
 
     // Wait for the link and a DHCP lease.
     wait_for_network(stack).await;
@@ -2047,7 +2072,7 @@ async fn connect_and_publish(
 /// stays associated never goes through `connect_and_publish`, so an update that
 /// lived only there would have worked on exactly the nodes that are hardest to
 /// reach and on none of the ones worth trying it on first.
-async fn install_if_offered(stack: &'static WifiStack, drained: &Drained) {
+async fn install_if_offered(stack: WifiStack, drained: &Drained) {
     let Some(offer) = drained.offer.as_deref() else {
         return;
     };
@@ -2070,7 +2095,7 @@ async fn install_if_offered(stack: &'static WifiStack, drained: &Drained) {
 /// `mosquitto_sub`, not by the archiver, and one retained object per node makes
 /// `smarthome/+/meta/board` a listing of the whole fleet — MAC, image, address
 /// and which slot it is running from, for sleeping nodes too.
-fn board_meta(stack: &'static WifiStack) -> Option<heapless::String<224>> {
+fn board_meta(stack: WifiStack) -> Option<heapless::String<224>> {
     use core::fmt::Write as _;
 
     let node = node::active();
@@ -2140,8 +2165,7 @@ fn ota_begin_attempt() -> bool {
                 ),
                 Err(e) => warn!("rollback failed, and this node is now on its own: {}", e),
             }
-            software_reset();
-            false
+            software_reset()
         }
     }
 }
@@ -2160,7 +2184,7 @@ fn ota_confirm() {
 /// Every failure here leaves the node exactly as it was: the slot being written
 /// is the inactive one, and the selector is not touched until the digest has
 /// matched.
-async fn run_update(stack: &'static WifiStack, offer_json: &str) -> Result<u32, &'static str> {
+async fn run_update(stack: WifiStack, offer_json: &str) -> Result<u32, &'static str> {
     let node = node::active();
     let offer =
         ota::parse_offer(offer_json, FW_VERSION, node.id).map_err(ota::OfferError::as_str)?;
@@ -2189,7 +2213,7 @@ async fn run_update(stack: &'static WifiStack, offer_json: &str) -> Result<u32, 
     let mut scratch = [0u8; 512];
     let fetched = with_timeout(
         OTA_BUDGET,
-        http::fetch(&mut socket, &url, 0, &mut scratch, |chunk| {
+        http::fetch(&mut Io06(&mut socket), &url, 0, &mut scratch, |chunk| {
             writer.write(chunk)
         }),
     )
@@ -2212,7 +2236,7 @@ async fn run_update(stack: &'static WifiStack, offer_json: &str) -> Result<u32, 
 /// Never fatal. A node that cannot reach its time server still has readings
 /// worth publishing, and an unstamped one is dated on arrival by the archiver,
 /// exactly as every reading was before any of this existed.
-async fn sync_time(stack: &'static WifiStack) -> Option<u64> {
+async fn sync_time(stack: WifiStack) -> Option<u64> {
     match ntp::query(stack, NTP_SERVER).await {
         Ok(millis) if clock::is_plausible(millis) => {
             info!("time synced: {} ms since the epoch", millis);
@@ -2242,7 +2266,7 @@ async fn sync_time(stack: &'static WifiStack) -> Option<u64> {
 
 /// Enter RTC-timer deep sleep for `interval`. Never returns — the chip resets
 /// on wake and re-runs `main`.
-fn enter_deep_sleep(lpwr: LPWR, interval: CoreDuration) -> ! {
+fn enter_deep_sleep(lpwr: LPWR<'static>, interval: CoreDuration) -> ! {
     park_scale();
     sleep_for(Rtc::new(lpwr), interval)
 }
@@ -2259,7 +2283,7 @@ fn enter_deep_sleep(lpwr: LPWR, interval: CoreDuration) -> ! {
 /// NTP sync and accruing sleep intervals in between -- and the window comes
 /// from [`solar`], so it follows the season with nothing to set twice a year.
 /// An unknown clock keeps the day cadence.
-fn sleep_idle(lpwr: LPWR, cfg: &Config) -> ! {
+fn sleep_idle(lpwr: LPWR<'static>, cfg: &Config) -> ! {
     park_scale();
     let now_ms = state::clock_ms();
     let interval = cfg.idle_interval_at(now_ms);
@@ -2321,9 +2345,13 @@ fn park_scale() {
     // `Level::High` is the power-down itself: the chip latches once `PD_SCK`
     // has been high for 60 µs. Dropping the handle afterwards changes nothing —
     // `Output` has no `Drop` — and the latch below outlives it regardless.
-    let _sck = Output::new(unsafe { GpioPin::<2>::steal() }, Level::High);
+    let _sck = Output::new(
+        unsafe { GPIO2::steal() },
+        Level::High,
+        OutputConfig::default(),
+    );
     Delay::new().delay_us(hx711::POWER_DOWN_US);
-    unsafe { &*LPWR::PTR }
+    LPWR::regs()
         .pad_hold()
         .modify(|_, w| w.gpio_pin2_hold().set_bit());
 }
@@ -2334,14 +2362,14 @@ fn park_scale() {
 /// firmware may still be holding a pad from a previous boot, and a board that
 /// never held one loses nothing by clearing a bit that is already clear.
 fn release_scale_pad() {
-    unsafe { &*LPWR::PTR }
+    LPWR::regs()
         .pad_hold()
         .modify(|_, w| w.gpio_pin2_hold().clear_bit());
 }
 
 /// Block (async) until the interface reports link-up and DHCP has yielded an
 /// IPv4 address.
-async fn wait_for_network(stack: &'static WifiStack) {
+async fn wait_for_network(stack: WifiStack) {
     loop {
         if stack.is_link_up() {
             break;
@@ -2363,7 +2391,7 @@ async fn wait_for_network(stack: &'static WifiStack) {
 /// retained `<namespace>/<node>/config/*` values. Returns the config with those
 /// updates applied (unchanged if none were waiting).
 async fn publish_samples(
-    stack: &'static WifiStack,
+    stack: WifiStack,
     samples: &mut Samples,
     cfg: Config,
     now_ms: Option<u64>,
@@ -2407,7 +2435,7 @@ async fn publish_samples(
     // By reference, so the socket outlives the client: the graceful shutdown at
     // the end of this function needs it back (see there).
     let mut client = MqttClient::new(
-        &mut socket,
+        Io06(&mut socket),
         &mut write_buffer,
         MQTT_BUFFER,
         &mut recv_buffer,
@@ -2611,7 +2639,7 @@ async fn publish_samples(
     let mut reannounce_pressed = false;
     let mut reset_visits_pressed = false;
     let config_prefix = node.config_prefix();
-    let provision_topic = node::provision_topic(Efuse::read_base_mac_address());
+    let provision_topic = node::provision_topic(mac_address());
 
     // One SUBSCRIBE carrying both filters, emphatically not two in a row.
     // `rust-mqtt`'s `subscribe_to_topic` polls for its own SUBACK and discards
@@ -2830,8 +2858,8 @@ fn built_in_credentials() -> wifi::Credentials {
 /// when it is needed — so it deliberately runs before the radio is initialised
 /// and costs nothing but the window. A board with no usable credentials waits
 /// far longer, since it has nothing else to be doing.
-async fn console_provisioning(usb: esp_hal::peripherals::USB_DEVICE) {
-    let stranded = wifi::active().map_or(true, |c| c.is_placeholder());
+async fn console_provisioning(usb: esp_hal::peripherals::USB_DEVICE<'static>) {
+    let stranded = wifi::active().is_none_or(|c| c.is_placeholder());
     let window = if stranded {
         warn!("wifi: no usable credentials; waiting for the console");
         CONSOLE_WINDOW_STRANDED
@@ -2876,13 +2904,13 @@ async fn connection(mut controller: WifiController<'static>) {
     // casually. `reset_reason::latch` still clears it on a power-on, which is
     // the "give them another try" the original comment meant.
     let mut refusals = state::join_refusals();
-    // Consecutive refusals from the *driver* — `set_configuration` or
-    // `start_async` saying no — as opposed to `refusals` above, which counts a
-    // network turning the credentials down. Deliberately a second counter:
-    // folding driver errors into the first one would walk a healthy node
-    // towards `FALLBACK_AFTER` and have it abandon correct stored credentials
-    // because the radio was busy. Task-local rather than in RTC RAM, because
-    // unlike a mistyped passphrase this condition does not survive a reboot.
+    // Consecutive refusals from the *driver* — `set_config` saying no — as
+    // opposed to `refusals` above, which counts a network turning the
+    // credentials down. Deliberately a second counter: folding driver errors
+    // into the first one would walk a healthy node towards `FALLBACK_AFTER` and
+    // have it abandon correct stored credentials because the radio was busy.
+    // Task-local rather than in RTC RAM, because unlike a mistyped passphrase
+    // this condition does not survive a reboot.
     let mut radio_failures: u32 = 0;
     // Consecutive refusals from the *network*, this boot. A third counter, and
     // for the same reason the second one exists: `refusals` above lives in RTC
@@ -2893,9 +2921,9 @@ async fn connection(mut controller: WifiController<'static>) {
     let mut configured: Option<heapless::String<{ config::SSID_MAX }>> = None;
 
     loop {
-        if esp_wifi::wifi::wifi_state() == WifiState::StaConnected {
+        if controller.is_connected() {
             // Stay parked until we lose the connection.
-            controller.wait_for_event(WifiEvent::StaDisconnected).await;
+            let _ = controller.wait_for_disconnect_async().await;
             Timer::after(Duration::from_millis(5000)).await;
         }
 
@@ -2919,77 +2947,58 @@ async fn connection(mut controller: WifiController<'static>) {
             },
         };
 
-        // Re-configure only when the pair actually changed; `set_configuration`
-        // on an already-running controller is not free.
-        if configured.as_deref() != Some(credentials.ssid.as_str())
-            || !matches!(controller.is_started(), Ok(true))
-        {
-            let client_config = Configuration::Client(ClientConfiguration {
-                ssid: credentials.ssid.as_str().try_into().unwrap_or_default(),
-                password: credentials.psk.as_str().try_into().unwrap_or_default(),
-                ..Default::default()
-            });
-            // The driver can refuse either of the next two calls, and used to
-            // be unwrapped on the assumption that it would not: out of memory,
-            // mid-teardown, a previous call still unwinding. On a node that
-            // stays associated that is a once-per-boot risk; on a duty-cycled
-            // one the radio comes up again on every wake-up, which is some
-            // hundreds of times a day, and `bad` collected eight panics that
-            // way. A refusal is not fatal and not permanent -- wait and ask
-            // again, the way the join below already does.
-            if let Err(e) = controller.set_configuration(&client_config) {
+        // Re-configure only when the pair actually changed; `set_config` on a
+        // running controller is not free.
+        if configured.as_deref() != Some(credentials.ssid.as_str()) {
+            let station = WifiConfig::Station(
+                StationConfig::default()
+                    .with_ssid(credentials.ssid.as_str())
+                    .with_password(alloc::string::String::from(credentials.psk.as_str())),
+            );
+            // The driver can refuse this, and used to be unwrapped on the
+            // assumption that it would not: out of memory, mid-teardown, a
+            // previous call still unwinding. On a node that stays associated
+            // that is a once-per-boot risk; on a duty-cycled one the radio comes
+            // up again on every wake-up, which is some hundreds of times a day,
+            // and `bad` collected eight panics that way. A refusal is not fatal
+            // and not permanent -- wait and ask again, the way the join below
+            // already does.
+            if let Err(e) = controller.set_config(&station) {
                 radio_failures = radio_failures.saturating_add(1);
                 let wait = wifi::radio_backoff_ms(radio_failures);
                 warn!(
-                    "Wi-Fi: set_configuration refused: {:?} (attempt {}), retrying in {} ms",
+                    "Wi-Fi: set_config refused: {:?} (attempt {}), retrying in {} ms",
                     e, radio_failures, wait
                 );
+                // Whatever the driver was left holding means nothing now.
+                configured = None;
                 Timer::after(Duration::from_millis(wait)).await;
                 continue;
             }
             // Only once it took, so a refusal is retried rather than recorded
             // as the configuration the controller is running.
             configured = Some(credentials.ssid.clone());
-            if !matches!(controller.is_started(), Ok(true)) {
-                info!("Starting Wi-Fi controller");
-                if let Err(e) = controller.start_async().await {
-                    radio_failures = radio_failures.saturating_add(1);
-                    let wait = wifi::radio_backoff_ms(radio_failures);
-                    warn!(
-                        "Wi-Fi: controller start refused: {:?} (attempt {}), retrying in {} ms",
-                        e, radio_failures, wait
-                    );
-                    // The controller did not start, so the configuration it is
-                    // holding means nothing yet. Forgetting it sends the next
-                    // pass back through `set_configuration` instead of
-                    // skipping straight to a join on a controller that is down.
-                    configured = None;
-                    Timer::after(Duration::from_millis(wait)).await;
-                    continue;
-                }
-                // Modem sleep, set on every start because it is the radio's
-                // own state and a restart is exactly when it would be lost.
-                //
-                // `Maximum` rather than `Minimum` deliberately. esp-wifi never
-                // calls `esp_wifi_set_ps` on its own — the setting only exists
-                // if we make it — and the stack underneath already comes up in
-                // MIN_MODEM, so asking for `Minimum` would be a no-op dressed
-                // up as a change. MAX_MODEM sleeps through `listen_interval`
-                // beacons (3 by default, so ~300 ms at a 100 ms beacon) instead
-                // of waking for every DTIM.
-                //
-                // What that costs: up to ~300 ms before an inbound packet is
-                // collected from the AP's buffer. Everything reaching these
-                // nodes is a Home Assistant knob — a slider, a button — where
-                // nobody can tell. Everything time-critical is outbound, and
-                // transmitting never waits for the sleep schedule.
-                match controller.set_power_saving(PowerSaveMode::Maximum) {
-                    Ok(()) => info!("Wi-Fi modem sleep: max"),
-                    // Not fatal: it only means the radio idles hotter than it
-                    // could. Saying so beats a node that is silently drawing
-                    // more than the comment above claims.
-                    Err(e) => warn!("Wi-Fi modem sleep refused: {:?}; running without it", e),
-                }
+
+            // Modem sleep, set after every (re)configuration because it is the
+            // radio's own state and a restart is exactly when it would be lost.
+            //
+            // `Maximum` rather than `Minimum` deliberately. The driver never
+            // calls `esp_wifi_set_ps` on its own — the setting only exists if
+            // we make it. MAX_MODEM sleeps through `listen_interval` beacons (3
+            // by default, so ~300 ms at a 100 ms beacon) instead of waking for
+            // every DTIM.
+            //
+            // What that costs: up to ~300 ms before an inbound packet is
+            // collected from the AP's buffer. Everything reaching these nodes is
+            // a Home Assistant knob — a slider, a button — where nobody can
+            // tell. Everything time-critical is outbound, and transmitting never
+            // waits for the sleep schedule.
+            match controller.set_power_saving(PowerSaveMode::Maximum) {
+                Ok(()) => info!("Wi-Fi modem sleep: max"),
+                // Not fatal: it only means the radio idles hotter than it
+                // could. Saying so beats a node that is silently drawing more
+                // than the comment above claims.
+                Err(e) => warn!("Wi-Fi modem sleep refused: {:?}; running without it", e),
             }
             // Configured and started: whatever the driver was busy with has
             // passed, so the next refusal starts its backoff from the short
@@ -3024,6 +3033,29 @@ async fn connection(mut controller: WifiController<'static>) {
 
 /// Background task: drives the `embassy-net` stack.
 #[embassy_executor::task]
-async fn net_task(stack: &'static WifiStack) {
-    stack.run().await
+async fn net_task(mut runner: Runner<'static, Interface<'static>>) {
+    runner.run().await
+}
+
+/// This board's factory MAC, from eFuse.
+fn mac_address() -> [u8; 6] {
+    let mut mac = [0u8; 6];
+    mac.copy_from_slice(efuse::base_mac_address().as_bytes());
+    mac
+}
+
+/// The DS18B20's 1-Wire line on D2: open drain, the internal pull-up backing the
+/// external 4.7 kΩ, released high. esp-hal 1.x has no open-drain driver type of
+/// its own any more; a `Flex` configured this way is the replacement.
+fn one_wire(pin: esp_hal::peripherals::GPIO4<'static>) -> Flex<'static> {
+    let mut io = Flex::new(pin);
+    io.apply_output_config(
+        &OutputConfig::default()
+            .with_drive_mode(DriveMode::OpenDrain)
+            .with_pull(Pull::Up),
+    );
+    io.set_high();
+    io.set_output_enable(true);
+    io.set_input_enable(true);
+    io
 }

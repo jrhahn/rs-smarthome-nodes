@@ -77,8 +77,8 @@ const _: () = {
     // 4 MB of flash, and nothing may run past the end of it.
     assert!(SLOT_OFFSETS[1] + SLOT_SIZE <= 0x0040_0000);
     // Application partitions must start on a 64 KB boundary.
-    assert!(SLOT_OFFSETS[0] % 0x10000 == 0);
-    assert!(SLOT_OFFSETS[1] % 0x10000 == 0);
+    assert!(SLOT_OFFSETS[0].is_multiple_of(0x10000));
+    assert!(SLOT_OFFSETS[1].is_multiple_of(0x10000));
 };
 
 // --- otadata -----------------------------------------------------------------
@@ -508,7 +508,7 @@ pub struct Writer<'a> {
     buf: &'a mut [u8],
     filled: usize,
     hasher: crate::sha256::Sha256,
-    flash: FlashStorage,
+    flash: FlashStorage<'static>,
 }
 
 #[cfg(feature = "hal")]
@@ -525,7 +525,7 @@ impl<'a> Writer<'a> {
         if expected == 0 || expected > SLOT_SIZE {
             return Err("image does not fit the slot");
         }
-        if buf.is_empty() || buf.len() % SECTOR as usize != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(SECTOR as usize) {
             return Err("staging buffer must be a whole number of sectors");
         }
         Ok(Self {
@@ -536,7 +536,7 @@ impl<'a> Writer<'a> {
             buf,
             filled: 0,
             hasher: crate::sha256::Sha256::new(),
-            flash: FlashStorage::new(),
+            flash: crate::flash(),
         })
     }
 
@@ -608,7 +608,7 @@ impl<'a> Writer<'a> {
 /// Read both selector entries out of `otadata`.
 #[cfg(feature = "hal")]
 pub fn read_otadata() -> [Option<SelectEntry>; 2] {
-    let mut flash = FlashStorage::new();
+    let mut flash = crate::flash();
     let mut out = [None, None];
     for (i, slot) in out.iter_mut().enumerate() {
         let mut buf = [0u8; ENTRY_LEN];
@@ -641,7 +641,7 @@ pub fn activate(current: Active, slot: usize) -> Result<u32, &'static str> {
         seq,
         state: ImageState::Undefined,
     };
-    FlashStorage::new()
+    crate::flash()
         .write(
             OTADATA_OFFSET + current.target_entry() as u32 * SECTOR,
             &entry.to_bytes(),
@@ -664,7 +664,7 @@ pub fn roll_back(current: Active) -> Result<u32, &'static str> {
         seq,
         state: ImageState::Undefined,
     };
-    FlashStorage::new()
+    crate::flash()
         .write(
             OTADATA_OFFSET + current.target_entry() as u32 * SECTOR,
             &entry.to_bytes(),
@@ -677,7 +677,7 @@ pub fn roll_back(current: Active) -> Result<u32, &'static str> {
 #[cfg(feature = "hal")]
 pub fn load_pending() -> Option<Pending> {
     let mut buf = [0u8; STATE_LEN];
-    FlashStorage::new()
+    crate::flash()
         .read(STATE_OFFSET, &mut buf)
         .ok()
         .and_then(|()| Pending::from_bytes(&buf))
@@ -689,7 +689,7 @@ pub fn store_pending(pending: Option<Pending>) -> Result<(), &'static str> {
         Some(p) => p.to_bytes(),
         None => [0u8; STATE_LEN],
     };
-    FlashStorage::new()
+    crate::flash()
         .write(STATE_OFFSET, &bytes)
         .map_err(|_| "ota state write failed")
 }

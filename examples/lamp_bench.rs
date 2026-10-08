@@ -27,12 +27,13 @@ use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
+    gpio::DriveMode,
     ledc::{
-        channel::{self, ChannelIFace},
+        channel::{self, ChannelHW, ChannelIFace},
         timer::{self, TimerIFace},
         LSGlobalClkSource, Ledc, LowSpeed,
     },
-    prelude::*,
+    time::Rate,
 };
 use log::info;
 use rs_smarthome_nodes::battery::{self, Battery};
@@ -95,13 +96,11 @@ extern "Rust" fn custom_halt() -> ! {
     }
 }
 
-#[esp_hal::entry]
+esp_bootloader_esp_idf::esp_app_desc!();
+
+#[esp_hal::main]
 fn main() -> ! {
-    let peripherals = esp_hal::init({
-        let mut c = esp_hal::Config::default();
-        c.cpu_clock = CpuClock::Clock80MHz;
-        c
-    });
+    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::_80MHz));
     esp_println::logger::init_logger_from_env();
 
     let mut ledc = Ledc::new(peripherals.LEDC);
@@ -112,7 +111,7 @@ fn main() -> ! {
         .configure(timer::config::Config {
             duty: timer::config::Duty::Duty12Bit,
             clock_source: timer::LSClockSource::APBClk,
-            frequency: PWM_HZ.Hz(),
+            frequency: Rate::from_hz(PWM_HZ),
         })
         .expect("LEDC timer: 12 bit at 1 kHz is well inside what APBClk can divide to");
 
@@ -123,7 +122,7 @@ fn main() -> ! {
         .configure(channel::config::Config {
             timer: &lstimer0,
             duty_pct: 0,
-            pin_config: channel::config::PinConfig::PushPull,
+            drive_mode: DriveMode::PushPull,
         })
         .expect("LEDC channel 0 on GPIO8");
 
@@ -167,7 +166,7 @@ fn main() -> ! {
         channel0.set_duty_hw(bench_duty(step));
 
         // Once per breath, so a long run stays readable.
-        if step % lamp::BREATH.len() == 0 {
+        if step.is_multiple_of(lamp::BREATH.len()) {
             match cell.read_millivolts() {
                 Some(mv) => info!(
                     "breath {}, cell {mv} mV, ~{} %",

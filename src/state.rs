@@ -3,7 +3,7 @@
 //! The firmware polls the scale by cold-booting out of deep sleep on a short
 //! interval, so plain statics (in regular RAM) are wiped on every wake. The
 //! tare baseline and the presence edge must instead survive across deep sleep,
-//! which is exactly what `#[ram(rtc_fast, persistent)]` gives us: the startup
+//! which is exactly what `#[ram(unstable(rtc_fast, persistent))]` gives us: the startup
 //! code leaves the region alone instead of zeroing it.
 //!
 //! **Nothing here may depend on the region being cleared when power is
@@ -18,16 +18,16 @@
 //! So `FLAGS == 0` is a hint, not a guarantee. See [`discovery_tag`] for the
 //! shape that stays correct when the hint is wrong.
 
-use esp_hal::macros::ram;
+use esp_hal::ram;
 
 use crate::sensors::scale;
 
 /// Last known empty-house reading, in raw HX711 ticks.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut BASELINE: i32 = 0;
 
 /// Packed status bits; see `FLAG_*`.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut FLAGS: u32 = 0;
 
 /// Empty-house idle wake-ups accumulated since the last publish. Drives the
@@ -35,13 +35,13 @@ static mut FLAGS: u32 = 0;
 /// publishes temperature + weight even without a visitor, then resets it. Any
 /// real publish (bird arrived / left) also resets it, so the heartbeat clock
 /// restarts from the last time Home Assistant already got a fresh reading.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut IDLE_WAKES: u32 = 0;
 
 /// Consecutive rounds a load has been on the scale, for the stuck-load bound
 /// in [`crate::presence::STUCK_AFTER_SECS`]. Reset by an arrival or a
 /// departure, so it only ever counts one uninterrupted stretch.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut PRESENT_ROUNDS: u32 = 0;
 
 /// Consecutive rounds the reading has sat in `Decision::Unexplained`, for the
@@ -49,7 +49,7 @@ static mut PRESENT_ROUNDS: u32 = 0;
 /// by every other verdict, so it only ever counts one uninterrupted stretch —
 /// the same discipline as [`PRESENT_ROUNDS`], and for the same reason: an
 /// occasional odd reading between quiet ones is not a stuck baseline.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut UNEXPLAINED_ROUNDS: u32 = 0;
 
 /// A coarse wall clock in milliseconds, kept across deep sleep as a pair of
@@ -67,15 +67,15 @@ static mut UNEXPLAINED_ROUNDS: u32 = 0;
 /// stamping a reading from a drifting clock is worse than not stamping it, and
 /// that argument stands. The only consumer is the night cadence, which asks an
 /// hour-wide question and tolerates minutes of error.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut CLOCK_MS_LO: u32 = 0;
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut CLOCK_MS_HI: u32 = 0;
 
 /// Digest of the discovery messages last successfully announced from this
 /// board; see [`crate::discovery::announcement_tag`]. Zero means "nothing".
 
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut DISCOVERY_TAG: u32 = 0;
 
 /// Visits counted since the board last lost power entirely.
@@ -93,7 +93,7 @@ static mut DISCOVERY_TAG: u32 = 0;
 /// `total_increasing`, and Home Assistant treats a drop to zero as a counter
 /// reset rather than as negative consumption, so the long-term history it has
 /// already recorded survives the board forgetting.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut VISIT_COUNT: u32 = 0;
 
 /// Companion to [`VISIT_COUNT`], holding it XORed with
@@ -101,7 +101,7 @@ static mut VISIT_COUNT: u32 = 0;
 /// word that has just been added to the firmware comes up holding leftover
 /// memory, and a reflash is not a cold boot, so there is no moment at which
 /// zeroing it would have been reliable. See that constant for the full story.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut VISIT_CHECK: u32 = 0;
 
 /// Set once the baseline has been tared at least once.
@@ -323,18 +323,18 @@ pub fn mark_booted() {
 /// and a software reset all leave it intact, so the evidence survives the event
 /// it describes; only removing power clears it, and that is a power-on reset —
 /// which this then records as itself.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut RESET_REASON: u32 = 0;
 
 /// How many such resets since power was last removed. One alone is ambiguous;
 /// a count climbing over days is a node rebooting in a loop nobody has noticed,
 /// which is the failure this whole pair exists to make visible.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut RESET_COUNT: u32 = 0;
 
 /// Says the words around it are ours rather than whatever the region held
 /// before. See [`crate::reset_reason::EPOCH_TAG`] for why this is not optional.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut RESET_TAG: u32 = 0;
 
 /// Consecutive joins the *stored* Wi-Fi credentials have been refused; see
@@ -345,7 +345,7 @@ static mut RESET_TAG: u32 = 0;
 /// reached, so the fallback never fired on the one node that hangs outdoors.
 /// [`crate::reset_reason::latch`] clears it on a power-on, which is the
 /// "another try" the original comment intended.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut JOIN_REFUSALS: u32 = 0;
 
 /// Consecutive publish rounds that never reached the broker; see
@@ -356,7 +356,7 @@ static mut JOIN_REFUSALS: u32 = 0;
 /// now spends four or five refusals, so that counter measures how hard the
 /// round tried and this one measures how many rounds went nowhere. Only the
 /// second is a sane thing to stretch a sleep by.
-#[ram(rtc_fast, persistent)]
+#[ram(unstable(rtc_fast, persistent))]
 static mut FAILED_ROUNDS: u32 = 0;
 
 /// Record this boot's reset cause. Call once, early. A deep-sleep wake is the

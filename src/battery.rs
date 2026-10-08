@@ -41,8 +41,8 @@ use core::fmt::Write as _;
 #[cfg(feature = "hal")]
 use esp_hal::{
     analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin, Attenuation},
-    gpio::GpioPin,
-    peripherals::ADC1,
+    peripherals::{ADC1, GPIO4},
+    Blocking,
 };
 use heapless::String;
 
@@ -240,24 +240,22 @@ const CONVERSION_POLLS: u32 = 10_000;
 /// exactly the state that adds no leakage of its own to the divider.
 #[cfg(feature = "hal")]
 pub struct Battery<'d> {
-    adc: Adc<'d, ADC1>,
-    pin: AdcPin<GpioPin<4>, ADC1, AdcCalCurve<ADC1>>,
+    adc: Adc<'d, ADC1<'d>, Blocking>,
+    pin: AdcPin<GPIO4<'d>, ADC1<'d>, AdcCalCurve<ADC1<'d>>>,
 }
 
 #[cfg(feature = "hal")]
-impl Battery<'_> {
+impl<'d> Battery<'d> {
     /// Claim ADC1 and the divider's tap on D2 / GPIO4.
     ///
     /// 11 dB attenuation, because a full cell puts 2.1 V on the pin and the
     /// lower ranges top out below that. The curve-fitting calibration scheme
     /// reads the chip's factory reference points out of eFuse, so conversions
     /// come back in millivolts already corrected for this individual part.
-    pub fn new(adc1: ADC1, pin: GpioPin<4>) -> Self {
+    pub fn new(adc1: ADC1<'d>, pin: GPIO4<'d>) -> Self {
         let mut config = AdcConfig::new();
-        let pin = config.enable_pin_with_cal::<GpioPin<4>, AdcCalCurve<ADC1>>(
-            pin,
-            Attenuation::Attenuation11dB,
-        );
+        let pin =
+            config.enable_pin_with_cal::<GPIO4<'d>, AdcCalCurve<ADC1<'d>>>(pin, Attenuation::_11dB);
         Self {
             adc: Adc::new(adc1, config),
             pin,

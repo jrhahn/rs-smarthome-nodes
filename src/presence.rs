@@ -390,7 +390,7 @@ mod tare_tests {
             w.push(1000 + 8400);
         }
         assert_eq!(w.median(), Some(9400));
-        let all: Vec<i32> = core::iter::repeat(9400).take(TARE_SAMPLES).collect();
+        let all: Vec<i32> = std::iter::repeat_n(9400, TARE_SAMPLES).collect();
         assert!(
             tare_spread_ok(&all),
             "a still bird looks exactly like a still feeder"

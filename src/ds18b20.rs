@@ -20,7 +20,7 @@
 #[cfg(feature = "hal")]
 use embassy_time::{Duration, Timer};
 #[cfg(feature = "hal")]
-use esp_hal::{delay::Delay, gpio::OutputOpenDrain};
+use esp_hal::{delay::Delay, gpio::Flex};
 
 use crate::sensors::EntityDescriptor;
 
@@ -52,7 +52,7 @@ const CMD_READ_SCRATCHPAD: u8 = 0xBE;
 /// Driver wrapping the single open-drain 1-Wire data line.
 #[cfg(feature = "hal")]
 pub struct Ds18b20<'d> {
-    io: OutputOpenDrain<'d>,
+    io: Flex<'d>,
     delay: Delay,
 }
 
@@ -60,7 +60,7 @@ pub struct Ds18b20<'d> {
 impl<'d> Ds18b20<'d> {
     /// Create a driver over an already-configured open-drain data pin. The pin
     /// is left released (high / bus idle).
-    pub fn new(mut io: OutputOpenDrain<'d>) -> Self {
+    pub fn new(mut io: Flex<'d>) -> Self {
         io.set_high();
         Self {
             io,

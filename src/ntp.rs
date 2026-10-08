@@ -140,8 +140,8 @@ pub const TIMEOUT_MS: u64 = 2_000;
 /// still publish -- an unstamped reading is worth having, a skipped round is
 /// not.
 #[cfg(feature = "hal")]
-pub async fn query<D: embassy_net::driver::Driver>(
-    stack: &embassy_net::Stack<D>,
+pub async fn query(
+    stack: embassy_net::Stack<'_>,
     server: embassy_net::Ipv4Address,
 ) -> Result<u64, &'static str> {
     use embassy_net::udp::{PacketMetadata, UdpSocket};
@@ -181,7 +181,7 @@ pub async fn query<D: embassy_net::driver::Driver>(
 
     // Anyone on the LAN can send us a datagram; only the server we asked gets
     // to set this node's clock.
-    if from.addr != server.into() {
+    if from.endpoint.addr != server.into() {
         return Err("ntp reply from the wrong host");
     }
     parse_response(&answer[..len]).map_err(Rejected::as_str)

@@ -50,7 +50,7 @@ pub const DESCRIPTORS: &[EntityDescriptor] = &[EntityDescriptor {
 /// and then there is no reading to report rather than a plausible-looking one.
 #[cfg(feature = "hal")]
 pub fn read() -> Option<i8> {
-    use esp_wifi_sys::include::{esp_wifi_sta_get_ap_info, wifi_ap_record_t};
+    use esp_wifi_sys_esp32c3::include::{esp_wifi_sta_get_ap_info, wifi_ap_record_t};
 
     // SAFETY: the pointer is to a local, correctly-sized and zeroed record, and
     // the driver only writes within it. Callable only once `esp_wifi` has been

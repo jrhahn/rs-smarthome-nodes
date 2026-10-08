@@ -62,4 +62,5 @@ cargo clippy --no-default-features --features host-tests --target x86_64-unknown
 cargo build --release          # the firmware actually links
 ```
 
-`espflash` must be **3.x**; 4.x refuses this firmware.
+`espflash` must be **4.x** since #32 (the image carries an ESP-IDF app
+descriptor); an image from before #32 still needs 3.x.
