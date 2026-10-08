@@ -831,6 +831,22 @@ agree within a few grams. Until then the published weight is offset; presence
 detection recovers on its own once the baseline is adopted
 (`UNEXPLAINED_ADOPT_AFTER_SECS`).
 
-Still to do for this mount, in this order: check `scale_factor` (1862.8) with a
-known weight if the cell itself changed, let the zero settle, tare, then a night
-for `temp_coeff`.
+**Second tare, 17:47, once the zero had settled.** Pressed automatically when
+three consecutive heartbeats agreed within 3 g:
+
+| time | `weight` |
+| --- | --- |
+| 17:11:33 | −70.5 g |
+| 17:23:38 | −83.8 g |
+| 17:35:52 | −85.0 g |
+| 17:47:55 | −84.1 g → tare pressed 17:47:56, taken in the same round |
+| 18:00:01 | **−1.1 g** |
+| 18:12:05 | −5.4 g |
+
+The mount settled about −85 g below the first tare over two and a half hours,
+then held. What is left is −4 g per heartbeat into the evening, under the
+10 g threshold; whether that is settling or cooling is what the first night
+answers, and that night is also the `temp_coeff` measurement.
+
+Still to do for this mount: check `scale_factor` (1862.8) with a known weight if
+the cell itself changed, and read the night for `temp_coeff`.
