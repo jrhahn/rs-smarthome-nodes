@@ -173,6 +173,22 @@ pub const fn cell_millivolts(pin_mv: u32) -> u32 {
 /// limit rather than a health one.
 pub const LOW_CELL_MV: u32 = 3000;
 
+/// A parked node resumes above this, not above [`LOW_CELL_MV`]. A LiPo recovers
+/// a couple of hundred millivolts once the load is gone, so a single threshold
+/// would park and unpark on alternate wakes.
+pub const RESUME_CELL_MV: u32 = 3300;
+
+/// Whether a battery node should skip its normal round and park (#37).
+///
+/// Never on an implausible reading: a missing divider must not silence a node
+/// whose cell is fine.
+pub const fn should_park(cell_mv: u32, parked: bool) -> bool {
+    if cell_mv < MIN_PLAUSIBLE_CELL_MV {
+        return false;
+    }
+    cell_mv < if parked { RESUME_CELL_MV } else { LOW_CELL_MV }
+}
+
 /// Under this it is not a discharged cell, it is a wiring fault — a missing or
 /// mis-wired divider, or no cell fitted at all. Published readings stop here
 /// rather than feeding Home Assistant a number that looks like a flat battery.
@@ -183,6 +199,7 @@ pub const MIN_PLAUSIBLE_CELL_MV: u32 = 2000;
 // unwired board as a battery worth worrying about.
 const _: () = {
     assert!(MIN_PLAUSIBLE_CELL_MV < LOW_CELL_MV);
+    assert!(LOW_CELL_MV < RESUME_CELL_MV);
     assert!(LOW_CELL_MV < cell_millivolts(2100));
 };
 
@@ -287,6 +304,18 @@ impl Battery<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_low_cell_parks_and_resumes_only_with_margin() {
+        assert!(!should_park(3001, false));
+        assert!(should_park(2999, false));
+        // Recovered at rest, but not by enough: stays parked.
+        assert!(should_park(3200, true));
+        assert!(!should_park(3300, true));
+        // A wiring fault is not a flat cell.
+        assert!(!should_park(1500, false));
+        assert!(!should_park(1500, true));
+    }
 
     #[test]
     fn the_divider_is_undone_by_its_own_ratio() {

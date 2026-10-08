@@ -24,6 +24,15 @@ reconstruction and reads like one.
 
 ## [Unreleased]
 
+### Added
+
+- **A battery node parks on a low cell.** Below 3.0 V (`battery::LOW_CELL_MV`)
+  `terrasse` stops polling the scale, reports once and sleeps 3 h between
+  checks, each of which publishes. It resumes above 3.3 V, so a cell that
+  recovers at rest does not flap. A reading under 2.0 V is treated as a wiring
+  fault and never parks. `solarleuchte` already went dark and slept until the
+  next dusk below its 20 % charge gate, and is unchanged (#37).
+
 ### Changed
 
 - **`FW_VERSION` now carries the release: `<node>-<release>-<commit>`**, e.g.

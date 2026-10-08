@@ -939,6 +939,34 @@ async fn run_battery(
     // seven call sites to prevent it.
     let wake_secs = cfg.wake_secs_at(state::clock_ms());
 
+    // Undervoltage park (#37). Below `LOW_CELL_MV` the cell loses capacity for
+    // good, and the protection board does not step in until ~2.5 V. So report
+    // once, so the low voltage reaches the archive, and sleep `PARK_INTERVAL`
+    // instead of polling every few seconds. Every parked wake re-measures and
+    // reports, which is also how a node that has been recharged resumes.
+    // Read on every wake, not only in publish rounds: a few milliseconds
+    // against a ~270 ms boot.
+    if let Some(mv) = board.battery.as_mut().and_then(|b| b.read_millivolts()) {
+        let parked = battery::should_park(mv, state::parked());
+        if parked != state::parked() {
+            if parked {
+                warn!(
+                    "cell at {} mV: parking, resuming above {} mV",
+                    mv,
+                    battery::RESUME_CELL_MV
+                );
+            } else {
+                info!("cell at {} mV: resuming", mv);
+            }
+            state::set_parked(parked);
+        }
+        if parked {
+            let mut samples = collect_samples(None, None, &cfg, board).await;
+            publish(spawner, radio, &mut samples, cfg, board).await;
+            enter_deep_sleep(lpwr, PARK_INTERVAL);
+        }
+    }
+
     // A node with no load cell has no presence logic to run: sample everything
     // it does have, publish, and go back to sleep.
     if !node.scale.enabled {
@@ -1182,6 +1210,11 @@ async fn run_battery(
 
     sleep_idle(lpwr, &cfg);
 }
+
+/// How long a parked node sleeps between checks of its cell. Each check is a
+/// publish round, a few tenths of a mAh, against the ~3 mAh a normal day of
+/// polling costs.
+const PARK_INTERVAL: CoreDuration = CoreDuration::from_secs(3 * 3600);
 
 /// What watching one visit through produced.
 struct Visit {
