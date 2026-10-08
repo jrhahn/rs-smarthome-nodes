@@ -501,7 +501,7 @@ The list in [`wiring.md`](wiring.md#before-you-power-it-up) applies.
 | Cell | 2000 mAh LiPo pouch | on hand, ×2 |
 | Protection | BMS board | on hand |
 | Charger | MPPT module, 18 V variant | on hand; **set the pot, swap `RCS`** — below |
-| Thermometer | SHT31-D breakout | on hand; `D4`/`D5`, telemetry only |
+| Thermometer | SHT31-D breakout | **fitted** 2026-10-08 on `D4`/`D5`, telemetry only |
 | Panel | Waveshare 18 V / 10 W | on hand, its own — see [`solar.md`](solar.md) |
 
 Nothing else. No boost module, no sense resistor, no PWM expander, no gate
