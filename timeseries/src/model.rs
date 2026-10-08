@@ -81,6 +81,14 @@ pub struct ChannelMeta {
     pub unit: String,
     /// `"temperature"`, from `dev_cla`. Empty where the firmware omits it.
     pub device_class: String,
+    /// `"total_increasing"`, from `stat_cla`. What tells a meter reading from a
+    /// measurement: a period's consumption is a difference of the former, and
+    /// a mean of it means nothing (see `questdb::periods`).
+    pub state_class: String,
+    /// `"diagnostic"` for a channel about the device rather than the house --
+    /// a camera meter's raw digit string, a CPU temperature. The period view
+    /// leaves those out.
+    pub entity_category: String,
     /// The node's display name, from the discovery payload's `dev.name`.
     pub node_name: String,
 }

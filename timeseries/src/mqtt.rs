@@ -258,6 +258,8 @@ pub fn parse_discovery(payload: &[u8]) -> Option<ChannelMeta> {
         name: get("name", "name"),
         unit: get("unit_of_meas", "unit_of_measurement"),
         device_class: get("dev_cla", "device_class"),
+        state_class: get("stat_cla", "state_class"),
+        entity_category: get("ent_cat", "entity_category"),
         node_name: json
             .get("dev")
             .or_else(|| json.get("device"))
@@ -362,7 +364,10 @@ async fn handle(
             let at = match measurement.at {
                 Some(at) => at,
                 None if retained => {
-                    debug!(topic, "ignoring a retained reading that carries no timestamp");
+                    debug!(
+                        topic,
+                        "ignoring a retained reading that carries no timestamp"
+                    );
                     shared.stats().record_skipped();
                     return;
                 }
@@ -701,6 +706,7 @@ mod tests {
         assert_eq!(meta.name, "Luft Temperatur");
         assert_eq!(meta.unit, "°C");
         assert_eq!(meta.device_class, "temperature");
+        assert_eq!(meta.state_class, "measurement");
         assert_eq!(meta.node_name, "Schlafzimmer");
     }
 
@@ -725,6 +731,15 @@ mod tests {
         assert_eq!(meta.unit, "ppm");
         assert_eq!(meta.device_class, "co2");
         assert_eq!(meta.node_name, "Anderes");
+        // The water meters' discovery comes from AI-on-the-edge, not from this
+        // firmware, and spells everything out.
+        let meter = br#"{"name":"Value","device_class":"water","state_class":"total_increasing"}"#;
+        assert_eq!(
+            parse_discovery(meter).unwrap().state_class,
+            "total_increasing"
+        );
+        let raw = br#"{"name":"Raw Value","state_class":"total_increasing","entity_category":"diagnostic"}"#;
+        assert_eq!(parse_discovery(raw).unwrap().entity_category, "diagnostic");
     }
 
     #[test]
