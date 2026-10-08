@@ -774,3 +774,32 @@ when an expected sensor is missing.
 **LEDC is not exercised yet.** The lamp went straight back to sleep outside its
 window; the first evening on this image is the first test of the PWM on the
 1.1 port. Six of six nodes are now on the port.
+
+## 2026-10-08 — solarleuchte — charger output set to 4.20 V, and a calibration reference with it
+
+The MPPT module's trimpot was set to **4.20 V** at `BAT+` with no cell
+connected, panel at 22.8 V on the input. This is the module
+[`solarleuchte.md`](solarleuchte.md#the-charger-has-a-trimpot-and-it-is-the-dangerous-kind)
+describes — the class `solar.md` rejected for `terrasse` precisely because its
+charge voltage is a trimpot shipped at an arbitrary setting.
+
+**What it does to the data**: `battery_voltage` on this node now has a defined
+ceiling. Before this the cell's upper plateau was whatever the pot happened to
+be at, so a reading near full charge said nothing about the cell.
+
+**And it answers a question that was stuck.** The divider on `D2` reads about
+40 mV low — the firmware said 4160 mV on 2026-10-05 while the old charger's LED
+claimed termination — but it could not be trimmed, because that reference was a
+nominal 4.2 V ±1 %, the same size as the error. The termination is now set
+against a multimeter, so the plateau the firmware reports on the next full
+charge *is* the divider's error. Expect ~4.16 V if the earlier reading holds;
+anything above 4.25 V is the pot, not the divider.
+
+`R_TOP_KOHM` / `R_BOTTOM_KOHM` are fleet-wide, so acting on it moves
+`terrasse`'s reading too. Not done yet.
+
+**Still open on this node**: `RCS` is the 0.12 Ω it shipped with, i.e. 1 A of
+charge current, and wants 0.5 Ω before the first frost — the rate is what makes
+sub-zero charging dangerous. And the SHT31-D of the 13:35 entry above is still
+not fitted, which is the measurement that would say whether sub-zero charging
+ever actually happens here.
