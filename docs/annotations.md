@@ -656,3 +656,19 @@ join, NTP timestamps, RSSI through `esp-wifi-sys-esp32c3`, the SHT31-D, the
 version topic in the new `<node>-<release>-<commit>` form (#39), and no
 rollback — still slot 0 after the third attempt, so the trial was confirmed.
 The other five nodes are still on their old images.
+
+## 2026-10-08 10:21 / 10:22 — kueche — esp-hal 1.1
+
+`kueche-0.2.0-58aaadd`, the same port as `bad` six hours earlier (only the fleet
+log differs between the two commits), offered at 10:21:31 and running at
+10:22:38: slot 1 → **slot 0**, `seq` 4 → **5**.
+
+| | before | after |
+| --- | --- | --- |
+| version | `kueche-6c81631` | `kueche-0.2.0-58aaadd` |
+| `boot_count` | 7 | 8 (the update's own reset) |
+| `reset_count` | 7 | **1** (RTC RAM re-layout, as on `bad`) |
+
+Three rounds by 10:26 at 133 s and 123 s apart, no new boots, still slot 0 after
+the third attempt, so confirmed. `bad` had by then run six hours on the port
+with `boot_count` unchanged at 13.
