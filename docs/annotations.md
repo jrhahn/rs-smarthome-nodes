@@ -672,3 +672,23 @@ log differs between the two commits), offered at 10:21:31 and running at
 Three rounds by 10:26 at 133 s and 123 s apart, no new boots, still slot 0 after
 the third attempt, so confirmed. `bad` had by then run six hours on the port
 with `boot_count` unchanged at 13.
+
+## 2026-10-08 10:49 / 10:51 — schlafzimmer — esp-hal 1.1, and a `reset_reason` 256 that is not a panic
+
+`schlafzimmer-0.2.0-6f2c56e` offered at 10:49:30, picked up at the end of the
+10:50:29 round, running at 10:51:00: slot 1 → **slot 0**, `seq` 2 → **3**. The
+node came from `c0b36ee` (2026-09-18), older than `boot_count`, so that counter
+starts here at 1.
+
+**`reset_reason` reads 256 (`PANIC`), and the evidence says it is RTC RAM, not a
+crash.** The new image's `FLAGS` word sits where the old image left other data,
+and bit 4 happened to be set. A panic in the new image would have meant a second
+boot, and `boot_count` stayed at 1 across the next three rounds. What it cannot
+rule out is a panic *before* `note_boot` on the very first start — the same
+init path ran clean on `bad` and `kueche`, which makes that unlikely. The value
+is latched and will read 256 until the next reset; it is not repeating.
+
+CO₂ was missing from the first round only — periodic mode had not produced its
+first sample yet — and present from 10:52 (569, 592 ppm), which is the SCD41's
+first run on the 1.1 port. Rounds at 60 s, still slot 0 after the third, so
+confirmed.
