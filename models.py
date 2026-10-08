@@ -2212,10 +2212,16 @@ SL_RABBET_CLR = 0.2
 SL_PLUG_W, SL_PLUG_H = 13.0, 9.0
 SL_PLUG_Y = SL_BOARD_Y
 
-# Corner columns outside the walls: M3 x 35 up through the body into a
-# heat-set insert in the lid. The same insert and pilot as terrasse's posts.
-SL_COL_D = 9.0
-SL_COL_XY = [(sx * (SL_OUT_X / 2 + 1.5), sy * (SL_OUT_Y / 2 + 1.5))
+# Corner columns: M3 x 35 up through the body into a heat-set insert in the
+# lid. The same insert and pilot as terrasse's posts.
+#
+# Centred on the box's corner point, not outside it. The first version stood
+# 1.5 mm out and met the wall along a sliver, which printed as a post glued
+# to a corner rather than part of it. On the corner point half the column is
+# wall: it reaches 5 mm into the interior's corners, which the fit check below
+# clears -- the tightest is the charger's outer corner at 0.6 mm.
+SL_COL_D = 10.0
+SL_COL_XY = [(sx * SL_OUT_X / 2, sy * SL_OUT_Y / 2)
              for sx in (-1, 1) for sy in (-1, 1)]
 SL_SCREW_CLEAR, SL_SCREW_HEAD, SL_HEAD_DEPTH = 3.4, 6.2, 3.5
 SL_INSERT_PILOT, SL_INSERT_DEPTH = 4.0, 6.0
