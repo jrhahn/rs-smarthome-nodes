@@ -124,6 +124,7 @@ below, which compares every zoom level against a full scan of the raw table.
 | `GET /` | the dashboard (three embedded files, no CDN, no build step) |
 | `GET /api/overview` | every channel at once: labels, last value, and a sparkline |
 | `GET /api/series` | one channel, full resolution |
+| `GET /api/periods` | every channel per day / week / month in local time; meters as consumption |
 | `GET /api/annotations` | the notes in a window; `POST` writes one |
 | `POST /api/annotations/void` | takes one back, by `at_ms` and `node` |
 | `GET /api/channels` | the channel list without any series — for scripts |
@@ -133,6 +134,33 @@ below, which compares every zoom level against a full scan of the raw table.
 channel. Thirty-one round trips to paint a page would be the obvious way and the
 wrong one; the rollups are already grouped by channel, so the same `SAMPLE BY`
 without a `node`/`sensor` filter answers all of them together.
+
+## Periods: per day, week and month
+
+`GET /api/periods?period=day|week|month&count=N` answers the question the
+sliding window cannot: how much water did Tuesday take, is this month's
+electricity more than last month's. Periods start where the house's day starts —
+local midnight, Monday, the 1st, in `Europe/Berlin` — via `SAMPLE BY 1d|1w|1M
+ALIGN TO CALENDAR TIME ZONE`.
+
+- **Meters** — channels whose discovery message says `state_class`
+  `total_increasing` or `total` — are reported as **consumption**: the period's
+  last reading minus the previous period's last reading. Not the maximum: the
+  water meters are read by a camera, a misread digit sends one reading up and
+  the next back, and differences of last readings still sum to exactly the
+  meter's movement over the range. A period that went backwards (misread,
+  reset) is kept and flagged `approx`; so is the first period of a history,
+  which has nothing to subtract.
+- **Everything else** gets min / mean / max per period.
+
+Meters are read from the base table, because the rollups keep no `last()`;
+measurements from `readings_1h`, whose hourly buckets line up with local days in
+both CET and CEST.
+
+The page shows them as a second view (**Periods** in the header, `#p/day`): a bar
+per period for every meter with a unit, unitless counts folded away beneath,
+and a table of means per node. Channels Home Assistant marks `diagnostic` are
+left out.
 
 ## What the dashboard shows
 

@@ -20,6 +20,13 @@ const RANGES = [
   { key: "3y", label: "3 y", ms: 3 * 365 * 24 * 3600e3 },
 ];
 
+/// The calendar periods of the second view, and how one is written on screen.
+const PERIODS = [
+  { key: "day", label: "Day" },
+  { key: "week", label: "Week" },
+  { key: "month", label: "Month" },
+];
+
 const REFRESH_MS = 30000;
 // `en-GB` rather than the browser's locale: a dashboard whose decimal point
 // moves depending on who opens it makes two screenshots of the same reading
@@ -118,6 +125,11 @@ const state = {
   notes: [],
   hover: null,
   showTable: false,
+  // The second view: null for the live one, otherwise "day" / "week" /
+  // "month". Exclusive with `selected` -- the period view has no single
+  // channel to zoom into.
+  periods: null,
+  periodData: null,
 };
 
 /// How many earlier windows `compare` draws behind the current one.
@@ -155,6 +167,14 @@ const dom = {
   exportCsv: el("export-csv"),
   noteList: el("note-list"),
   dialog: el("note-dialog"),
+  periods: el("periods"),
+  periodChoice: el("period-choice"),
+  periodsHint: el("periods-hint"),
+  meters: el("meters"),
+  gauges: el("gauges"),
+  periodsFoot: el("periods-foot"),
+  viewLive: el("view-live"),
+  viewPeriods: el("view-periods"),
 };
 
 // --- helpers ----------------------------------------------------------------
@@ -250,6 +270,12 @@ function formatTime(ms, spanMs) {
 
 function readHash() {
   const parts = decodeURIComponent(location.hash.slice(1)).split("/");
+  if (parts[0] === "p") {
+    state.selected = null;
+    state.periods = PERIODS.some((p) => p.key === parts[1]) ? parts[1] : "day";
+    return;
+  }
+  state.periods = null;
   if (parts[0] === "c" && parts[1] && parts[2]) {
     state.selected = { node: parts[1], sensor: parts[2] };
   } else {
@@ -269,6 +295,11 @@ function readHash() {
 }
 
 function writeHash() {
+  if (state.periods) {
+    const next = `#p/${state.periods}`;
+    if (location.hash !== next) history.replaceState(null, "", next);
+    return;
+  }
   const slot = state.zoom
     ? `${Math.round(state.zoom.from / 1000)}-${Math.round(state.zoom.to / 1000)}`
     : state.range;
@@ -336,6 +367,19 @@ async function loadDetail() {
     state.compareSeries = [];
     dom.foot.innerHTML = `<span class="error">${esc(e.message)}</span>`;
   }
+}
+
+async function loadPeriods() {
+  try {
+    state.periodData = await getJSON(`/api/periods?period=${state.periods}`);
+    dom.periodsHint.hidden = state.periodData.channels.length > 0;
+    dom.periodsHint.textContent = "No data in these periods.";
+  } catch (e) {
+    dom.periodsHint.hidden = false;
+    dom.periodsHint.innerHTML = `<span class="error">${esc(e.message)}</span>`;
+    return;
+  }
+  renderPeriods();
 }
 
 async function loadHealth() {
@@ -447,6 +491,156 @@ function drawSparkline(canvas, points) {
   ctx.fillStyle = css("--series");
   ctx.fill();
 }
+
+// --- periods ----------------------------------------------------------------
+
+/// ISO 8601 week number: the week with the year's first Thursday is week 1.
+function isoWeek(ms) {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7)); // that week's Thursday
+  const week1 = new Date(d.getFullYear(), 0, 4);
+  return 1 + Math.round(((d - week1) / 86400e3 - 3 + ((week1.getDay() + 6) % 7)) / 7);
+}
+
+/// How a period is named. `t` is its start, local midnight as an instant; the
+/// browser is in the same time zone as the house, so `Date` reads it right.
+function periodLabel(t, period) {
+  const d = new Date(t);
+  if (period === "day")
+    return d.toLocaleDateString(LOCALE, { weekday: "short", day: "2-digit", month: "2-digit" });
+  if (period === "week")
+    return `W${isoWeek(t)} · ${d.toLocaleDateString(LOCALE, { day: "2-digit", month: "2-digit" })}`;
+  return d.toLocaleDateString(LOCALE, { month: "short", year: "numeric" });
+}
+
+/// The same, in the few characters a narrow bar has room for.
+function shortLabel(t, period) {
+  const d = new Date(t);
+  if (period === "day") return String(d.getDate());
+  if (period === "week") return `W${isoWeek(t)}`;
+  return d.toLocaleDateString(LOCALE, { month: "short" });
+}
+
+function renderPeriods() {
+  const data = state.periodData;
+  if (!data) return;
+  const period = data.period;
+  // A channel about the device rather than the house -- a camera meter's raw
+  // reading, a CPU temperature -- is no consumption and no climate.
+  const shown = data.channels.filter((c) => c.periods.length && c.entity_category !== "diagnostic");
+  // Meters with a unit are what this view is for: kWh and m³. Unitless running
+  // totals (birds, restarts) are counts, kept but folded away.
+  const meters = shown.filter((c) => c.meter && c.unit);
+  const counts = shown.filter((c) => c.meter && !c.unit);
+  // Everything else with a unit; a monthly mean of a reset code is noise.
+  const gauges = shown.filter((c) => !c.meter && c.unit);
+
+  const meterCard = (c) => {
+        const f = formatterFor(c);
+        const top = Math.max(...c.periods.map((p) => p.delta), 0) || 1;
+        const total = c.periods.reduce((sum, p) => sum + p.delta, 0);
+        const bars = c.periods
+          .map((p, i) => {
+            const running = i === c.periods.length - 1;
+            const value = withUnit(p.delta, c.unit, f);
+            const note =
+              p.delta < 0
+                ? " — the meter read lower than at the end of the period before: a misread or a reset"
+                : p.approx
+                  ? " — lower bound: no reading before this period"
+                  : "";
+            const when = periodLabel(p.t, period) + (running ? " (so far)" : "");
+            return (
+              `<div class="bar${p.approx ? " approx" : ""}${running ? " running" : ""}" title="${esc(`${when}: ${value}${note}`)}">` +
+              `<span class="bar-value">${esc(f.format(p.delta))}</span>` +
+              `<span class="bar-fill" style="height:${Math.max(0, (p.delta / top) * 100).toFixed(1)}%"></span>` +
+              `<span class="bar-label">${esc(c.periods.length > 8 ? shortLabel(p.t, period) : periodLabel(p.t, period))}</span>` +
+              `</div>`
+            );
+          })
+          .join("");
+        return (
+          `<article class="meter">` +
+          `<div class="meter-head"><h3>${esc(c.node_name || c.node)} · ${esc(label(c))}</h3>` +
+          `<p class="sub">${esc(withUnit(total, c.unit, f))} over ${c.periods.length} ${esc(period)}s</p></div>` +
+          `<div class="bars${c.periods.length > 8 ? " dense" : ""}">${bars}</div>` +
+          `</article>`
+        );
+  };
+  const wasOpen = dom.meters.querySelector("details.counts")?.open;
+  dom.meters.innerHTML =
+    (meters.map(meterCard).join("") || `<p class="hint">No meters report in these periods.</p>`) +
+    (counts.length
+      ? `<details class="counts"><summary>Counts</summary><div class="meters">${counts.map(meterCard).join("")}</div></details>`
+      : "");
+  if (wasOpen) dom.meters.querySelector("details.counts").open = true;
+
+  const byNode = new Map();
+  for (const c of gauges) {
+    if (!byNode.has(c.node)) byNode.set(c.node, []);
+    byNode.get(c.node).push(c);
+  }
+  const parts = [];
+  for (const [node, channels] of byNode) {
+    // Newest period first, across the widest history any channel of the node has.
+    const starts = [...new Set(channels.flatMap((c) => c.periods.map((p) => p.t)))].sort((a, b) => b - a);
+    const head = starts.map((t) => `<th scope="col">${esc(periodLabel(t, period))}</th>`).join("");
+    const rows = channels
+      .map((c) => {
+        const f = formatterFor(c);
+        const cells = starts
+          .map((t) => {
+            const p = c.periods.find((x) => x.t === t);
+            if (!p) return "<td>—</td>";
+            return `<td title="${esc(`min ${f.format(p.lo)} · max ${f.format(p.hi)}`)}">${esc(f.format(p.av))}</td>`;
+          })
+          .join("");
+        return `<tr><th scope="row">${esc(label(c))}${c.unit ? ` <span class="unit">${esc(c.unit)}</span>` : ""}</th>${cells}</tr>`;
+      })
+      .join("");
+    parts.push(
+      `<details class="gauge-node"><summary>${esc(channels[0].node_name || node)}</summary>` +
+        `<div class="table-scroll"><table><thead><tr><th scope="col"></th>${head}</tr></thead><tbody>${rows}</tbody></table></div>` +
+        `</details>`,
+    );
+  }
+  // Keep whichever nodes the reader had opened across the 30 s refresh.
+  const open = new Set([...dom.gauges.querySelectorAll("details[open] summary")].map((s) => s.textContent));
+  dom.gauges.innerHTML = parts.join("");
+  for (const d of dom.gauges.querySelectorAll("details")) {
+    if (open.has(d.querySelector("summary").textContent)) d.open = true;
+  }
+
+  dom.periodsFoot.textContent = `Periods in ${data.time_zone}, from ${data.source}. The last period is still running.`;
+}
+
+function renderPeriodChoice() {
+  dom.periodChoice.innerHTML = PERIODS.map(
+    (p) => `<button data-period="${p.key}" aria-pressed="${p.key === state.periods}">${p.label}</button>`,
+  ).join("");
+  for (const button of dom.periodChoice.querySelectorAll("button")) {
+    button.addEventListener("click", () => {
+      state.periods = button.dataset.period;
+      writeHash();
+      renderPeriodChoice();
+      show();
+    });
+  }
+}
+
+dom.viewLive.addEventListener("click", () => {
+  state.periods = null;
+  writeHash();
+  show();
+});
+
+dom.viewPeriods.addEventListener("click", () => {
+  state.selected = null;
+  state.periods = state.periods || "day";
+  writeHash();
+  show();
+});
 
 // --- detail -----------------------------------------------------------------
 
@@ -956,6 +1150,7 @@ el("home").addEventListener("click", () => {
   // everything", and an absolute window left over from one channel is not
   // everything.
   state.selected = null;
+  state.periods = null;
   state.zoom = null;
   state.zoomHome = null;
   renderRanges();
@@ -1051,6 +1246,7 @@ dom.dialog.addEventListener("close", async () => {
 });
 
 window.addEventListener("resize", () => {
+  if (state.periods) return;
   if (state.selected) drawChart();
   else renderOverview();
 });
@@ -1089,13 +1285,24 @@ function renderRanges() {
 /// units -- flipped the page back to the overview and a deep link never
 /// survived its own first paint.
 function applyView() {
-  const detail = Boolean(state.selected);
-  dom.overview.hidden = detail;
+  const periods = Boolean(state.periods);
+  const detail = !periods && Boolean(state.selected);
+  dom.overview.hidden = detail || periods;
   dom.detail.hidden = !detail;
+  dom.periods.hidden = !periods;
+  dom.ranges.hidden = periods;
+  dom.periodChoice.hidden = !periods;
+  dom.viewLive.setAttribute("aria-pressed", String(!periods));
+  dom.viewPeriods.setAttribute("aria-pressed", String(periods));
+  if (periods) renderPeriodChoice();
 }
 
 function show() {
   applyView();
+  if (state.periods) {
+    loadPeriods();
+    return;
+  }
   // The channel list carries the names and units both views label with, so it
   // is fetched either way.
   loadOverview();

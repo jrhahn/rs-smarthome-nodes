@@ -26,6 +26,14 @@ reconstruction and reads like one.
 
 ### Added
 
+- **The dashboard has a second view: values per day, week and month** (#52).
+  Periods follow the house's calendar (`Europe/Berlin`, weeks from Monday).
+  Meters — electricity in kWh, water in m³, anything announced
+  `total_increasing` — show their consumption per period as bars, computed from
+  the last reading of each period so a camera meter's misread cancels itself
+  out; everything else shows its mean, min and max. New endpoint
+  `/api/periods`; `ChannelMeta` now carries `state_class` and
+  `entity_category` from the discovery messages.
 - **A battery node parks on a low cell.** Below 3.0 V (`battery::LOW_CELL_MV`)
   `terrasse` stops polling the scale, reports once and sleeps 3 h between
   checks, each of which publishes. It resumes above 3.3 V, so a cell that

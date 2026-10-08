@@ -15,7 +15,14 @@
         <h1><button id="home" type="button">History</button></h1>
         <p class="sub" id="brand-sub">the sensor archive</p>
       </div>
+      <!-- Live: a window sliding with the clock. Periods: whole days, weeks and
+           months in local time -- what the meters are for. -->
+      <div class="ranges views" role="group" aria-label="View">
+        <button id="view-live" type="button">Live</button>
+        <button id="view-periods" type="button">Periods</button>
+      </div>
       <div class="ranges" id="ranges" role="group" aria-label="Time range"></div>
+      <div class="ranges" id="period-choice" role="group" aria-label="Period" hidden></div>
       <div class="health" id="health" aria-live="polite">…</div>
     </header>
 
@@ -78,6 +85,18 @@
           <h3>Notes in this range</h3>
           <ul id="note-list"></ul>
         </section>
+      </section>
+
+      <!-- Periods: consumption per day / week / month for the meters, and the
+           mean of everything else over the same calendar periods. -->
+      <section id="periods" hidden>
+        <p class="hint" id="periods-hint">Loading …</p>
+        <h2 class="section-head">Consumption</h2>
+        <div id="meters" class="meters"></div>
+        <h2 class="section-head">Measurements</h2>
+        <p class="sub">Mean per period; hover a value for its min and max.</p>
+        <div id="gauges"></div>
+        <p class="foot" id="periods-foot"></p>
       </section>
     </main>
 
