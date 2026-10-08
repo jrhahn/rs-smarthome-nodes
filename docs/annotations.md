@@ -630,3 +630,29 @@ all. `e3c08a2` is older than `d82fd60` (2026-10-06), the commit that switched
 the slot on, so **the SHT31 has never been flashed to this board**. There is no
 evidence yet on whether the sensor itself is fitted or wired correctly; the
 next flash will answer that.
+
+## 2026-10-08 04:11 / 04:13 — bad — first image on esp-hal 1.1
+
+`bad-0.2.0-42dd3b7`, the esp-hal 1.1 port (#32), offered over the air at
+04:11:54 and running at 04:13:24: slot 1 → **slot 0**, `seq` 6 → **7**. It is
+the first image built with espflash 4.x (`save-image`) and the first carrying an
+ESP-IDF app descriptor; the board's bootloader, flashed by espflash 3 on
+2026-09-17, took it without complaint. Header bytes match the old images
+(chip id 5, min rev v0.3).
+
+| | before | after |
+| --- | --- | --- |
+| version | `bad-6c81631` | `bad-0.2.0-42dd3b7` |
+| `boot_count` | 12 | 13 (the update's own reset) |
+| `reset_count` | 4 | **1** |
+| round spacing | ~125 s | 123–132 s |
+
+**`reset_count` dropping to 1 is the RTC RAM re-layout, not an event.** The
+statics moved with the HAL, so the counter restarted; `boot_count`, which lives
+in flash, carried on. Read `reset_count` across this line as two series.
+
+Seen working on the first four rounds: deep-sleep wake (no new boots), Wi-Fi
+join, NTP timestamps, RSSI through `esp-wifi-sys-esp32c3`, the SHT31-D, the
+version topic in the new `<node>-<release>-<commit>` form (#39), and no
+rollback — still slot 0 after the third attempt, so the trial was confirmed.
+The other five nodes are still on their old images.
