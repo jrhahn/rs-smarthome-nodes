@@ -803,3 +803,34 @@ charge current, and wants 0.5 Ω before the first frost — the rate is what mak
 sub-zero charging dangerous. And the SHT31-D of the 13:35 entry above is still
 not fitted, which is the measurement that would say whether sub-zero charging
 ever actually happens here.
+
+## 2026-10-08 ~15:15 — terrasse — aluminium beam replaces the PLA spine, tare, `temp_coeff` off
+
+The printed PLA part the load cell hung from — the creep source named on
+2026-09-27 above — was replaced by an aluminium bending beam. **Expect a step in
+`weight` here; it is a new mount, not a new bird.**
+
+| time | event | `weight` | air |
+| --- | --- | --- | --- |
+| 15:20:17 | first report on the new beam, old zero | 521.6 g | 21.4 °C |
+| 15:21:53 | out-of-cadence round (the 516 g read as a load) | 516.0 g | 20.8 °C |
+| 15:22:06 | tare press taken (pressed 15:21:54) | — | 20.8 °C |
+| 15:26:51 | `temp_coeff` 8.6 → **0**, retained | | |
+| 15:34:19 | heartbeat, still corrected with 8.6 | −22.6 g (≈ −50 raw) | 17.6 °C |
+| 15:46:23 | heartbeat, uncorrected | **−62.7 g** | 17.0 °C |
+
+**`temp_coeff` is off, deliberately.** The 8.6 g/K was the PLA mount straining
+with temperature; carried over to an aluminium beam it would have injected its
+own error, about 9 g per kelvin away from the tare temperature. Re-measure it
+over a quiet night once the zero holds, and enter it only if the beam shows one.
+
+**The tare did not hold, and that is the beam settling, not the tare.** The beam
+was still swinging slightly when it was pressed, and the zero then walked
+−12.6 g in twelve minutes across only 0.6 K. Re-tare once consecutive heartbeats
+agree within a few grams. Until then the published weight is offset; presence
+detection recovers on its own once the baseline is adopted
+(`UNEXPLAINED_ADOPT_AFTER_SECS`).
+
+Still to do for this mount, in this order: check `scale_factor` (1862.8) with a
+known weight if the cell itself changed, let the zero settle, tare, then a night
+for `temp_coeff`.
