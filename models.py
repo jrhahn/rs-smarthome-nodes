@@ -2224,7 +2224,9 @@ SL_COL_D = 10.0
 SL_COL_XY = [(sx * SL_OUT_X / 2, sy * SL_OUT_Y / 2)
              for sx in (-1, 1) for sy in (-1, 1)]
 SL_SCREW_CLEAR, SL_SCREW_HEAD, SL_HEAD_DEPTH = 3.4, 6.2, 3.5
-SL_INSERT_PILOT, SL_INSERT_DEPTH = 4.0, 6.0
+# 4.5 mm, not terrasse's 4.0: the M3 inserts in hand did not go into 4.0 in
+# the first print of this lid. 2.75 mm of column wall is left around it.
+SL_INSERT_PILOT, SL_INSERT_DEPTH = 4.5, 6.0
 
 # Panel cable: M8 gland through the floor, in the charger zone beside the
 # charger, with the 13 mm its nut needs kept clear inside.
