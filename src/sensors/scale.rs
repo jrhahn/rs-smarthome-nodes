@@ -64,7 +64,7 @@ pub const DESCRIPTORS: &[EntityDescriptor] = &[
 /// A `#[ram(unstable(rtc_fast, persistent))]` word is never zeroed by the startup code,
 /// so one that has just been *added to the firmware* comes up holding whatever
 /// was in that slot. A cold-boot check does not cover it: a reflash preserves
-/// RTC RAM (see FLASHING.md), so the first boot on new firmware is not a cold
+/// RTC RAM (see docs/flashing.md), so the first boot on new firmware is not a cold
 /// boot and the counter came up at 2 345 324 652 on the terrace node.
 ///
 /// The count is therefore stored twice -- the value and this magic XORed with

@@ -8,14 +8,8 @@ of sensors, selected with `NODE=<name>` at build time.
 
 ## Fleet
 
-| `NODE=` | Node | Sensors | Power profile |
-| --- | --- | --- | --- |
-| `terrasse` (default) | Terrasse | load cell (HX711) + DS18B20 + SHT31-D | battery, deep-sleep |
-| `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | mains, always-on |
-| `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 + SGP41 | mains (fan) |
-| `kueche` | Küche | SHT31-D | mains, duty-cycled |
-| `bad` | Bad | SHT31-D | mains, duty-cycled |
-| `terrasse` | Terrasse | none yet — every slot off while it is wired up | battery, deep-sleep |
+The node table — which `NODE=` carries which sensors on which power profile —
+is in the [README](../README.md#the-fleet); `src/node.rs` is its source.
 
 A node's sensors need not share a cadence: `sample_secs` is the base round, and
 a slot may ask for a slower one of its own (`Slot::every`). `wohnzimmer` is the
@@ -34,8 +28,9 @@ notes — is in [wiring.md](wiring.md).
 | SHT31-D | I²C 0x44 | temperature, humidity | done (`sensors/sht31.rs`, #13) |
 | SCD41 | I²C 0x62 | CO₂, temperature, humidity | done (`sensors/scd41.rs`, #14) |
 | SDS011 | UART 9600 | PM2.5, PM10 | done (`sensors/sds011.rs`, #15) |
+| SGP41 | I²C 0x59 | VOC index, NOx index | done (`sensors/sgp41.rs`) |
 
-I²C addresses do not clash, so SHT31-D + SCD41 share one bus. SDS011 is the only
+I²C addresses do not clash, so SHT31-D, SCD41 and SGP41 share one bus. SDS011 is the only
 UART sensor, and on `wohnzimmer` it runs alongside that bus. HX711 stays a
 blocking bit-bang critical section.
 
@@ -44,10 +39,6 @@ SHT31 (`Slot::compensated`): a nephelometer over-reads in damp air, so the
 κ-Köhler growth factor is divided back out and both the corrected and the raw
 values are published. κ is a Home Assistant slider, because it is a property of
 the room's aerosol rather than of the sensor.
-
-> **Bench status:** every driver is implemented and the whole fleet builds, but
-> the I²C/UART drivers have not yet been run against real hardware — the bus
-> timing and the SDS011 warm-up in particular want a session on the bench.
 
 ## Abstraction (#12)
 
@@ -357,20 +348,20 @@ the device (identifiers = node id) and all its entities. State topics are
 `<namespace>/<node>/<prefix><key>`; the config/command topics stay
 `<namespace>/<node>/config/<key>`.
 
-"Once per power cycle" is a flag in RTC RAM: the messages are retained, so
-re-sending them on every deep-sleep wake would only cost battery, while a cold
-power-on re-announces exactly when the broker may have lost them.
-
-Power cycle means power cycle. RTC fast RAM survives a reflash and the reset
-that follows it, so flashing a board does not re-announce its entities — pull
-the power for that.
+Whether to announce is decided by a digest of every topic and payload the
+node would publish, kept in RTC RAM (`discovery::announcement_tag`): a changed
+sensor set, cadence or identity re-announces on the next connect, and an
+unchanged one sends nothing, so a deep-sleep wake costs no airtime for it. It
+replaced a plain "announced once per power cycle" flag, which survived reflashes
+and even short power cuts and so could stay wrong for days — see
+[home-assistant.md](home-assistant.md#forcing-a-re-announce).
 
 Every node now publishes under the fleet's own `smarthome/<node>/…` namespace.
 The outdoor node used to be the exception — it kept a historical `birds/scale/…`
 namespace and mirrored its weight to a pre-discovery `birds/scale/state` topic,
 both carried purely so hand-declared Home Assistant entities would keep working.
 That history was deliberately let go when the node was renamed to `terrasse`,
-and `legacy_weight_topic` is unused across the fleet as a result.
+and the mirror (`legacy_weight_topic`) has since been removed from the firmware.
 
 ### Command entities
 
@@ -666,10 +657,10 @@ lines go to a log that may be scrolling in someone else's terminal.
 - Console provisioning is the only way to *set* credentials; there is no way to
   rotate them across the fleet remotely. Changing the router's passphrase means
   visiting each board with a cable.
-- The battery figures in *Where the battery actually goes* are estimates from
-  datasheets, with one measured number in them. Until a multimeter has been in
-  series with the cell, both radio options in *Radio options, parked behind a
-  measurement* stay parked — including the cheap one.
+- The battery budget is measured only as a whole (~10 mA, 2026-09-16, see
+  *The measurement happened*); where the ~9.5 mA that is not the radio goes is
+  still open. Both radio options stay parked — the measurement put the radio at
+  ~5 % of the budget.
 - RTC pad hold on the HX711's `SCK` (issue #5) is still undone, so the
   amplifier's state during deep sleep is undefined rather than powered down.
   Deliberate: deep sleep now lasts one poll interval per publish, so it is not

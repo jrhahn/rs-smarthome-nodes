@@ -6,13 +6,13 @@ name: CAD
 on:
   push:
     branches: [develop, main]
-    paths: ['models.py', 'cad-models/**', '.github/workflows/cad.yml']
+    paths: ['cad/**', '.github/workflows/cad.yml']
   pull_request:
-    paths: ['models.py', 'cad-models/**', '.github/workflows/cad.yml']
+    paths: ['cad/**', '.github/workflows/cad.yml']
   workflow_dispatch:
 
 jobs:
-  # The enclosure CAD. Nothing used to run models.py here at all, so a tracked
+  # The enclosure CAD. Nothing used to run cad/models.py here at all, so a tracked
   # model could drift from the source that produced it and nothing said so --
   # which is exactly what `terrasse_floor.stl` had been doing since 2026-09-18.
   #
@@ -22,7 +22,7 @@ jobs:
   # different OpenCASCADE builds break differently -- same points, same count,
   # different diagonals. Diffing meshes here would pin the repo to whichever
   # machine GitHub happens to run, and would fail for a part that is correct.
-  # See `_export` in models.py for the measurements behind that.
+  # See `_export` in cad/models.py for the measurements behind that.
   models:
     name: Enclosure STEPs match models.py
     runs-on: ubuntu-latest
@@ -50,15 +50,15 @@ jobs:
         run: pip install --quiet 'cadquery==2.8.0' 'cadquery-ocp==7.9.3.1.1' 'numpy>=2.0'
 
       - name: Regenerate the models
-        run: python models.py
+        run: python cad/models.py
 
       - name: STEPs must match what models.py produces
         run: |
           # Covers modified, deleted and newly appeared parts alike; the STL
           # churn this deliberately ignores never reaches the filter.
-          dirty=$(git status --porcelain -- cad-models | grep '\.step$' || true)
+          dirty=$(git status --porcelain -- cad/export | grep '\.step$' || true)
           if [ -n "$dirty" ]; then
-            echo "::error::cad-models/*.step do not match models.py — re-run it and commit the result"
+            echo "::error::cad/export/*.step do not match models.py — re-run it and commit the result"
             echo "$dirty"
             git diff --stat -- '*.step'
             exit 1

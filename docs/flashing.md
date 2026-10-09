@@ -1,4 +1,4 @@
-# Building & flashing `rs-smarthome-nodes`
+# Building & flashing
 
 Preparing the firmware and getting it onto a Seeed XIAO ESP32-C3.
 
@@ -39,7 +39,7 @@ cargo install espflash --version '^4'
 
 ## 2. Configure the build
 
-Everything below is baked in at compile time (see [`.env.example`](.env.example);
+Everything below is baked in at compile time (see [`.env.example`](../.env.example);
 `direnv` exports a local `.env` automatically):
 
 | Setting             | Where                                          |
@@ -48,23 +48,24 @@ Everything below is baked in at compile time (see [`.env.example`](.env.example)
 | Wi-Fi SSID / pass   | `SSID` / `PASSWORD` env vars at build          |
 | MQTT broker         | `MQTT_BROKER` env var (dotted IPv4)            |
 | MQTT credentials    | optional `MQTT_USER` / `MQTT_PASSWORD` env vars |
-| MQTT port           | `MQTT_PORT` in [`src/main.rs`](src/main.rs)    |
+| MQTT port           | `MQTT_PORT` in [`src/main.rs`](../src/main.rs)    |
 
 `NODE` is the important one — one image serves the whole fleet:
 
 | `NODE=` | Sensors | Power |
 | --- | --- | --- |
-| `terrasse` (default) | the outdoor node and the bird scale; every slot off while it is wired up | battery, deep sleep |
+| `terrasse` (default) | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
 | `schlafzimmer` | SCD41 + SHT31-D | mains |
-| `wohnzimmer` | SCD41 + SHT31-D + SDS011 | mains |
-| `kueche`, `bad` | SHT31-D | mains |
+| `wohnzimmer` | SCD41 + SHT31-D + SDS011 + SGP41 | mains |
+| `kueche`, `bad` | SHT31-D | mains, duty-cycled |
+| `solarleuchte` | SHT31-D + cell voltage, LED string | battery, deep sleep |
 
 A typo fails the build rather than flashing the wrong personality onto a board:
 
 ```
 error[E0080]: evaluation of constant value failed
   = the evaluated program panicked at 'unknown NODE; expected one of:
-    schlafzimmer, wohnzimmer, kueche, bad, terrasse'
+    schlafzimmer, wohnzimmer, kueche, bad, terrasse, solarleuchte'
 ```
 
 ## 3. Compile
@@ -131,7 +132,7 @@ The table splits the flash into two 1 984 KB application slots either side of a
 selector sector, and keeps `nvs` exactly where it was: the config blob at
 `0x9000`, the identity at `0xA000` and the stored Wi-Fi credentials at `0xB000`
 all stay addressable, so **the migration costs no board its calibration**. The
-reasoning, and what the second slot is for, is in [`docs/ota.md`](docs/ota.md).
+reasoning, and what the second slot is for, is in [`ota.md`](ota.md).
 
 Check what a board actually has before assuming:
 
@@ -252,7 +253,7 @@ prompt.
 
 Whichever route you take: **a reflash does not clear RTC RAM.** The tare
 baseline, the presence flag and the discovery digest all survive it (see
-[`src/state.rs`](src/state.rs)). If the point of the reflash was to clear a bad
+[`src/state.rs`](../src/state.rs)). If the point of the reflash was to clear a bad
 baseline, pull the power afterwards and leave the beam alone for that boot.
 
 The same fact has a sharper edge for *new* firmware. A
@@ -378,20 +379,22 @@ config: offset=8388608 scale=420 threshold=10g idle=2s active=10s
 HX711 raw reading: 8402193
 presence: raw=8402193 baseline=8388608 delta=13585
 weight = 32.3 g
-DS18B20 = 25.1 °C
 SHT31-D found at 0x44
-SHT31-D: air_temperature = 21.4
-SHT31-D: air_humidity = 47.2
+SHT31-D: temperature = 21.4
+SHT31-D: humidity = 47.2
+battery = 3.94 V
 Wi-Fi link up, waiting for DHCP...
 Got IP: 192.168.1.42/24
-published Home Assistant discovery for node 'scale'
+published Home Assistant discovery for node 'terrasse'
 Published 32.3 to smarthome/terrasse/weight
-Published 25.1 to smarthome/terrasse/temperature
+Published 21.4 to smarthome/terrasse/temperature
 Entering deep sleep for 10s
 ```
 
-Idle cycles are much quieter — an empty feeder skips the radio, the DS18B20 and
-the I²C sensors entirely, which is the whole point of the battery profile:
+Idle cycles are much quieter — an empty feeder skips the radio entirely, which
+is the whole point of the battery profile. The SHT31-D is still read on every
+wake, quietly, because the scale's temperature correction needs the air
+temperature before the presence check:
 
 ```
 node 'terrasse' (Terrasse) booted, battery profile
@@ -421,7 +424,7 @@ Published 6.1 to smarthome/wohnzimmer/pm25
 Weight is published in **grams** (converted on-device from the flash-stored
 calibration); the `config:` line shows the values loaded from flash (or
 built-in defaults on a blank device). Calibration and tuning are changed from
-Home Assistant — see the [README](README.md#configure--calibrate-from-home-assistant).
+Home Assistant — see [`home-assistant.md`](home-assistant.md#configure--calibrate-from-home-assistant).
 
 ### If a sensor is quiet
 
@@ -449,13 +452,13 @@ Subscribe on the broker side to confirm the payload:
 mosquitto_sub -h <broker-ip> -t 'smarthome/terrasse/#' -v
 
 # Everything the fleet publishes, including the discovery configs
-mosquitto_sub -h <broker-ip> -t 'smarthome/#' -t 'birds/#' -t 'homeassistant/#' -v
+mosquitto_sub -h <broker-ip> -t 'smarthome/#' -t 'homeassistant/#' -v
 ```
 
 The entities appear in Home Assistant by themselves — each node publishes
 retained discovery configs on its first connect after a power-up, for its
 readings *and* for its calibration/tuning controls. Nothing is declared by hand;
-see [`home-assistant/README.md`](home-assistant/README.md) for the entity list
+see [`home-assistant.md`](home-assistant.md) for the entity list
 and for calibrating the scale.
 
 > **Re-flashing does *not* re-announce discovery.** The "already announced" flag
@@ -517,3 +520,37 @@ Notes:
   disturbs a scale's stored tare/calibration.
 - Remember to clear the retained message (`-r -n`) if you later hand the board
   to a different room by reflashing, or it will provision itself back.
+
+---
+
+## 8. Wi-Fi credentials without a rebuild
+
+A board that cannot join the network cannot be told anything over the network,
+so the way in is the serial console. On a **cold boot** — power actually removed
+and reapplied, not a deep-sleep wake and not a reflash — the firmware listens
+briefly:
+
+```
+wifi: 'your-ssid' (built in)
+wifi: no usable credentials; waiting for the console
+wifi provisioning: ssid <name> / psk <passphrase> / save / clear / show / done
+```
+
+Type into the same serial monitor you are watching the logs in:
+
+```
+ssid MyNetwork
+psk correct horse battery staple
+save
+```
+
+The board stores them in its own flash sector — separate from the calibration
+and the node identity — and restarts into them. `clear` forgets them and returns
+to the credentials the image was built with; `show` reports the SSID and the
+passphrase's length (never its content); `done` carries on booting.
+
+The window is 3 s when the board already has usable credentials, and 2 minutes
+when it has none, since then it has nothing else to be doing. A passphrase may
+contain spaces. If stored credentials are refused three times in a row, the
+board falls back to the build-time pair for the rest of that run, so a typo
+cannot strand it permanently.

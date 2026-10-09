@@ -351,9 +351,6 @@ pub struct NodeConfig {
     /// and an LEDC channel on the board. Unlike every slot above it names no
     /// bus and no sensor — it is an output, and the only one in the fleet.
     pub lamp: Slot,
-    /// Extra topic the weight is mirrored to, for a node whose Home Assistant
-    /// entities predate MQTT discovery (the bird scale's `birds/scale/state`).
-    pub legacy_weight_topic: Option<&'static str>,
 }
 
 impl NodeConfig {
@@ -485,7 +482,6 @@ const SCHLAFZIMMER: NodeConfig = NodeConfig {
     sgp41: Slot::off(),
     battery: Slot::off(),
     lamp: Slot::off(),
-    legacy_weight_topic: None,
 };
 
 /// The busiest mains node: the bedroom's pair plus the fleet's particulate
@@ -525,7 +521,6 @@ const WOHNZIMMER: NodeConfig = NodeConfig {
     sgp41: Slot::on().with_nox(),
     battery: Slot::off(),
     lamp: Slot::off(),
-    legacy_weight_topic: None,
 };
 
 /// Kitchen climate — the same build as [`BAD`], and for the same reason: a room
@@ -557,7 +552,6 @@ const KUECHE: NodeConfig = NodeConfig {
     sgp41: Slot::off(),
     battery: Slot::off(),
     lamp: Slot::off(),
-    legacy_weight_topic: None,
 };
 
 /// The bathroom: the same build as [`KUECHE`], and duty-cycled for the same
@@ -579,7 +573,6 @@ const BAD: NodeConfig = NodeConfig {
     sgp41: Slot::off(),
     battery: Slot::off(),
     lamp: Slot::off(),
-    legacy_weight_topic: None,
 };
 
 /// The terrace: the outdoor node, carrying the bird-feeder scale.
@@ -622,7 +615,6 @@ const TERRASSE: NodeConfig = NodeConfig {
     sgp41: Slot::off(),
     battery: Slot::on_as("battery_", "Batterie"),
     lamp: Slot::off(),
-    legacy_weight_topic: None,
 };
 
 /// The garden lamp: a rebuilt solar light, the only node in the fleet whose
@@ -656,7 +648,6 @@ const SOLARLEUCHTE: NodeConfig = NodeConfig {
     sgp41: Slot::off(),
     battery: Slot::on_as("battery_", "Batterie"),
     lamp: Slot::on(),
-    legacy_weight_topic: None,
 };
 
 /// The fleet, keyed by the name `NODE=` and provisioning accept. The single
@@ -741,10 +732,18 @@ const _: () = {
     }
 };
 
-/// The same names as one string, for error messages. Spelled out rather than
-/// built from [`FLEET`] because it is used in a const-eval `panic!`, which takes
-/// a literal; a test keeps the two in step.
-pub const KNOWN_NODES: &str = "schlafzimmer, wohnzimmer, kueche, bad, terrasse, solarleuchte";
+// The same names as one string, for error messages. Spelled out rather than
+// built from [`FLEET`] because the const-eval `panic!` in `select` needs a
+// literal, and a macro so that panic and `KNOWN_NODES` share one; a test keeps
+// it in step with `FLEET`.
+macro_rules! known_nodes {
+    () => {
+        "schlafzimmer, wohnzimmer, kueche, bad, terrasse, solarleuchte"
+    };
+}
+
+/// The fleet's names as one string, for error messages.
+pub const KNOWN_NODES: &str = known_nodes!();
 
 /// The node this image was **built** for — the fallback when flash carries no
 /// provisioned identity. Use [`active`] for the identity actually in force.
@@ -773,7 +772,7 @@ const fn select(id: &str) -> NodeConfig {
     match by_name(id) {
         Some(cfg) => cfg,
         None => {
-            panic!("unknown NODE; expected one of: schlafzimmer, wohnzimmer, kueche, bad, terrasse")
+            panic!(concat!("unknown NODE; expected one of: ", known_nodes!()))
         }
     }
 }
@@ -1096,7 +1095,7 @@ mod tests {
     #[test]
     fn known_nodes_lists_exactly_the_fleet() {
         // The message a mistyped `NODE=` prints. It has to be a literal (it is
-        // used in a const-eval panic), so nothing but this test keeps it honest.
+        // used in a const-eval panic), so nothing but this test ties it to `FLEET`.
         let listed: Vec<&str> = KNOWN_NODES.split(", ").collect();
         let actual: Vec<&str> = FLEET.iter().map(|(name, _)| *name).collect();
         assert_eq!(listed, actual);
@@ -1231,21 +1230,6 @@ mod tests {
         let topic = provision_topic([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
         assert_eq!(topic.as_str(), "smarthome/provision/000102030405");
         assert!(topic.starts_with(PROVISION_PREFIX));
-    }
-
-    #[test]
-    fn a_legacy_topic_belongs_only_to_a_node_that_reads_a_weight() {
-        // The one node that had one, `draussen`, mirrored its weight to
-        // `birds/scale/state` for hand-declared Home Assistant entities that
-        // predated discovery. It is gone and the fleet carries none, so this
-        // now guards the invariant rather than the instance: mirroring a
-        // weight a node never reads would publish a stale value for ever.
-        for (name, node) in FLEET {
-            if let Some(topic) = node.legacy_weight_topic {
-                assert!(node.scale.enabled, "{name} mirrors a weight it never reads");
-                assert!(!topic.is_empty());
-            }
-        }
     }
 
     #[test]

@@ -287,7 +287,7 @@ go through the same code** — the calibration above could not have landed.
   where Wi-Fi comes up; polling every 200 ms mostly misses. Verified
   2026-09-06. Flashing still needs the boot window right after plugging in, or
   the BOOT/RESET hold, and `espflash monitor` is still the wrong tool — see
-  [`FLASHING.md`](../FLASHING.md).
+  [`flashing.md`](flashing.md).
 - **Never debug this node on USB with the cell disconnected.** Verified
   2026-09-09, after an evening spent on the wrong three theories. The LiPo is
   what buffers the radio's TX bursts; without it the board browns out and
@@ -370,7 +370,7 @@ values alternated with them: 23.7 °C at −52 dBm against 25.2 °C at −47.
 
 **It was a wrong image, not provisioning.** Those are worth telling apart,
 because the fix differs: an identity in the flash sector (`smarthome/provision/
-<mac>`, see [`FLASHING.md`](../FLASHING.md#7-provisioning-a-board-without-reflashing))
+<mac>`, see [`flashing.md`](flashing.md#7-provisioning-a-board-without-reflashing))
 survives a reflash and the board would have come back wrong a second time.
 There was no retained provision message on the broker, and flashing
 `NODE=terrasse` fixed it on the first attempt — so the identity was only ever
@@ -493,7 +493,7 @@ fleet that dates its own readings.
   about seven seconds a round and then goes with the node into deep sleep: it
   appeared at 21:24:43 and was gone at 21:24:50, so a plain `espflash flash`
   typed after `ls /dev/ttyACM*` lost the race and reported `Serial port not
-  found`. The poll loop from [`FLASHING.md`](../FLASHING.md), keyed on the MAC
+  found`. The poll loop from [`flashing.md`](flashing.md), keyed on the MAC
   rather than on `head -1`, took it on the next wake 120 s later. The
   BOOT/RESET dance was never needed, even with the board in hand.
 - **Nothing else on the board was touched.** `espflash` reported `Segment at

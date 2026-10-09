@@ -5,7 +5,7 @@ import math
 import re
 
 
-path_save = Path("cad-models")
+path_save = Path(__file__).resolve().parent / "export"
 path_save.mkdir(exist_ok=True)
 
 try:  # provided by CQ-editor / jupyter-cadquery; a no-op when run as a script
@@ -318,7 +318,8 @@ def _export(shape, stem):
     this, and the mesh can simply be committed. A STEP that moved too is a real
     geometry change, and then the question is what moved and why.
 
-    Nothing in CI runs this file, so neither kind is caught automatically.
+    CI (`.github/workflows/cad.yml`) runs this file and fails on a STEP that
+    moved; the meshes it deliberately leaves alone.
     """
     exporters.export(shape, str(path_save / (stem + ".stl")))
     step = path_save / (stem + ".step")

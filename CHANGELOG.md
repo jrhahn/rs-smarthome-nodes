@@ -26,6 +26,9 @@ reconstruction and reads like one.
 
 ### Fixed
 
+- **A mistyped `NODE=` now lists `solarleuchte` among the valid names.** The
+  build-time error spelled the list out a second time and had missed it; the
+  message and `KNOWN_NODES` now share one literal.
 - **A restart of the archiver no longer suspends the readings table** (#53).
   The service re-applied `SET TTL` and `DEDUP` on every start. Each is a
   structure change in QuestDB's WAL even when it changes nothing, and since

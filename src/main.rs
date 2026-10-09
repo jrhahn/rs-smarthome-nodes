@@ -2608,22 +2608,6 @@ async fn publish_samples(
             .await
             .map_err(|_| "mqtt publish")?;
         info!("Published {} to {}", payload, topic);
-
-        // Mirror the weight to the pre-discovery topic while the hand-declared
-        // Home Assistant entity is still around. Bare and unretained, as it has
-        // always been: that entity is declared in the home-server nix config
-        // with no template, so JSON would read as `unknown` there.
-        if let (Some(legacy), "weight") = (node.legacy_weight_topic, sample.reading.key) {
-            client
-                .send_message(
-                    legacy,
-                    sample.reading.value.as_bytes(),
-                    QualityOfService::QoS0,
-                    false,
-                )
-                .await
-                .map_err(|_| "mqtt publish legacy")?;
-        }
     }
 
     // Pull retained config from Home Assistant, and the retained provisioning

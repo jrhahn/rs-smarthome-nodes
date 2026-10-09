@@ -1,14 +1,10 @@
 # Solarleuchte — replacing a bought garden light's electronics
 
 > **Built and running** as `solarleuchte-e3c08a2`, flashed 2026-10-05. This
-> page is the diagnosis and the design behind it, written 2026-09-22
-> and revised the same day twice: once when the LED output was measured, and
-> once when this repository's own notes killed the assumption the first version
-> rested on. **The LED current is still a guess and the panel is still
-> unidentified** — see
-> [Before you build any of this](#before-you-build-any-of-this). Every figure
-> that rests on the guess is flagged where it is used. When it is built, the
-> record goes in [`commissioning.md`](commissioning.md), not here.
+> page is the diagnosis and the design behind it, written from 2026-09-22 and
+> corrected as the build measured things — the LED current on 2026-10-04.
+> What is still open is [at the bottom](#what-is-still-open); the build itself
+> is in the fleet log, [`annotations.md`](annotations.md) (2026-10-07 on).
 
 ## What this is
 
@@ -467,7 +463,7 @@ inhibit built for an unmeasured problem costs a new way to kill the node.
 ### The battery divider is not telemetry here
 
 Fitted 2026-10-04, same parts and same pin as the terrasse node, which
-[`README.md`](../README.md#wiring-battery-divider--xiao-esp32-c3) already
+[`wiring.md`](wiring.md#battery-sense) already
 describes: 100 kΩ / 100 kΩ from the battery rail to ground, 100 nF across the
 lower leg, tap on `D2` (GPIO4, ADC1). `src/battery.rs` undoes the ratio and
 calibrates against the chip's eFuse reference, so there is nothing to write.
