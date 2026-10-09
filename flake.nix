@@ -105,7 +105,7 @@
         # a few hundred MB of OpenCASCADE that a `cargo build` has no use for.
         #
         #   nix develop .#cad          # or `use flake .#cad` in .envrc
-        #   python models.py           # writes cad-models/*.stl and *.step
+        #   python cad/models.py       # writes cad/export/*.stl and *.step
         devShells.cad = pkgs.mkShell {
           packages = [ cadPython pkgs.gitleaks ];
 
@@ -122,7 +122,7 @@
               ${cadPython}/bin/python -m venv "${cadVenv}"
               "${cadVenv}/bin/pip" install --quiet --upgrade pip
               # Pinned: CadQuery moves its API around between minor releases,
-              # and models.py is written against this one.
+              # and cad/models.py is written against this one.
               "${cadVenv}/bin/pip" install --quiet \
                 'cadquery==2.8.0' 'cadquery-ocp==7.9.3.1.1' 'numpy>=2.0'
             fi

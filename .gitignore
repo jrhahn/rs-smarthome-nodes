@@ -29,5 +29,5 @@ result-*
 #.idea/
 
 # Enclosure CAD: the pinned CadQuery venv (see flake.nix). The exports under
-# cad-models/ are tracked -- printing a part should not require the toolchain.
+# cad/export/ are tracked -- printing a part should not require the toolchain.
 .venv-cad/
