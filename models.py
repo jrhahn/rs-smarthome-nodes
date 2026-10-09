@@ -2288,15 +2288,15 @@ _export(sl_body, "solarleuchte_body")
 # ---------------------------------------------------------------------------
 # Modelled in place, seam at SL_SEAM, then turned over for printing.
 _lid_h = SL_TOP - SL_SEAM
-# Roof edge: a chamfer, not a round -- it is the first layer when printing
-# roof-down (see terrasse_body). Taken on the plain box, before the columns
-# join it: across the columns' tangent edges OCCT cannot build it. The columns
-# stop 1 mm short of the roof for the same reason.
+# The roof is the face this part prints on, so it is one flat plane with the
+# column tops in it: no chamfer on the roof edge, and the columns run all the
+# way up. The first version had both -- a 1 mm chamfer, and columns stopping
+# 1 mm short of the roof because OCCT could not chamfer across their tangent
+# edges -- which left four columns starting in mid-air above the bed.
 sl_lid = (
     _box(SL_OUT_X, SL_OUT_Y, _lid_h, (0, 0, SL_SEAM))
     .edges("|Z").fillet(SL_CORNER_R)
-    .faces(">Z").edges().chamfer(1.0)
-    .union(_sl_columns(SL_SEAM, _lid_h - 1.0))
+    .union(_sl_columns(SL_SEAM, _lid_h))
 )
 sl_lid = sl_lid.cut(_box(SL_IN_X, SL_IN_Y, _lid_h - SL_ROOF, (0, 0, SL_SEAM)))
 
