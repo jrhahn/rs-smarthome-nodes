@@ -502,7 +502,7 @@ edge, beside the charger rather than under it.
 
 The reasoning all of this follows, which predates the drawing: The
 enclosure is a cup opening downward precisely so that its only joint faces the
-ground; [`models.py`](../models.py) states it as a requirement ("no seam and no
+ground; [`cad/models.py`](../cad/models.py) states it as a requirement ("no seam and no
 penetration in the roof"). A gland in the top would give up the one property the
 whole shape exists to provide. Enter low, with a drip loop below the box.
 

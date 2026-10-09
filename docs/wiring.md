@@ -1,6 +1,6 @@
 # Wiring, per node
 
-One firmware image, five different boards. What you solder depends on which
+One firmware image, six different boards. What you solder depends on which
 `NODE=` the board is going to be — this page has the complete wiring for each,
 so you should not have to read the source to build one.
 
@@ -8,12 +8,13 @@ The pin assignments here are taken from the firmware
 ([`src/platform.rs`](../src/platform.rs) and [`src/main.rs`](../src/main.rs)); if
 the two ever disagree, the source wins and this page is the bug.
 
-> **None of this has been built and tested yet.** The pin map, the pull-ups and
-> the supply choices are what the firmware expects and what the datasheets say —
-> not what a working board on a bench has confirmed. Check each connection
-> against your own modules' silkscreen before powering anything up. The bird
-> scale's HX711 wiring is the exception: that part has been running. Its battery
-> divider and protection board are new and unbuilt, like everything else here.
+> Every node on this page is built and running; what is actually on which
+> board, and what went wrong building it, is in
+> [commissioning.md](commissioning.md). Still check each connection against
+> your own modules' silkscreen before powering anything up.
+>
+> `solarleuchte` is wired on its own page, [solarleuchte.md](solarleuchte.md):
+> it is a rebuilt garden light rather than a sensor box.
 
 ## The board
 
@@ -24,13 +25,13 @@ are *not* the GPIO numbers the datasheet and the firmware use:
 | --- | --- | --- | --- |
 | D0  | 2  | HX711 SCK | `terrasse` |
 | D1  | 3  | HX711 DT | `terrasse` |
-| D2  | 4  | Battery divider tap (ADC1); a DS18B20 1-Wire line on a node that has one instead | `terrasse` |
+| D2  | 4  | Battery divider tap (ADC1); a DS18B20 1-Wire line on a node that has one instead | `terrasse`, `solarleuchte` |
 | D3  | 5  | UART RX ← SDS011 TX | `wohnzimmer` |
-| D4  | 6  | I²C SDA | every node but none exclusively — `terrasse`, `schlafzimmer`, `wohnzimmer`, `kueche`, `bad` |
+| D4  | 6  | I²C SDA | every node |
 | D5  | 7  | I²C SCL | as SDA |
 | D6  | 21 | — **console UART TX** | keep free |
 | D7  | 20 | — **console UART RX** | keep free |
-| D8  | 8  | — | free |
+| D8  | 8  | LEDC → lamp MOSFET gate | `solarleuchte` |
 | D9  | 9  | — **BOOT button** | keep free |
 | D10 | 10 | UART TX → SDS011 RX | `wohnzimmer` |
 
@@ -564,12 +565,10 @@ reading nothing.
 
 Exactly as for `NODE=bad`: 3V3, GND, SDA→D4, SCL→D5.
 
-On this node the SHT31-D's readings are published under `air_temperature` and
-`air_humidity`. That prefix is older than the current build — it was there to
-leave the plain `temperature` key to a DS18B20 that is no longer fitted — and it
-stays because renaming the entity would orphan its history in Home Assistant.
-Nothing about the wiring changes; it is worth knowing when you go looking for
-the entity.
+On this node the SHT31-D publishes the plain `temperature` and `humidity` keys.
+Under its old name, `draussen`, it used `air_temperature` / `air_humidity` to
+leave the plain keys to a DS18B20; the prefix went with the rename to
+`terrasse`, so history before that sits under the old entities.
 
 ### No DS18B20 on this node
 
@@ -579,7 +578,18 @@ the probe came off. If you are rebuilding an older board: **remove the 4.7 kΩ**
 or it will pull the divider's tap towards 3V3 and every voltage reading with it.
 
 The DS18B20 driver and its node slot are still in the firmware — the pin is a
-per-node choice, and the build fails if any node ever enables both.
+per-node choice, and the build fails if any node ever enables both. For a node
+that takes the probe instead of a divider:
+
+| DS18B20 lead | XIAO pad | GPIO | |
+| --- | --- | --- | --- |
+| Red (VCC) | 3V3 | — | |
+| Black (GND) | GND | — | |
+| Yellow (DATA) | D2 | 4 | 1-Wire, **4.7 kΩ pull-up to 3V3** |
+
+The internal pull-up is enabled as a backup, but over a ~1 m cable the external
+one is required. The ~750 ms conversion only runs on publishing rounds, never on
+an idle poll.
 
 ### Power
 
@@ -745,5 +755,5 @@ a pin:
 Then plug in USB and watch the log — every node reports what it found on its
 buses within the first second of booting, which is precisely so that a wiring
 mistake is visible before the first reading is even attempted. See
-[FLASHING.md](../FLASHING.md) for getting the firmware onto the board, and
+[flashing.md](flashing.md) for getting the firmware onto the board, and
 [the platform notes](base-platform.md) for why the fleet is shaped this way.
