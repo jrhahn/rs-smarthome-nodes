@@ -2141,9 +2141,10 @@ print("wasserzaehler bar %.1f cm3" % (wu_bar.val().Volume() / 1000.0,))
 ##
 ## The requirements, and how each is met:
 ##
-##   a) watertight roof      The roof is one unbroken wall. The four screws
-##      run up from below, through columns outside the corners, into heat-set
-##      inserts in the lid -- nothing pierces the top.
+##   a) watertight roof      The roof between the corners is one unbroken
+##      wall. The four screws go in from above, but through the corner
+##      columns, not the roof: M3 countersunk heads sit flush in the column
+##      tops and bite into heat-set inserts in the body's columns.
 ##   b) the seam             The split is horizontal, because the plug has to
 ##      sit in it. A 1 mm tongue on the body rises 3 mm into a rabbet in the
 ##      lid, so water reaching the seam has to climb to get further.
@@ -2212,8 +2213,14 @@ SL_RABBET_CLR = 0.2
 SL_PLUG_W, SL_PLUG_H = 13.0, 9.0
 SL_PLUG_Y = SL_BOARD_Y
 
-# Corner columns: M3 x 35 up through the body into a heat-set insert in the
-# lid. The same insert and pilot as terrasse's posts.
+# Corner columns: M3 x 16 countersunk, in from the top through the lid's
+# columns into a heat-set insert in the body's. The same insert and pilot as
+# terrasse's posts, sunk 8 mm so a slightly long screw still bottoms in plastic
+# rather than in the brass.
+#
+# From above because that is how the box gets opened: standing on its floor,
+# lid up. The head sits flush in a 90 degree countersink, which the lid prints
+# as a 45 degree overhang from the roof side -- no support.
 #
 # Centred on the box's corner point, not outside it. The first version stood
 # 1.5 mm out and met the wall along a sliver, which printed as a post glued
@@ -2223,8 +2230,8 @@ SL_PLUG_Y = SL_BOARD_Y
 SL_COL_D = 10.0
 SL_COL_XY = [(sx * SL_OUT_X / 2, sy * SL_OUT_Y / 2)
              for sx in (-1, 1) for sy in (-1, 1)]
-SL_SCREW_CLEAR, SL_SCREW_HEAD, SL_HEAD_DEPTH = 3.4, 6.2, 3.5
-SL_INSERT_PILOT, SL_INSERT_DEPTH = 4.0, 6.0
+SL_SCREW_CLEAR, SL_SCREW_CSK = 3.4, 6.6       # M3 countersunk head, plus a little
+SL_INSERT_PILOT, SL_INSERT_DEPTH = 4.0, 8.0
 
 # Panel cable: M8 gland through the floor, in the charger zone beside the
 # charger, with the 13 mm its nut needs kept clear inside.
@@ -2262,10 +2269,12 @@ for gy in (SL_GUIDE_Y0, SL_GUIDE_Y1):
         _box(SL_CELL[0] - 10.0, SL_GUIDE_T, SL_GUIDE_H, (SL_CELL_X, gy, SL_FLOOR))
     )
 
-# Screw columns: clearance all the way up, the head sunk into the underside.
+# Inserts, from the seam face down into each column. The column is closed
+# below, so the floor has no hole.
 for (cx, cy) in SL_COL_XY:
-    sl_body = sl_body.cut(_cyl(SL_SCREW_CLEAR, SL_SEAM + 1, (cx, cy, -0.5)))
-    sl_body = sl_body.cut(_cyl(SL_SCREW_HEAD, SL_HEAD_DEPTH, (cx, cy, -0.01)))
+    sl_body = sl_body.cut(
+        _cyl(SL_INSERT_PILOT, SL_INSERT_DEPTH, (cx, cy, SL_SEAM - SL_INSERT_DEPTH + 0.01))
+    )
 
 # Panel gland.
 sl_body = sl_body.cut(_cyl(8.2, SL_FLOOR + 1, (SL_GLAND_XY[0], SL_GLAND_XY[1], -0.5)))
@@ -2305,10 +2314,17 @@ sl_lid = sl_lid.cut(
          (0, 0, SL_SEAM))
 )
 
-# Inserts, from the seam face up into each column. The column stays closed at
-# the top, so the roof has no hole.
+# Screw holes, through each column, with the countersink at its top.
+_col_top = SL_TOP - 1.0
+_csk_h = (SL_SCREW_CSK - SL_SCREW_CLEAR) / 2      # 90 degrees: depth = radius step
 for (cx, cy) in SL_COL_XY:
-    sl_lid = sl_lid.cut(_cyl(SL_INSERT_PILOT, SL_INSERT_DEPTH, (cx, cy, SL_SEAM - 0.01)))
+    sl_lid = sl_lid.cut(_cyl(SL_SCREW_CLEAR, _lid_h + 1, (cx, cy, SL_SEAM - 0.5)))
+    sl_lid = sl_lid.cut(
+        cq.Workplane("XY").add(
+            cq.Solid.makeCone(SL_SCREW_CLEAR / 2, SL_SCREW_CSK / 2, _csk_h + 0.01,
+                              pnt=cq.Vector(cx, cy, _col_top - _csk_h))
+        )
+    )
 
 # The plug's upper half.
 sl_lid = sl_lid.cut(
