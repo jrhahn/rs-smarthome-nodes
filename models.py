@@ -2100,3 +2100,228 @@ print("wasserzaehler tube %.1f cm3  strap %.1f cm3  cap %.1f cm3" % (
     wu_strap.val().Volume() / 1000.0,
     wu_cap.val().Volume() / 1000.0))
 print("wasserzaehler bar %.1f cm3" % (wu_bar.val().Volume() / 1000.0,))
+
+
+## ===========================================================================
+## Solarleuchte — housing for the garden lamp's electronics (#48)
+## ===========================================================================
+##
+## Two printed parts:
+##
+##   solarleuchte_body   floor + walls up to the seam. Everything mounts here.
+##   solarleuchte_lid    roof + walls down to the seam. Nothing inside it.
+##
+## Print orientation:
+##
+##   body  FLOOR DOWN   ribs and the seam tongue stand up from the plate
+##   lid   ROOF DOWN    walls, corner columns and the rabbet all rise from it
+##
+## Neither needs support. The four counterbores in the body's underside bridge
+## a 3.4 mm hole, which every counterbore printed face-down does.
+##
+## The parts, as measured (2026-10-08):
+##
+##   cell (pouch)   63 x 38 x 8, stood on its long edge
+##   BMS            35 x 8 x 5
+##   main board     81 x 40 x 35   ESP32-C3 and the LED switch
+##   charger        45 x 20 x 15   MPPT module
+##   SHT31-D        14 x 10 x 5
+##
+## Three zones, front (-Y) to back:
+##
+##   cell zone      the cell on edge between two guide ribs, the BMS stood
+##                  beside it against the wall, the SHT31 at the cell's +X end
+##   board zone     the main board, the light-string plug in the +X wall
+##   charger zone   the charger, and the panel's gland through the floor
+##
+## The board sits between cell and charger on purpose. The SHT31 is here to
+## measure the *cell* (docs/solarleuchte.md, "Why there is a thermometer on a
+## lamp"), and the charger is the one part that is warm at exactly the hour
+## that question is about: midday, charging.
+##
+## The requirements, and how each is met:
+##
+##   a) watertight roof      The roof is one unbroken wall. The four screws
+##      run up from below, through columns outside the corners, into heat-set
+##      inserts in the lid -- nothing pierces the top.
+##   b) the seam             The split is horizontal, because the plug has to
+##      sit in it. A 1 mm tongue on the body rises 3 mm into a rabbet in the
+##      lid, so water reaching the seam has to climb to get further.
+##   c) light-string plug    A rectangular opening, half in the body and half
+##      in the lid: the plug is laid into the body's half and the lid closes
+##      over it. Sized to the plug with no clearance, as specified; bed it in a
+##      bead of neutral silicone if the fit leaves a gap.
+##   d) panel cable          An M8 gland through the floor, like terrasse's:
+##      the cable enters from below, where rain cannot run into it.
+
+SL_WALL = 2.0                    # side wall, as specified for the plug opening
+SL_FLOOR = 3.0                   # suits the M8 gland's panel range
+SL_ROOF = 2.5
+SL_CLR = 1.0                     # per side, around every part
+SL_CORNER_R = 3.0
+
+# The parts: (x, y, height), as laid in the box.
+SL_CELL = (63.0, 8.0, 38.0)      # on its long edge
+SL_BMS = (35.0, 5.0, 8.0)        # on edge, against the -Y wall
+SL_BOARD = (81.0, 40.0, 35.0)
+SL_CHARGER = (45.0, 20.0, 15.0)
+SL_SHT = (14.0, 10.0, 5.0)
+
+SL_GUIDE_T, SL_GUIDE_H = 1.6, 15.0   # cell guides; the cell is tied, not clamped
+
+# Interior, built up from the zones so a part that changes size moves the
+# walls rather than overlapping them.
+SL_IN_X = SL_BOARD[0] + 2 * SL_CLR + 2 * 2.0                          # 87
+_CELL_ROW_Y = (SL_BMS[1] + 2 * SL_CLR) + SL_GUIDE_T + (SL_CELL[1] + 2 * SL_CLR) + SL_GUIDE_T
+SL_IN_Y = (SL_CLR + _CELL_ROW_Y + SL_CLR + (SL_BOARD[1] + 2 * SL_CLR)
+           + SL_CLR + (SL_CHARGER[1] + 2 * SL_CLR) + SL_CLR)               # ~ 88
+SL_IN_H = SL_CELL[2] + SL_CLR + 1.0                                       # 40
+
+# Zone positions, -Y to +Y.
+_y = -SL_IN_Y / 2 + SL_CLR
+SL_BMS_Y = _y + (SL_BMS[1] + 2 * SL_CLR) / 2
+_y += SL_BMS[1] + 2 * SL_CLR
+SL_GUIDE_Y0 = _y + SL_GUIDE_T / 2                     # inner guide (BMS side)
+_y += SL_GUIDE_T
+SL_CELL_Y = _y + (SL_CELL[1] + 2 * SL_CLR) / 2
+_y += SL_CELL[1] + 2 * SL_CLR
+SL_GUIDE_Y1 = _y + SL_GUIDE_T / 2
+_y += SL_GUIDE_T + SL_CLR
+SL_BOARD_Y = _y + (SL_BOARD[1] + 2 * SL_CLR) / 2
+_y += SL_BOARD[1] + 2 * SL_CLR + SL_CLR
+SL_CHARGER_Y = _y + (SL_CHARGER[1] + 2 * SL_CLR) / 2
+
+SL_CELL_X = -SL_IN_X / 2 + SL_CLR + 1.0 + SL_CELL[0] / 2    # cell to -X ...
+SL_SHT_X = SL_CELL_X + SL_CELL[0] / 2 + SL_CLR + 1.0 + SL_SHT[0] / 2  # ... SHT31 at its +X end
+SL_CHARGER_X = -SL_IN_X / 2 + SL_CLR + 1.0 + SL_CHARGER[0] / 2
+
+# Outside, and the seam.
+SL_OUT_X = SL_IN_X + 2 * SL_WALL
+SL_OUT_Y = SL_IN_Y + 2 * SL_WALL
+SL_SEAM_IN = 30.0                         # seam, above the inside of the floor
+SL_SEAM = SL_FLOOR + SL_SEAM_IN           # absolute
+SL_TOP = SL_FLOOR + SL_IN_H + SL_ROOF     # absolute, outside of the roof
+
+# Seam labyrinth: the inner half of the body wall rises into the lid.
+SL_TONGUE_T, SL_TONGUE_H = 1.0, 3.0
+SL_RABBET_CLR = 0.2
+
+# Light-string plug: rectangular, in the +X wall at the board, centred on the
+# seam. W runs along the wall, H up it, so the seam splits H in half. If the
+# plug turns out to stand the other way, swap the two numbers.
+SL_PLUG_W, SL_PLUG_H = 13.0, 9.0
+SL_PLUG_Y = SL_BOARD_Y
+
+# Corner columns: M3 x 35 up through the body into a heat-set insert in the
+# lid. The same insert and pilot as terrasse's posts.
+#
+# Centred on the box's corner point, not outside it. The first version stood
+# 1.5 mm out and met the wall along a sliver, which printed as a post glued
+# to a corner rather than part of it. On the corner point half the column is
+# wall: it reaches 5 mm into the interior's corners, which the fit check below
+# clears -- the tightest is the charger's outer corner at 0.6 mm.
+SL_COL_D = 10.0
+SL_COL_XY = [(sx * SL_OUT_X / 2, sy * SL_OUT_Y / 2)
+             for sx in (-1, 1) for sy in (-1, 1)]
+SL_SCREW_CLEAR, SL_SCREW_HEAD, SL_HEAD_DEPTH = 3.4, 6.2, 3.5
+SL_INSERT_PILOT, SL_INSERT_DEPTH = 4.0, 6.0
+
+# Panel cable: M8 gland through the floor, in the charger zone beside the
+# charger, with the 13 mm its nut needs kept clear inside.
+SL_GLAND_XY = (SL_IN_X / 2 - SL_CLR - 1.0 - 13.0 / 2, SL_CHARGER_Y)
+
+
+def _sl_columns(z0, h):
+    out = None
+    for (cx, cy) in SL_COL_XY:
+        c = _cyl(SL_COL_D, h, (cx, cy, z0))
+        out = c if out is None else out.union(c)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# solarleuchte_body
+# ---------------------------------------------------------------------------
+sl_body = (
+    _box(SL_OUT_X, SL_OUT_Y, SL_SEAM)
+    .edges("|Z").fillet(SL_CORNER_R)
+    .union(_sl_columns(0, SL_SEAM))
+)
+sl_body = sl_body.cut(_box(SL_IN_X, SL_IN_Y, SL_SEAM, (0, 0, SL_FLOOR)))
+
+# The tongue: the inner half of the wall, continued 3 mm above the seam.
+_tongue = _box(SL_IN_X + 2 * SL_TONGUE_T, SL_IN_Y + 2 * SL_TONGUE_T, SL_TONGUE_H,
+               (0, 0, SL_SEAM))
+_tongue = _tongue.cut(_box(SL_IN_X, SL_IN_Y, SL_TONGUE_H, (0, 0, SL_SEAM)))
+sl_body = sl_body.union(_tongue)
+
+# Cell guides, either side of the cell's lane. Shorter than the cell so it can
+# be lifted out past them; a cable tie holds it, because a pouch swells.
+for gy in (SL_GUIDE_Y0, SL_GUIDE_Y1):
+    sl_body = sl_body.union(
+        _box(SL_CELL[0] - 10.0, SL_GUIDE_T, SL_GUIDE_H, (SL_CELL_X, gy, SL_FLOOR))
+    )
+
+# Screw columns: clearance all the way up, the head sunk into the underside.
+for (cx, cy) in SL_COL_XY:
+    sl_body = sl_body.cut(_cyl(SL_SCREW_CLEAR, SL_SEAM + 1, (cx, cy, -0.5)))
+    sl_body = sl_body.cut(_cyl(SL_SCREW_HEAD, SL_HEAD_DEPTH, (cx, cy, -0.01)))
+
+# Panel gland.
+sl_body = sl_body.cut(_cyl(8.2, SL_FLOOR + 1, (SL_GLAND_XY[0], SL_GLAND_XY[1], -0.5)))
+
+# The plug's lower half: wall and tongue, from half the plug below the seam up
+# to the top of the tongue.
+sl_body = sl_body.cut(
+    _box(SL_WALL * 4, SL_PLUG_W, SL_PLUG_H / 2 + SL_TONGUE_H,
+         (SL_OUT_X / 2 - SL_WALL, SL_PLUG_Y, SL_SEAM - SL_PLUG_H / 2))
+)
+
+display(sl_body)
+_export(sl_body, "solarleuchte_body")
+
+
+# ---------------------------------------------------------------------------
+# solarleuchte_lid
+# ---------------------------------------------------------------------------
+# Modelled in place, seam at SL_SEAM, then turned over for printing.
+_lid_h = SL_TOP - SL_SEAM
+# Roof edge: a chamfer, not a round -- it is the first layer when printing
+# roof-down (see terrasse_body). Taken on the plain box, before the columns
+# join it: across the columns' tangent edges OCCT cannot build it. The columns
+# stop 1 mm short of the roof for the same reason.
+sl_lid = (
+    _box(SL_OUT_X, SL_OUT_Y, _lid_h, (0, 0, SL_SEAM))
+    .edges("|Z").fillet(SL_CORNER_R)
+    .faces(">Z").edges().chamfer(1.0)
+    .union(_sl_columns(SL_SEAM, _lid_h - 1.0))
+)
+sl_lid = sl_lid.cut(_box(SL_IN_X, SL_IN_Y, _lid_h - SL_ROOF, (0, 0, SL_SEAM)))
+
+# Rabbet for the tongue: the inner half of the lid wall, cut back at the seam.
+_r = SL_TONGUE_T + SL_RABBET_CLR
+sl_lid = sl_lid.cut(
+    _box(SL_IN_X + 2 * _r, SL_IN_Y + 2 * _r, SL_TONGUE_H + SL_RABBET_CLR,
+         (0, 0, SL_SEAM))
+)
+
+# Inserts, from the seam face up into each column. The column stays closed at
+# the top, so the roof has no hole.
+for (cx, cy) in SL_COL_XY:
+    sl_lid = sl_lid.cut(_cyl(SL_INSERT_PILOT, SL_INSERT_DEPTH, (cx, cy, SL_SEAM - 0.01)))
+
+# The plug's upper half.
+sl_lid = sl_lid.cut(
+    _box(SL_WALL * 4, SL_PLUG_W, SL_PLUG_H / 2,
+         (SL_OUT_X / 2 - SL_WALL, SL_PLUG_Y, SL_SEAM))
+)
+
+# Turn it over so it exports in its print orientation, roof on z = 0.
+sl_lid = sl_lid.rotate((0, 0, 0), (1, 0, 0), 180).translate((0, 0, SL_TOP))
+
+display(sl_lid)
+_export(sl_lid, "solarleuchte_lid")
+
+print("solarleuchte body %.1f cm3  lid %.1f cm3  box %.0f x %.0f x %.1f mm, inside %.0f x %.0f x %.0f" % (
+    sl_body.val().Volume() / 1000.0, sl_lid.val().Volume() / 1000.0,
+    SL_OUT_X, SL_OUT_Y, SL_TOP, SL_IN_X, SL_IN_Y, SL_IN_H))
