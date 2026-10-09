@@ -75,6 +75,42 @@ pub fn alter_dedup_ddl(table: &str) -> String {
     format!("ALTER TABLE '{table}' DEDUP ENABLE UPSERT KEYS(timestamp, node, sensor)")
 }
 
+/// What `SHOW CREATE` says a table or view looks like now, or `None` when the
+/// database will not say (an older QuestDB) -- in which case the caller issues
+/// its ALTER as before.
+async fn show_create(client: &Client, what: &str, name: &str) -> Option<String> {
+    let data = client
+        .exec(&format!("SHOW CREATE {what} '{name}'"))
+        .await
+        .ok()?;
+    data.rows()
+        .first()?
+        .first()
+        .and_then(as_str)
+        .map(str::to_string)
+}
+
+/// Whether a table still needs its deduplication keys set.
+///
+/// Every ALTER is a structure change in the table's WAL, even one that changes
+/// nothing, and after the power loss on 2026-10-07 the base table could no
+/// longer apply structure changes: each start of this service, by re-issuing
+/// these, suspended ingestion until someone skipped the transaction (#53). So
+/// they go out only when the table does not already say what they would set.
+pub fn needs_dedup(current_ddl: &str) -> bool {
+    !current_ddl
+        .replace(' ', "")
+        .contains("DEDUPUPSERTKEYS(timestamp,node,sensor)")
+}
+
+/// Whether a table or view still needs `retention` set as its TTL.
+pub fn needs_ttl(current_ddl: &str, retention: &Retention) -> bool {
+    match retention.as_sql() {
+        Some(ttl) => !current_ddl.contains(&format!("TTL {ttl}")),
+        None => false,
+    }
+}
+
 /// Re-apply the retention to a table that already exists.
 pub fn alter_ttl_ddl(table: &str, retention: &Retention) -> Option<String> {
     retention
@@ -163,15 +199,25 @@ pub async fn ensure(
     // costs nothing until a reading brings its own timestamp -- see
     // `alter_dedup_ddl` -- but it is the one thing that has to be in place
     // *before* that, so it goes out on every start.
-    if let Err(e) = client.exec(&alter_dedup_ddl(table)).await {
-        warn!(
-            table,
-            error = %e,
-            "could not enable deduplication; a reading ingested twice would be stored twice"
-        );
+    let table_ddl = show_create(client, "TABLE", table).await;
+    if table_ddl.as_deref().is_none_or(needs_dedup) {
+        if let Err(e) = client.exec(&alter_dedup_ddl(table)).await {
+            warn!(
+                table,
+                error = %e,
+                "could not enable deduplication; a reading ingested twice would be stored twice"
+            );
+        }
     }
 
     for t in [table, status_table] {
+        let current = show_create(client, "TABLE", t).await;
+        if current
+            .as_deref()
+            .is_some_and(|ddl| !needs_ttl(ddl, retention))
+        {
+            continue;
+        }
         if let Some(ddl) = alter_ttl_ddl(t, retention) {
             // Not fatal: on a QuestDB without table TTL the data simply keeps
             // accumulating, which is a disk-space problem and not a data-loss
@@ -212,6 +258,13 @@ pub async fn ensure(
         // leaves an existing view alone, so a changed setting would otherwise
         // only ever reach a database that did not have the view yet -- which is
         // every database except the one that matters.
+        let current = show_create(client, "MATERIALIZED VIEW", &tier.view(table)).await;
+        if current
+            .as_deref()
+            .is_some_and(|ddl| !needs_ttl(ddl, kept_for))
+        {
+            continue;
+        }
         if let Some(ddl) = alter_view_ttl_ddl(&tier.view(table), kept_for) {
             if let Err(e) = client.exec(&ddl).await {
                 warn!(view = tier.view(table), error = %e, "could not set the view's TTL");
@@ -272,6 +325,28 @@ pub fn usable_views(table: &str, valid: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SHOW CREATE TABLE readings` on family-server, 2026-10-09.
+    const READINGS: &str = "CREATE TABLE 'readings' ( \n\ttimestamp TIMESTAMP,\n\tnode SYMBOL INDEX CAPACITY 256,\n\tsensor SYMBOL,\n\tvalue DOUBLE\n) timestamp(timestamp) PARTITION BY DAY TTL 3 YEARS\nDEDUP UPSERT KEYS(timestamp,node,sensor);";
+    const STATUS: &str = "CREATE TABLE 'node_status' ( \n\ttimestamp TIMESTAMP,\n\tnode SYMBOL INDEX CAPACITY 256,\n\tonline BOOLEAN\n) timestamp(timestamp) PARTITION BY MONTH TTL 3 YEARS;";
+    const VIEW_1H: &str = "CREATE MATERIALIZED VIEW 'readings_1h' WITH BASE 'readings_1m' REFRESH IMMEDIATE AS (\nSELECT timestamp, node, sensor, min(lo) lo, max(hi) hi, sum(sv) sv, sum(n) n FROM readings_1m SAMPLE BY 1h\n) PARTITION BY MONTH TTL 50 YEARS;";
+
+    #[test]
+    fn an_unchanged_table_gets_no_alter_on_start() {
+        // The whole point: a restart against the live database sends nothing,
+        // so it cannot suspend a table that chokes on structure changes.
+        assert!(!needs_dedup(READINGS));
+        assert!(!needs_ttl(READINGS, &ttl()));
+        assert!(!needs_ttl(STATUS, &ttl()));
+        assert!(!needs_ttl(VIEW_1H, &Retention::parse("50y").unwrap()));
+    }
+
+    #[test]
+    fn a_changed_setting_still_goes_out() {
+        assert!(needs_dedup(STATUS));
+        assert!(needs_ttl(READINGS, &Retention::parse("5y").unwrap()));
+        assert!(needs_ttl(VIEW_1H, &ttl()));
+    }
 
     #[test]
     fn a_view_over_a_broken_view_is_not_usable() {

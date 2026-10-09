@@ -26,6 +26,12 @@ reconstruction and reads like one.
 
 ### Fixed
 
+- **A restart of the archiver no longer suspends the readings table** (#53).
+  The service re-applied `SET TTL` and `DEDUP` on every start. Each is a
+  structure change in QuestDB's WAL even when it changes nothing, and since
+  the 2026-10-07 power loss the base table cannot apply those, so every
+  restart or reboot stopped ingestion until the transaction was skipped by
+  hand. It now reads `SHOW CREATE` first and alters only what differs.
 - **The dashboard no longer reads rollup views QuestDB has invalidated** (#53).
   The service lists only `valid` views, drops any view whose source view is not
   usable, and re-checks every minute, so a broken view stops being read and a
