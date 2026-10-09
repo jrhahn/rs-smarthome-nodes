@@ -875,3 +875,37 @@ air, and a divergence that grows is the sensor, not the weather.
 
 That also unblocks what this thermometer is for — whether the cell is ever
 charged below freezing, the measurement the `RCS` swap is being timed against.
+
+## 2026-10-07 20:44 → 2026-10-09 05:29 — archive — a power loss, a corrupt partition, and two stalls
+
+Not a node event, but it decides how the archive reads around these dates.
+
+**2026-10-07 20:44:14 CEST, family-server lost power** (the journal stops
+mid-stream, no shutdown). QuestDB had applied rows to the rollup views that its
+base table had not made durable. Afterwards all three views were `invalid`
+("ahead of base table"), and the `2026-10-07` partition held **13 zeroed rows**:
+timestamp 1970-01-01, value 0, and symbol id 0, which decodes as
+`schlafzimmer/temperature`. Those rows made every rebuild of `readings_1m` fail.
+
+**What it did to the dashboard:** charts of a day or more read views frozen at
+10-07 18:46 UTC. On 10-08, after a rebuild attempt emptied `readings_1m`, every
+overview tile read "no data" (fixed in code by #56: valid views only, plus an
+overview fallback).
+
+**Two ingestion stalls on 10-08.** The table's metadata stayed at structure
+version 8 after the crash. The timeseries service re-applies `SET TTL` /
+`DEDUP` on every start, which is a structure change, and each one suspended the
+WAL table: at **21:06:19** (txn 130898) and at **21:50:25** (txn 131429, the
+deploy of the period view). Readings kept arriving in the WAL and were applied
+once the two metadata-only transactions were skipped (`RESUME WAL FROM TXN`).
+**No readings were lost**, but between 21:06 and 05:29 the dashboard showed
+nothing new.
+
+**Repair, 2026-10-08 22:00 → 2026-10-09 05:29:** the `2026-10-07` partition was
+rewritten without the 13 rows (97 133 → **97 120**; backup of the day in
+`~/questdb-repair-2026-10-07/` on family-server), then `readings_1m`, `_1h`,
+`_1d` were rebuilt one at a time. All three are valid from 2026-09-13 to now.
+
+**Still open (#53):** the base table is still at metadata version 8, so the
+next restart of `smarthome-timeseries` will stall it again. That needs the
+table rebuilt, or the service to stop re-issuing unchanged ALTERs on start.
