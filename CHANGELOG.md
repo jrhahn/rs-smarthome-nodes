@@ -24,6 +24,15 @@ reconstruction and reads like one.
 
 ## [Unreleased]
 
+### Changed
+
+- **Link and reset counters are announced as diagnostics.** `rssi`,
+  `reset_reason`, `reset_count` and `boot_count` now carry
+  `ent_cat: diagnostic` in their discovery message, so Home Assistant files
+  them under the device page's diagnostics and the archive's dashboard leaves
+  them out without a list of its own. Entity ids and topics are unchanged.
+  Takes effect per node on reflash.
+
 ### Fixed
 
 - **A mistyped `NODE=` now lists `solarleuchte` among the valid names.** The
