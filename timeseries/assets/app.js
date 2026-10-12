@@ -466,6 +466,9 @@ function renderOverview() {
     drawSparkline(tile.querySelector("canvas"), c.points);
     tile.addEventListener("click", () => {
       state.selected = { node: c.node, sensor: c.sensor };
+      // The previous chart's data must not stay on screen under this title.
+      state.series = null;
+      state.compareSeries = [];
       writeHash();
       show();
     });
@@ -633,6 +636,9 @@ function renderDashboard() {
     if (canvas) drawSparkline(canvas, c.points);
     button.addEventListener("click", () => {
       state.selected = { node: c.node, sensor: c.sensor };
+      // The previous chart's data must not stay on screen under this title.
+      state.series = null;
+      state.compareSeries = [];
       writeHash();
       show();
     });
