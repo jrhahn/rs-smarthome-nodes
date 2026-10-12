@@ -909,3 +909,40 @@ rewritten without the 13 rows (97 133 → **97 120**; backup of the day in
 **Still open (#53):** the base table is still at metadata version 8, so the
 next restart of `smarthome-timeseries` will stall it again. That needs the
 table rebuilt, or the service to stop re-issuing unchanged ALTERs on start.
+
+## 2026-10-12 19:39 → 19:56 — the whole fleet — board diagnostics announced as `diagnostic`
+
+`…-0.2.0-8354246` on all six nodes over the air: develop after #62 and #63.
+The firmware change is #63 — `rssi`, `reset_reason`, `reset_count` and
+`boot_count` now carry `ent_cat: diagnostic` in discovery. Images served from
+`/var/lib/smarthome-firmware`, digests checked against what nginx serves before
+the offers went out.
+
+`wohnzimmer` first, on its own, then the other five together at 19:43:02:
+
+| | took it | from | `boot_count` | `reset_count` |
+| --- | --- | --- | --- | --- |
+| `wohnzimmer` | 19:41:28 | `22b9205` | 1 → 2 | 1 → 2 |
+| `schlafzimmer` | 19:43:38 | `6f2c56e` | 1 → 2 | 1 → 2 |
+| `kueche` | 19:44:12 | `58aaadd` | 8 → 9 | 1 → 2 |
+| `bad` | 19:44:42 | `42dd3b7` | 14 → 15 | 1 → 2 |
+| `solarleuchte` | 19:48:03 | `a2115c4` | 20 → 21 | 1 → 2 |
+| `terrasse` | 19:56:00 | `adee5d9` | 2 → 3 | 1 → 2 |
+
+`reset_reason` reads 3 on every node afterwards: the software reset into the
+new slot, the signature from 2026-09-29. **`reset_count` went up by one this
+time instead of restarting at 1** — the RTC RAM layout did not move between
+these images, so the counter survived the update. Read it as one series across
+this line, unlike across 2026-10-08.
+
+Checked afterwards: the retained discovery configs carry `ent_cat` on exactly
+the four board channels (read off the broker for `wohnzimmer`), and the
+archiver reports `entity_category: diagnostic` for them on every node. Every
+node published further rounds on the new version, so none rolled back.
+Batteries unmoved across the update: `terrasse` 3.93 V, `solarleuchte`
+3.79 → 3.78 V.
+
+**The offers from 2026-10-08 were still retained** until tonight, against
+what `docs/ota.md` asks. Harmless — each named the version already running —
+but every reconnect re-delivered six of them. All six were withdrawn
+(`-r -n`) after this rollout and the broker holds no `ota/offer` now.
