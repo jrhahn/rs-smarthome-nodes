@@ -164,9 +164,17 @@ left out.
 
 ## What the dashboard shows
 
-Two views, and the split is the useful part.
+Three views, and the split is the useful part.
 
-**The overview** is a wall of tiles, one per channel, grouped by node: the
+**The dashboard** (`#d/<range>`, and the landing page) is the house at a glance:
+one card per room, led by the reading that matters most there — temperature,
+power, a water meter — large with its sparkline, the rest compact beneath.
+Everything about the devices rather than the rooms is left out: channels marked
+`diagnostic`, the firmware's link and reset counters, unnamed topics, raw twins
+of corrected readings, supply voltage and current. The rule is `isDebug` in
+`assets/app.js`; all of it stays one click away under **Live**.
+
+**The overview** (**Live**, `#all/<range>`) is a wall of tiles, one per channel, grouped by node: the
 current value, its unit, a sparkline over the selected range, and the span that
 sparkline covers. Small multiples rather than one chart with thirty-one lines
 on it — the channels are in different units, and a shared axis across
@@ -174,7 +182,8 @@ micrograms, parts per million and degrees would be a lie. Node headings carry an
 online/offline word beside the dot, because green and red are precisely the pair
 a colour-blind reader cannot separate.
 
-**The detail view** is one channel at full size: the min/max band with the mean
+**The detail view** is one channel at full size, with the way back beside the
+title in the header: the min/max band with the mean
 through it, min / mean / max / last as numbers above it, a crosshair that reads
 out the bucket under the pointer, and the same numbers as a table for anything a
 curve reads badly. Time ticks land on the hour, midnight or the first of the

@@ -130,6 +130,9 @@ const state = {
   // channel to zoom into.
   periods: null,
   periodData: null,
+  // The third view: the house at a glance. Stays set while a channel opened
+  // from it is shown, so "back" returns to where the reader came from.
+  dashboard: false,
 };
 
 /// How many earlier windows `compare` draws behind the current one.
@@ -174,6 +177,11 @@ const dom = {
   gauges: el("gauges"),
   periodsFoot: el("periods-foot"),
   viewLive: el("view-live"),
+  viewDashboard: el("view-dashboard"),
+  dashboard: el("dashboard"),
+  dashboardHint: el("dashboard-hint"),
+  rooms: el("rooms"),
+  back: el("back"),
   viewPeriods: el("view-periods"),
 };
 
@@ -276,6 +284,10 @@ function readHash() {
     return;
   }
   state.periods = null;
+  // Everything but the channel wall belongs to the dashboard, the landing
+  // page. A chart link does not say where it was opened from, so after a reload
+  // or from a pasted link its way back leads there rather than to "Live".
+  state.dashboard = parts[0] !== "all";
   if (parts[0] === "c" && parts[1] && parts[2]) {
     state.selected = { node: parts[1], sensor: parts[2] };
   } else {
@@ -305,7 +317,9 @@ function writeHash() {
     : state.range;
   const next = state.selected
     ? `#c/${encodeURIComponent(state.selected.node)}/${encodeURIComponent(state.selected.sensor)}/${slot}`
-    : `#all/${slot}`;
+    : state.dashboard
+      ? `#d/${slot}`
+      : `#all/${slot}`;
   if (location.hash !== next) history.replaceState(null, "", next);
 }
 
@@ -317,11 +331,19 @@ async function loadOverview() {
     state.channels = await getJSON(`/api/overview?from=${from}&to=${to}&points=80`);
     dom.overviewHint.hidden = state.channels.length > 0;
   } catch (e) {
-    dom.overviewHint.hidden = false;
-    dom.overviewHint.innerHTML = `<span class="error">${esc(e.message)}</span>`;
+    for (const hint of [dom.overviewHint, dom.dashboardHint]) {
+      hint.hidden = false;
+      hint.innerHTML = `<span class="error">${esc(e.message)}</span>`;
+    }
     return;
   }
-  renderOverview();
+  // A chart drawn before the channel list arrived is labelled with its raw
+  // key; now that the names are here, label it again. Only the label: the
+  // series on screen may still be the previous channel's, and redrawing it is
+  // `loadDetail`'s business.
+  if (state.selected) renderTitle();
+  else if (state.dashboard) renderDashboard();
+  else renderOverview();
 }
 
 async function loadDetail() {
@@ -444,6 +466,9 @@ function renderOverview() {
     drawSparkline(tile.querySelector("canvas"), c.points);
     tile.addEventListener("click", () => {
       state.selected = { node: c.node, sensor: c.sensor };
+      // The previous chart's data must not stay on screen under this title.
+      state.series = null;
+      state.compareSeries = [];
       writeHash();
       show();
     });
@@ -490,6 +515,134 @@ function drawSparkline(canvas, points) {
   ctx.arc(x(lt), y(lv), 2.5, 0, Math.PI * 2);
   ctx.fillStyle = css("--series");
   ctx.fill();
+}
+
+// --- dashboard --------------------------------------------------------------
+
+/// Channels about the device rather than the house. Home Assistant's own
+/// `entity_category` says so where the publisher sets it (the water meters do);
+/// the firmware's link and reset diagnostics do not carry it, so they are named
+/// here until they do.
+const FIRMWARE_DIAGNOSTICS = new Set(["rssi", "reset_reason", "reset_count", "boot_count"]);
+
+/// What the dashboard leaves out: diagnostics, channels nobody named (a stray
+/// topic, a test publish), the uncompensated twin of a corrected reading, and
+/// the CO₂ sensor's own temperature and humidity, which sit next to a better
+/// sensor's on the same node, and the supply voltage and current -- power and
+/// energy say what a plug or a battery is doing. All of it is still one click
+/// away under "Live".
+function isDebug(c) {
+  return (
+    c.entity_category === "diagnostic" ||
+    FIRMWARE_DIAGNOSTICS.has(c.sensor) ||
+    !c.name ||
+    c.sensor.endsWith("_raw") ||
+    c.sensor.startsWith("scd41_") ||
+    c.sensor === "rate_per_digitization_round" ||
+    c.device_class === "voltage" ||
+    c.device_class === "current"
+  );
+}
+
+/// Which reading a room card leads with. The first match is drawn large with
+/// its sparkline; everything else follows as a compact row.
+const LEAD = ["temperature", "power", "water", "carbon_dioxide", "humidity", "battery"];
+const leadRank = (c) => {
+  const i = LEAD.indexOf(c.device_class);
+  return i < 0 ? LEAD.length : i;
+};
+
+/// `wasserzaehler_kalt` as "Wasserzaehler kalt", for publishers whose
+/// discovery name is a topic path rather than something to show.
+const prettyNode = (node) => node.charAt(0).toUpperCase() + node.slice(1).replace(/_/g, " ");
+
+/// When a reading deserves attention, by device class: `[elevated, high]`.
+/// CO₂ follows the German Umweltbundesamt's indoor guidance -- below 1000 ppm
+/// harmless, 1000–2000 ppm conspicuous (air the room), above 2000 ppm
+/// unacceptable.
+const LIMITS = { carbon_dioxide: [1000, 2000] };
+
+/// `""`, `"warn"` or `"alert"`, for the reading's class and its word.
+function level(c) {
+  const limits = LIMITS[c.device_class];
+  if (!limits || c.last_value === null || c.last_value === undefined) return "";
+  if (c.last_value >= limits[1]) return "alert";
+  if (c.last_value >= limits[0]) return "warn";
+  return "";
+}
+
+function renderDashboard() {
+  const byNode = new Map();
+  for (const c of state.channels) {
+    if (isDebug(c)) continue;
+    if (!byNode.has(c.node)) byNode.set(c.node, []);
+    byNode.get(c.node).push(c);
+  }
+  // A node whose every channel is filtered gets no card -- say so, or a node
+  // gone quiet looks like one that never existed.
+  const hidden = [...new Set(state.channels.map((c) => c.node))].filter((n) => !byNode.has(n));
+  dom.dashboardHint.hidden = byNode.size > 0 && !hidden.length;
+  dom.dashboardHint.textContent = !state.channels.length
+    ? "No channels yet."
+    : hidden.length
+      ? `${byNode.size ? "Not shown" : "Nothing to show"}: ${hidden.join(", ")} — diagnostics only, see Live.`
+      : "";
+
+  // Colour and a word, never colour alone: the same rule as the status dots.
+  const value = (c) => {
+    const l = level(c);
+    return (
+      `<span class="${l}">${esc(formatterFor(c).format(c.last_value ?? NaN).replace("NaN", "—"))}` +
+      (c.unit ? `<span class="unit">${esc(c.unit)}</span>` : "") +
+      `</span>` +
+      (l ? `<span class="badge ${l}">${l === "alert" ? "high" : "elevated"}</span>` : "")
+    );
+  };
+  const link = (c, cls, inner) =>
+    `<button class="${cls}" data-node="${esc(c.node)}" data-sensor="${esc(c.sensor)}">${inner}</button>`;
+
+  const cards = [];
+  for (const [node, channels] of byNode) {
+    channels.sort((a, b) => leadRank(a) - leadRank(b));
+    const [lead, ...rest] = channels;
+    const name = channels.find((c) => c.node_name && !c.node_name.includes("/"))?.node_name || prettyNode(node);
+    const online = channels.find((c) => c.online !== null && c.online !== undefined)?.online;
+    const last = Math.max(...channels.map((c) => c.last_at_ms || 0));
+    const stale = !last || Date.now() - last > 3600e3;
+    // Same rule as the overview: a dot never stands alone.
+    const status =
+      online === false
+        ? `<span class="dot down"></span>offline`
+        : `<span class="dot ${stale ? "down" : "up"}"></span>${esc(ago(last))}`;
+    cards.push(
+      `<article class="room">` +
+        `<div class="room-head"><h3>${esc(name)}</h3><span class="state${stale ? " stale" : ""}">${status}</span></div>` +
+        link(lead, "lead", `<span class="label">${esc(label(lead))}</span><span class="value">${value(lead)}</span><canvas></canvas>`) +
+        (rest.length
+          ? `<div class="readings">${rest
+              .map((c) => link(c, "reading", `<span class="label">${esc(label(c))}</span><span class="value">${value(c)}</span>`))
+              .join("")}</div>`
+          : "") +
+        `</article>`,
+    );
+  }
+  dom.rooms.innerHTML = cards.join("");
+
+  for (const button of dom.rooms.querySelectorAll("button")) {
+    const c = state.channels.find(
+      (x) => x.node === button.dataset.node && x.sensor === button.dataset.sensor,
+    );
+    const canvas = button.querySelector("canvas");
+    if (canvas) drawSparkline(canvas, c.points);
+    button.addEventListener("click", () => {
+      state.selected = { node: c.node, sensor: c.sensor };
+      // The previous chart's data must not stay on screen under this title.
+      state.series = null;
+      state.compareSeries = [];
+      writeHash();
+      show();
+    });
+  }
 }
 
 // --- periods ----------------------------------------------------------------
@@ -629,8 +782,18 @@ function renderPeriodChoice() {
   }
 }
 
+dom.viewDashboard.addEventListener("click", () => {
+  state.periods = null;
+  state.selected = null;
+  state.dashboard = true;
+  writeHash();
+  show();
+});
+
 dom.viewLive.addEventListener("click", () => {
   state.periods = null;
+  state.selected = null;
+  state.dashboard = false;
   writeHash();
   show();
 });
@@ -653,11 +816,16 @@ function channel() {
   );
 }
 
+function renderTitle() {
+  const c = channel();
+  dom.title.textContent = label(c);
+  dom.sub.textContent = `${c.node_name || c.node} · ${c.sensor}${c.unit ? ` · ${c.unit}` : ""}`;
+}
+
 function renderDetail() {
   const c = channel();
   const s = state.series;
-  dom.title.textContent = label(c);
-  dom.sub.textContent = `${c.node_name || c.node} · ${c.sensor}${c.unit ? ` · ${c.unit}` : ""}`;
+  renderTitle();
 
   dom.exportCsv.disabled = !s || !s.points.length;
 
@@ -1139,18 +1307,18 @@ dom.chart.addEventListener(
 
 dom.chart.addEventListener("dblclick", () => zoomReset());
 
-el("back").addEventListener("click", () => {
+dom.back.addEventListener("click", () => {
   state.selected = null;
   writeHash();
   show();
 });
 
 el("home").addEventListener("click", () => {
-  // Back to the overview, and out of any zoom: the title is "show me
-  // everything", and an absolute window left over from one channel is not
-  // everything.
+  // Back to the landing page, and out of any zoom: the title is "start
+  // over", and an absolute window left over from one channel is not that.
   state.selected = null;
   state.periods = null;
+  state.dashboard = true;
   state.zoom = null;
   state.zoomHome = null;
   renderRanges();
@@ -1248,6 +1416,7 @@ dom.dialog.addEventListener("close", async () => {
 window.addEventListener("resize", () => {
   if (state.periods) return;
   if (state.selected) drawChart();
+  else if (state.dashboard) renderDashboard();
   else renderOverview();
 });
 
@@ -1287,12 +1456,17 @@ function renderRanges() {
 function applyView() {
   const periods = Boolean(state.periods);
   const detail = !periods && Boolean(state.selected);
-  dom.overview.hidden = detail || periods;
+  const dashboard = !periods && !detail && state.dashboard;
+  dom.overview.hidden = detail || periods || dashboard;
+  dom.dashboard.hidden = !dashboard;
+  dom.back.hidden = !detail;
+  dom.back.textContent = state.dashboard ? "← Dashboard" : "← Overview";
   dom.detail.hidden = !detail;
   dom.periods.hidden = !periods;
   dom.ranges.hidden = periods;
   dom.periodChoice.hidden = !periods;
-  dom.viewLive.setAttribute("aria-pressed", String(!periods));
+  dom.viewDashboard.setAttribute("aria-pressed", String(!periods && state.dashboard));
+  dom.viewLive.setAttribute("aria-pressed", String(!periods && !state.dashboard));
   dom.viewPeriods.setAttribute("aria-pressed", String(periods));
   if (periods) renderPeriodChoice();
 }

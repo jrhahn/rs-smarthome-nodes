@@ -26,6 +26,10 @@ reconstruction and reads like one.
 
 ### Fixed
 
+- **A chart opened from a link shows its channel's name, not its key.** When
+  the series arrived before the channel list, the title stayed `temperature`
+  instead of `Temperatur` until the next refresh; it is now relabelled as soon
+  as the names arrive.
 - **A mistyped `NODE=` now lists `solarleuchte` among the valid names.** The
   build-time error spelled the list out a second time and had missed it; the
   message and `KNOWN_NODES` now share one literal.
@@ -45,6 +49,14 @@ reconstruction and reads like one.
 
 ### Added
 
+- **The dashboard opens on a room view without the debug channels.** One card
+  per node, its main reading large with a sparkline and the rest compact;
+  diagnostics, the firmware's `rssi` / `boot_count` / `reset_*`, unnamed
+  topics, raw twins and supply voltage and current are left out. The channel
+  wall is still there as **Live**. The way back from a chart moved from inside
+  the card to beside the title, labelled with the view it returns to.
+  CO₂ at or above 1000 ppm is drawn amber and marked *elevated*, at or above
+  2000 ppm red and *high* (the Umweltbundesamt's indoor guidance).
 - **The dashboard has a second view: values per day, week and month** (#52).
   Periods follow the house's calendar (`Europe/Berlin`, weeks from Monday).
   Meters — electricity in kWh, water in m³, anything announced

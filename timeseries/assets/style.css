@@ -23,6 +23,7 @@
   --series-band: rgba(42, 120, 214, 0.16);
 
   --good: #0ca30c;
+  --warning: #b86e00;
   --critical: #d03b3b;
 
   --radius: 12px;
@@ -46,6 +47,7 @@
     --series-band: rgba(57, 135, 229, 0.22);
 
     --good: #0ca30c;
+    --warning: #e8a33a;
     --critical: #d03b3b;
 
     --shadow: none;
@@ -63,6 +65,7 @@
   --text-muted: #918f85;
   --series: #3987e5;
   --series-band: rgba(57, 135, 229, 0.22);
+  --warning: #e8a33a;
   --shadow: none;
 }
 
@@ -418,3 +421,90 @@ dialog button.primary { background: var(--series); border-color: var(--series); 
 .counts { grid-column: 1 / -1; margin-top: 0.4rem; }
 .counts summary { cursor: pointer; color: var(--text-secondary); font-size: 0.85rem; }
 .counts .meters { margin-top: 0.6rem; }
+
+/* --- dashboard ---------------------------------------------------------- */
+
+.brand-row { display: flex; align-items: center; gap: 0.8rem; }
+/* The way back, beside the title: outlined in the accent so it reads as the
+   one control that leaves this view, not as another filter pill. */
+header .back {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--series);
+  border-color: var(--series);
+  padding: 0.35rem 0.95rem;
+}
+header .back:hover { background: var(--series); color: #fff; border-color: var(--series); }
+header .back[hidden] { display: none; }
+
+.rooms {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+.room {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1rem 1.1rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.room-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; }
+.room-head h3 { font-size: 1.05rem; }
+.room-head .state { font-size: 0.75rem; color: var(--text-muted); white-space: nowrap; }
+.room-head .state.stale { color: var(--critical); }
+
+.room button {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.25rem 0.35rem;
+  margin: 0 -0.35rem;
+  cursor: pointer;
+}
+.room button:hover { background: var(--surface-0); }
+.room .label { font-size: 0.8rem; color: var(--text-secondary); }
+.room .value { font-variant-numeric: tabular-nums; font-weight: 600; }
+.room .unit { font-weight: 500; color: var(--text-secondary); margin-left: 0.2rem; font-size: 0.6em; }
+
+.room .lead { display: flex; flex-direction: column; gap: 0.15rem; }
+.room .lead .value { font-size: 2.4rem; letter-spacing: -0.03em; line-height: 1.05; }
+.room .lead canvas { width: 100%; height: 44px; display: block; margin-top: 0.3rem; }
+
+.readings {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 0.2rem 0.6rem;
+  border-top: 1px solid var(--grid);
+  padding-top: 0.5rem;
+}
+.reading { display: flex; flex-direction: column; }
+.reading .value { font-size: 1.1rem; }
+.reading .unit { font-size: 0.75em; }
+
+/* A reading past its limit: the number takes the colour, and a word beside it
+   says what the colour means. */
+.room .warn { color: var(--warning); }
+.room .alert { color: var(--critical); }
+.room .warn .unit, .room .alert .unit { color: inherit; }
+.room .badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  text-transform: uppercase;
+}
+.room .lead .badge { font-size: 0.75rem; }
+/* In a compact reading the badge sits on its own line under the number. */
+.reading .badge { margin: 0.15rem 0 0; align-self: flex-start; }
