@@ -45,6 +45,12 @@ reconstruction and reads like one.
 
 ### Added
 
+- **The dashboard opens on a room view without the debug channels.** One card
+  per node, its main reading large with a sparkline and the rest compact;
+  diagnostics, the firmware's `rssi` / `boot_count` / `reset_*`, unnamed
+  topics, raw twins and supply voltage and current are left out. The channel
+  wall is still there as **Live**. The way back from a chart moved from inside
+  the card to beside the title, labelled with the view it returns to.
 - **The dashboard has a second view: values per day, week and month** (#52).
   Periods follow the house's calendar (`Europe/Berlin`, weeks from Monday).
   Meters — electricity in kWh, water in m³, anything announced

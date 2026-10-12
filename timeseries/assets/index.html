@@ -12,12 +12,19 @@
         <!-- A real button, not a styled div: this is the way back to the
              overview from anywhere, and the top-left title is where everyone
              looks for it. -->
-        <h1><button id="home" type="button">History</button></h1>
+        <div class="brand-row">
+          <h1><button id="home" type="button">History</button></h1>
+          <!-- Next to the title rather than inside the card: the top left is
+               where everyone looks for the way back. Shown in the detail view
+               only, labelled with the view it returns to. -->
+          <button class="back" id="back" type="button" hidden>← Overview</button>
+        </div>
         <p class="sub" id="brand-sub">the sensor archive</p>
       </div>
       <!-- Live: a window sliding with the clock. Periods: whole days, weeks and
            months in local time -- what the meters are for. -->
       <div class="ranges views" role="group" aria-label="View">
+        <button id="view-dashboard" type="button">Dashboard</button>
         <button id="view-live" type="button">Live</button>
         <button id="view-periods" type="button">Periods</button>
       </div>
@@ -27,6 +34,13 @@
     </header>
 
     <main>
+      <!-- Dashboard: one card per room, what the house is doing, without the
+           channels that are about the devices themselves. -->
+      <section id="dashboard" hidden>
+        <p class="hint" id="dashboard-hint">Loading …</p>
+        <div id="rooms" class="rooms"></div>
+      </section>
+
       <!-- Overview: one tile per channel, grouped by node. -->
       <section id="overview">
         <p class="hint" id="overview-hint">Loading channels …</p>
@@ -37,7 +51,6 @@
       <section id="detail" hidden>
         <div class="detail-head">
           <div>
-            <button class="back" id="back" type="button">← Overview</button>
             <h2 id="chart-title">—</h2>
             <p class="sub" id="chart-sub"></p>
           </div>
