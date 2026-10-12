@@ -6,8 +6,9 @@
 `feature/<short-kebab-case>`, and open a pull request. This holds for a one-line
 fix and for documentation.
 
-`develop` is the integration branch and the one `home-server-private` pins its
-flake input to, so a commit landing there is a commit the house can deploy.
+`develop` is the integration branch and the one the private deployment
+repository pins its flake input to, so a commit landing there is a commit the
+house can deploy.
 That is the reason for the rule: nothing reaches it without a review step, even
 a trivial change.
 
