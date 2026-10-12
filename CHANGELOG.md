@@ -46,15 +46,27 @@ reconstruction and reads like one.
   `docs/annotations.md` and `docs/commissioning.md` describe one house, not
   the firmware, and moved with their history to the deployment's private
   repository.
-
-### Changed
-
 - **Link and reset counters are announced as diagnostics.** `rssi`,
   `reset_reason`, `reset_count` and `boot_count` now carry
   `ent_cat: diagnostic` in their discovery message, so Home Assistant files
   them under the device page's diagnostics and the archive's dashboard leaves
   them out without a list of its own. Entity ids and topics are unchanged.
   Takes effect per node on reflash.
+- **The firmware moved to esp-hal 1.1** (#32), and the image now carries an
+  ESP-IDF app descriptor, so it flashes with **espflash 4.x**; the 3.x pin and
+  the second nixpkgs input in `flake.nix` are gone. Chosen as the newest set
+  with no beta crate in it: `esp-hal` 1.1.2, `esp-radio` 0.18 (was `esp-wifi`),
+  `esp-rtos` 0.3 (was `esp-hal-embassy`), `esp-bootloader-esp-idf` 0.5,
+  `embassy-net` 0.9. Rust moves from 1.83 to 1.95. No intended change in what a
+  node does; RTC RAM may be re-laid-out, so counters held there (`reset_count`,
+  the join counter, the parked flag) can read once as garbage after the update.
+  rust-mqtt stays at 0.3 behind a small adapter to embedded-io-async 0.7.
+- **`FW_VERSION` now carries the release: `<node>-<release>-<commit>`**, e.g.
+  `kueche-0.2.0-6c81631`, with `-dirty` still last. The release is read from
+  `Cargo.toml`, so `ota/version`, `meta/board` and the Home Assistant `sw`
+  field say which changelog entry a board is on. OTA offers must use the new
+  string; the comparison stays exact, and a node on an old-format version takes
+  a new-format offer and then recognises it as running (#39).
 
 ### Fixed
 
@@ -103,24 +115,6 @@ reconstruction and reads like one.
   recovers at rest does not flap. A reading under 2.0 V is treated as a wiring
   fault and never parks. `solarleuchte` already went dark and slept until the
   next dusk below its 20 % charge gate, and is unchanged (#37).
-
-### Changed
-
-- **The firmware moved to esp-hal 1.1** (#32), and the image now carries an
-  ESP-IDF app descriptor, so it flashes with **espflash 4.x**; the 3.x pin and
-  the second nixpkgs input in `flake.nix` are gone. Chosen as the newest set
-  with no beta crate in it: `esp-hal` 1.1.2, `esp-radio` 0.18 (was `esp-wifi`),
-  `esp-rtos` 0.3 (was `esp-hal-embassy`), `esp-bootloader-esp-idf` 0.5,
-  `embassy-net` 0.9. Rust moves from 1.83 to 1.95. No intended change in what a
-  node does; RTC RAM may be re-laid-out, so counters held there (`reset_count`,
-  the join counter, the parked flag) can read once as garbage after the update.
-  rust-mqtt stays at 0.3 behind a small adapter to embedded-io-async 0.7.
-- **`FW_VERSION` now carries the release: `<node>-<release>-<commit>`**, e.g.
-  `kueche-0.2.0-6c81631`, with `-dirty` still last. The release is read from
-  `Cargo.toml`, so `ota/version`, `meta/board` and the Home Assistant `sw`
-  field say which changelog entry a board is on. OTA offers must use the new
-  string; the comparison stays exact, and a node on an old-format version takes
-  a new-format offer and then recognises it as running (#39).
 
 ## [0.2.0] — 2026-10-07
 

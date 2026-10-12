@@ -455,8 +455,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(feed_watchdog(watchdog).expect("watchdog task spawns once"));
 
     // What am I? A provisioned flavor in flash wins over the one this image was
-    // built with; the id and name are the built ones either way. Must happen before any peripheral is touched: the sensor set
-    // decides which buses come up at all.
+    // built with; the id and name are the built ones either way. Must happen
+    // before any peripheral is touched: the sensor set decides which buses come
+    // up at all.
     node::init();
     node::set_mac(mac_address());
     let node = node::active();
@@ -2097,7 +2098,12 @@ async fn install_if_offered(stack: WifiStack, drained: &Drained) {
 /// `mosquitto_sub`, not by the archiver, and one retained object per node makes
 /// `smarthome/+/meta/board` a listing of the whole fleet — MAC, image, address
 /// and which slot it is running from, for sleeping nodes too.
-fn board_meta(stack: WifiStack) -> Option<heapless::String<224>> {
+///
+/// 256 bytes rather than a tight fit: the worst case — a 16-byte id, a `-dirty`
+/// version, the longest flavor, `provisioned`, a ten-digit `seq` and a
+/// fifteen-character address — formats to about 218, and an overflow drops the
+/// whole retained message without a word.
+fn board_meta(stack: WifiStack) -> Option<heapless::String<256>> {
     use core::fmt::Write as _;
 
     let node = node::active();
