@@ -763,7 +763,7 @@ mod tests {
         SCD41_CONTROLS, SDS011_CONTROLS, SLEEP_CONTROLS, STATE_MAX, TIME_KEY, VALUE_KEY,
         VALUE_TEMPLATE,
     };
-    use crate::node::FLEET;
+    use crate::node::FLAVORS;
     use serde_json::Value;
 
     /// Expand Home Assistant's `~` shorthand the way it does, so a topic can be
@@ -805,7 +805,7 @@ mod tests {
             ds18b20: Slot::off(),
             sht31: Slot::on_as("air_", "Luft"),
             battery: Slot::on_as("battery_", "Batterie"),
-            ..crate::node::by_name("terrasse").unwrap()
+            ..crate::node::flavor("bird-scale").unwrap()
         }
     }
 
@@ -840,9 +840,18 @@ mod tests {
         // firmware version and the MAC. The MAC has to be set or this would
         // measure a payload 36 bytes smaller than the one a board really
         // sends, and guard the wrong number.
+        //
+        // Measured with the longest id and name a deployment may give a board:
+        // those come from outside this repository, and the flavors' own short
+        // names would guard a payload smaller than the one a board can send.
         set_test_mac();
         let mut worst = (0usize, String::new());
-        for (_, node) in FLEET {
+        for (_, flavor) in FLAVORS {
+            let node = &crate::node::identify(
+                *flavor,
+                Some("abcdefghijklmnop"),
+                Some("Twenty-four bytes long!!"),
+            );
             let avail = availability_of(node);
             for (topic, payload) in announcements(node, &avail) {
                 let len = serde_json::to_string(&payload).unwrap().len();
@@ -864,7 +873,7 @@ mod tests {
     fn every_payload_is_valid_json_and_fits() {
         // `config_payload` returns None rather than truncating, so "fits" is
         // what `expect` checks; the parse is what catches a malformed join.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             let messages = announcements(node, &avail);
             assert!(!messages.is_empty());
@@ -953,7 +962,7 @@ mod tests {
         // number written by Home Assistant itself. A template there would look
         // for a JSON member in a payload nothing writes, and the knob would
         // stop showing its own value.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             for entity in entities(node) {
                 let payload = parse(&config_payload(node, &entity, &avail).unwrap());
@@ -983,7 +992,7 @@ mod tests {
         // Assistant files them under diagnostics and the archive's dashboard
         // leaves them out. A measurement marked so would vanish from both.
         const BOARD: [&str; 4] = ["rssi", "reset_reason", "reset_count", "boot_count"];
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             for entity in entities(node) {
                 let payload = parse(&config_payload(node, &entity, &avail).unwrap());
@@ -1004,7 +1013,7 @@ mod tests {
         // The whole point of discovery: if these drift, Home Assistant
         // subscribes to a topic nothing ever publishes to and the entity sits
         // at "unknown" for ever.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             for entity in entities(node) {
                 let payload = parse(&config_payload(node, &entity, &avail).unwrap());
@@ -1021,7 +1030,7 @@ mod tests {
         // Likewise for the other direction: the command topic has to fall under
         // the wildcard the node subscribes to, and the key has to be one
         // `Config::apply` actually understands.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             let prefix = node.config_prefix();
             for control in controls(node) {
@@ -1062,7 +1071,7 @@ mod tests {
         // Two entities sharing either one would silently overwrite each other in
         // Home Assistant — exactly what the bedroom's two temperature sources
         // would do without their slot prefix.
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             let avail = availability_of(node);
             let messages = announcements(node, &avail);
             for (i, (topic_a, a)) in messages.iter().enumerate() {
@@ -1078,12 +1087,12 @@ mod tests {
     }
 
     #[test]
-    fn the_bedroom_publishes_the_sht31_as_the_rooms_temperature_and_humidity() {
+    fn the_co2_flavor_publishes_the_sht31_as_the_rooms_temperature_and_humidity() {
         // The concrete result of the two-sensor arrangement, spelled out the way
         // Home Assistant sees it: the SHT31-D owns the plain entities, the
         // SCD41's own pair is clearly marked as the sensor's own, and CO₂ keeps
         // the id its history is filed under.
-        let node = crate::node::by_name("schlafzimmer").unwrap();
+        let node = crate::node::flavor("climate-co2").unwrap();
         let avail = availability_of(&node);
         let topics: Vec<String> = announcements(&node, &avail)
             .iter()
@@ -1091,15 +1100,15 @@ mod tests {
             .collect();
 
         for expected in [
-            "homeassistant/sensor/schlafzimmer/temperature/config",
-            "homeassistant/sensor/schlafzimmer/humidity/config",
-            "homeassistant/sensor/schlafzimmer/co2/config",
-            "homeassistant/sensor/schlafzimmer/scd41_temperature/config",
-            "homeassistant/sensor/schlafzimmer/scd41_humidity/config",
+            "homeassistant/sensor/climate-co2/temperature/config",
+            "homeassistant/sensor/climate-co2/humidity/config",
+            "homeassistant/sensor/climate-co2/co2/config",
+            "homeassistant/sensor/climate-co2/scd41_temperature/config",
+            "homeassistant/sensor/climate-co2/scd41_humidity/config",
         ] {
             assert!(topics.contains(&expected.to_string()), "missing {expected}");
         }
-        assert!(!topics.contains(&"homeassistant/sensor/schlafzimmer/scd41_co2/config".to_string()));
+        assert!(!topics.contains(&"homeassistant/sensor/climate-co2/scd41_co2/config".to_string()));
 
         // And the state topic the firmware publishes to has to agree with the
         // one the discovery payload points at.
@@ -1129,12 +1138,12 @@ mod tests {
             .collect();
 
         assert!(
-            topics.contains(&"homeassistant/sensor/terrasse/battery_voltage/config".to_string())
+            topics.contains(&"homeassistant/sensor/bird-scale/battery_voltage/config".to_string())
         );
         assert!(
-            topics.contains(&"homeassistant/sensor/terrasse/air_temperature/config".to_string())
+            topics.contains(&"homeassistant/sensor/bird-scale/air_temperature/config".to_string())
         );
-        assert!(!topics.contains(&"homeassistant/sensor/terrasse/temperature/config".to_string()));
+        assert!(!topics.contains(&"homeassistant/sensor/bird-scale/temperature/config".to_string()));
 
         let entity = entities(&scale)
             .into_iter()
@@ -1146,7 +1155,7 @@ mod tests {
         assert_eq!(payload["name"], "Batterie Spannung");
         assert_eq!(
             expand(payload["stat_t"].as_str().unwrap(), &scale),
-            "smarthome/terrasse/battery_voltage"
+            "smarthome/bird-scale/battery_voltage"
         );
     }
 
@@ -1154,7 +1163,7 @@ mod tests {
     fn every_entity_belongs_to_the_same_device() {
         // The `dev` block is what groups the entities into one device card, so
         // it has to be byte-identical across a node's messages.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             let messages = announcements(node, &avail);
             let device = messages[0].1["dev"].clone();
@@ -1169,7 +1178,7 @@ mod tests {
 
     #[test]
     fn discovery_topics_follow_the_home_assistant_layout() {
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             for (topic, _) in announcements(node, &avail) {
                 let parts: Vec<&str> = topic.split('/').collect();
@@ -1191,7 +1200,7 @@ mod tests {
     fn only_readings_expire() {
         // A control has no state to go stale; `exp_aft` on one would just make
         // the slider vanish.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             for entity in entities(node) {
                 let payload = parse(&config_payload(node, &entity, &avail).unwrap());
@@ -1206,7 +1215,7 @@ mod tests {
 
     #[test]
     fn the_availability_topic_appears_only_where_there_is_a_will() {
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             let avail = availability_of(node);
             for (_, payload) in announcements(node, &avail) {
                 match payload.get("avty_t") {
@@ -1231,7 +1240,7 @@ mod tests {
     fn expiry_allows_three_missed_rounds_with_a_floor() {
         let mut cfg = Config::DEFAULT;
         cfg.heartbeat_secs = 600;
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             let avail = availability(node, &cfg);
             let period = if node.power.is_battery() {
                 cfg.heartbeat_secs
@@ -1256,12 +1265,12 @@ mod tests {
         let plain = NodeConfig {
             sht31: Slot::off(),
             sds011: Slot::on(),
-            ..crate::node::by_name("kueche").unwrap()
+            ..crate::node::flavor("climate").unwrap()
         };
         let corrected = NodeConfig {
             sds011: Slot::on().compensated(),
             sht31: Slot::on(),
-            ..crate::node::by_name("kueche").unwrap()
+            ..crate::node::flavor("climate").unwrap()
         };
         // Filtered to the sensors under test: every node also announces its
         // link RSSI and its reset diagnostics, which are not what this is about.
@@ -1299,7 +1308,7 @@ mod tests {
         let node = NodeConfig {
             sample_secs: 60,
             sds011: Slot::on().every(900),
-            ..crate::node::by_name("kueche").unwrap()
+            ..crate::node::flavor("climate").unwrap()
         };
         let avail = availability(&node, &Config::DEFAULT);
         assert_eq!(avail.expire_for(node.sds011), 900 * MISSED_ROUNDS);
@@ -1325,7 +1334,7 @@ mod tests {
 
     #[test]
     fn controls_follow_what_the_node_actually_is() {
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             let keys: Vec<&str> = controls(node).iter().map(|c| c.key).collect();
             for control in SCALE_CONTROLS {
                 assert_eq!(
@@ -1385,7 +1394,7 @@ mod tests {
         // No node in the fleet is bare any more: `kueche` and `bad` were, until
         // they started duty-cycling and picked up the `deep_sleep` switch with
         // it. The rule is still worth stating for the next one added.
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             if !node.power.deep_sleeps() && !node.scale.enabled && !node.scd41.enabled {
                 let keys: Vec<&str> = controls(node).iter().map(|c| c.key).collect();
                 assert_eq!(keys, vec!["reannounce"], "{name} exposes dead controls");
@@ -1398,7 +1407,7 @@ mod tests {
         // The regression this guards: the temperature offset is the *only*
         // reason a plain mains sensor node has a Configuration section at all,
         // so it must not drag the battery or load-cell knobs in with it.
-        let bedroom = crate::node::by_name("schlafzimmer").unwrap();
+        let bedroom = crate::node::flavor("climate-co2").unwrap();
         let keys: Vec<&str> = controls(&bedroom).iter().map(|c| c.key).collect();
         assert_eq!(keys, vec!["reannounce", "scd41_temp_offset"]);
     }
@@ -1435,7 +1444,7 @@ mod tests {
         // A scale with no SHT31 has nothing to measure drift against, so the
         // knob would be a control that can only ever read zero. `terrasse` is
         // the node this was built for and carries both.
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             let keys: Vec<&str> = controls(node).iter().map(|c| c.key).collect();
             assert_eq!(
                 keys.contains(&"temp_coeff"),
@@ -1505,7 +1514,7 @@ mod tests {
         // right now, so the populated node is included explicitly — dropping
         // it would leave the labelled branch untested.
         let populated = a_fully_populated_node();
-        for node in FLEET.iter().map(|(_, n)| n).chain([&populated]) {
+        for node in FLAVORS.iter().map(|(_, n)| n).chain([&populated]) {
             let avail = availability_of(node);
             for entity in entities(node) {
                 let payload = parse(&config_payload(node, &entity, &avail).unwrap());
@@ -1522,7 +1531,7 @@ mod tests {
     fn the_gas_sensor_announces_nox_only_where_it_is_declared() {
         let voc_only = NodeConfig {
             sgp41: Slot::on(),
-            ..crate::node::by_name("wohnzimmer").unwrap()
+            ..crate::node::flavor("air-quality").unwrap()
         };
         let with_nox = NodeConfig {
             sgp41: Slot::on().with_nox(),
@@ -1550,7 +1559,7 @@ mod tests {
     /// except this one. The living room with the gas sensor on is 14 of 16.
     #[test]
     fn no_node_overflows_the_entity_vec() {
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let with_gas = NodeConfig {
                 sgp41: Slot::on().with_nox(),
                 ..*node
@@ -1568,7 +1577,7 @@ mod tests {
 
     #[test]
     fn a_count_omits_the_unit_and_device_class_instead_of_sending_empties() {
-        let node = crate::node::by_name("terrasse").unwrap();
+        let node = crate::node::flavor("bird-scale").unwrap();
         let avail = availability_of(&node);
         let all = entities(&node);
         let entity = all
@@ -1594,7 +1603,7 @@ mod tests {
 
     #[test]
     fn a_battery_node_announces_both_the_voltage_and_the_level() {
-        let node = crate::node::by_name("terrasse").unwrap();
+        let node = crate::node::flavor("bird-scale").unwrap();
         let keys: Vec<&str> = entities(&node)
             .iter()
             .filter(|e| e.slot.prefix == "battery_")
@@ -1609,10 +1618,10 @@ mod tests {
             .map(|e| config_topic(&node, e).to_string())
             .collect();
         assert!(
-            topics.contains(&"homeassistant/sensor/terrasse/battery_voltage/config".to_string())
+            topics.contains(&"homeassistant/sensor/bird-scale/battery_voltage/config".to_string())
         );
         assert!(
-            topics.contains(&"homeassistant/sensor/terrasse/battery_percent/config".to_string())
+            topics.contains(&"homeassistant/sensor/bird-scale/battery_percent/config".to_string())
         );
         for entity in entities(&node) {
             assert!(config_payload(&node, &entity, &avail).is_some());
@@ -1631,7 +1640,7 @@ mod tests {
     fn switching_a_sensor_on_changes_the_digest() {
         let before = NodeConfig {
             sds011: Slot::off(),
-            ..crate::node::by_name("wohnzimmer").unwrap()
+            ..crate::node::flavor("air-quality").unwrap()
         };
         let after = NodeConfig {
             sds011: Slot::on().compensated().every(900),
@@ -1647,7 +1656,7 @@ mod tests {
     fn an_unchanged_node_keeps_its_digest() {
         // Otherwise every connect would re-announce, which is the airtime the
         // stored tag exists to avoid.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let avail = availability_of(node);
             assert_eq!(
                 announcement_tag(node, &avail),
@@ -1662,7 +1671,7 @@ mod tests {
     /// cadence change re-announce without a special case beside the flash write.
     #[test]
     fn a_changed_cadence_changes_the_digest() {
-        let node = crate::node::by_name("terrasse").unwrap();
+        let node = crate::node::flavor("bird-scale").unwrap();
         let slow = Config {
             heartbeat_secs: 600,
             ..Config::DEFAULT
@@ -1681,7 +1690,7 @@ mod tests {
     fn the_digest_is_never_the_nothing_announced_sentinel() {
         // Zero means "RTC RAM holds nothing"; a real node must never collide
         // with it, or its first announce would be skipped.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             assert_ne!(
                 announcement_tag(node, &availability_of(node)),
                 0,
@@ -1696,7 +1705,7 @@ mod tests {
     #[test]
     fn different_nodes_have_different_digests() {
         let mut seen: Vec<u32> = Vec::new();
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let tag = announcement_tag(node, &availability_of(node));
             assert!(!seen.contains(&tag), "{} collides", node.id);
             seen.push(tag);

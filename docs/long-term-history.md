@@ -140,7 +140,7 @@ improving.
 None of that is in the numbers. A small `annotations` table — timestamp, node,
 one sentence — or even a dated list in this repo is what turns a pile of
 readings into a measurement series. It is the cheapest thing here and the one
-most likely to be skipped; [`annotations.md`](annotations.md) is where it is
+most likely to be skipped; the deployment's fleet log is where it is
 being kept until the table exists.
 
 ## The order of work
@@ -159,7 +159,7 @@ being kept until the table exists.
    in the family borg paths, the job brackets itself with `CHECKPOINT CREATE` /
    `CHECKPOINT RELEASE`, and the release hangs off `ExecStopPost` so a failed
    backup cannot leave a checkpoint held.
-4. **Annotations** — started, by hand, in [`annotations.md`](annotations.md). A
+4. **Annotations** — started, by hand, in the deployment's fleet log. A
    table in the database is still the better home for them, so a chart can show
    them; a dated list costs nothing and is already worth more than the memory it
    replaces.

@@ -1,14 +1,15 @@
 # rs-smarthome-nodes
 
 Async `no_std` Rust ([Embassy](https://embassy.dev)) firmware for a fleet of
-**Seeed Studio XIAO ESP32-C3** smart-home sensor nodes. One image serves every
-node: `NODE=<name>` at build time selects which sensors are populated, what the
-node is called, and whether it sleeps between readings or stays associated.
+**Seeed Studio XIAO ESP32-C3** smart-home sensor nodes. One code base serves
+every board: `FLAVOR=<flavor>` at build time selects which sensors are
+populated and whether it sleeps between readings or stays associated, and
+`NODE_ID` / `NODE_NAME` say what the board is called.
 Home Assistant picks the nodes up automatically over **MQTT
 auto-discovery** — no hand-declared entities.
 
-It started as a battery bird-feeder scale, which is still the default node
-(`NODE=terrasse`): on each wake-up it reads a load cell via an HX711 amplifier
+It started as a battery bird-feeder scale, the `bird-scale` flavor: on each
+wake-up it reads a load cell via an HX711 amplifier
 and compares it against a tare baseline kept in RTC RAM. While the feeder is
 empty it polls every couple of seconds from **light** sleep — no radio, and no
 cold boot per poll — which bounds how short a visit it can see at all. The
@@ -32,22 +33,34 @@ retained calibration/tuning back from Home Assistant and persists it to flash.
    battery divider ─ ADC ────────────▶
 ```
 
-## The fleet
+## Flavors
 
-Pick a node with `NODE=` at build time (`src/node.rs`); an unknown name fails
-the build rather than flashing the wrong personality onto a board. A board can
-also be **provisioned** to another identity afterwards, without a rebuild.
+A **flavor** is a kind of board: its sensor set and power profile
+(`src/node.rs`). Which board in which room runs which flavor is not in this
+repository — that belongs to a deployment, which builds each board with
+`FLAVOR`, `NODE_ID` and `NODE_NAME`:
 
-| `NODE=` | Room | Sensors | Outputs | Power |
-| --- | --- | --- | --- | --- |
-| `terrasse` (default) | Terrasse | HX711 load cell + SHT31-D + cell voltage | — | battery, deep sleep |
-| `schlafzimmer` | Schlafzimmer | SCD41 + SHT31-D | — | mains |
-| `wohnzimmer` | Wohnzimmer | SCD41 + SHT31-D + SDS011 + SGP41 | — | mains (fan) |
-| `kueche` | Küche | SHT31-D | — | mains, duty-cycled |
-| `bad` | Bad | SHT31-D | — | mains, duty-cycled |
-| `solarleuchte` | Garten | SHT31-D + cell voltage | LED string (LEDC) | battery, deep sleep |
+```bash
+FLAVOR=climate NODE_ID=kitchen NODE_NAME="Kitchen" cargo build --release
+```
 
-A board can be told to become another node over MQTT, without reflashing — see
+The id is the topic level (`smarthome/<id>/<key>`), the MQTT client id and part
+of every Home Assistant unique id; the name is the device name Home Assistant
+shows. Without them a board is called after its flavor. An unknown flavor or a
+malformed id fails the build rather than flashing the wrong hardware profile
+or publishing under a topic nobody subscribed to, and the retired `NODE=` is
+refused with a pointer to what replaced it.
+
+| `FLAVOR=` | Sensors | Outputs | Power |
+| --- | --- | --- | --- |
+| `climate` (default) | SHT31-D | — | mains, duty-cycled |
+| `climate-co2` | SCD41 + SHT31-D | — | mains |
+| `air-quality` | SCD41 + SHT31-D + SDS011 + SGP41 | — | mains (fan) |
+| `bird-scale` | HX711 load cell + SHT31-D + cell voltage | — | battery, deep sleep |
+| `solar-lamp` | SHT31-D + cell voltage | LED string (LEDC) | battery, deep sleep |
+
+A board whose hardware changed can be told to run another flavor over MQTT,
+without reflashing; its id stays — see
 [provisioning](docs/flashing.md#7-provisioning-a-board-without-reflashing).
 
 **Power profiles** decide the loop. *Battery* nodes cold-boot out of deep sleep,
@@ -55,24 +68,24 @@ measure, publish only when there is something to say, and sleep again, at the
 runtime intervals set from [Home Assistant](docs/home-assistant.md#configure--calibrate-from-home-assistant). *Mains* nodes stay associated and sample on a fixed
 per-node cadence — CO₂ continuity and the SDS011's duty-cycled fan both rule out
 deep sleep. A sensor whose own cadence is slower than the node's round says so
-per slot (`Slot::every`), which is how `wohnzimmer` reads CO₂ every minute while
-its fan runs four times an hour.
+per slot (`Slot::every`), which is how `air-quality` reads CO₂ every minute
+while its fan runs four times an hour.
 
 *Mains, duty-cycled* is the third: on a cable, but deep-sleeping between rounds
 anyway. The reason is heat rather than power. A node that keeps Wi-Fi up draws
 something like 80–110 mA without pause, which is roughly a third of a watt
 warming the inside of a small box, and a node whose entire job is to report the
-room's temperature cannot afford to warm the air it is measuring. `kueche` and
-`bad` carry nothing that needs continuity, so they stop running between
-readings, sleeping their own `sample_secs` — the cadence they already published
-at, so no history gets a step in it. Any node that sleeps at all keeps the
+room's temperature cannot afford to warm the air it is measuring. `climate`
+carries nothing that needs continuity, so it stops running between readings,
+sleeping its own `sample_secs` — the cadence it already published at, so no
+history gets a step in it. Any node that sleeps at all keeps the
 `config/deep_sleep` switch, which holds it awake for bench testing.
 
 ## Quick start
 
 ```bash
-cp .env.example .env              # Wi-Fi + MQTT credentials; direnv loads it
-NODE=kueche cargo run --release   # build, flash over USB-C, open the monitor
+cp .env.example .env                       # Wi-Fi + MQTT credentials; direnv loads it
+FLAVOR=climate NODE_ID=kitchen cargo run --release   # build, flash over USB-C, open the monitor
 ```
 
 The full procedure — toolchain, the partition table, flashing a sleeping node,
@@ -83,15 +96,13 @@ what a healthy boot log looks like — is in [docs/flashing.md](docs/flashing.md
 | | |
 | --- | --- |
 | [docs/flashing.md](docs/flashing.md) | building, flashing, provisioning, Wi-Fi credentials over the console |
-| [docs/wiring.md](docs/wiring.md) | pin map and wiring for every node |
+| [docs/wiring.md](docs/wiring.md) | pin map and wiring for every flavor |
 | [docs/home-assistant.md](docs/home-assistant.md) | topics, entities, calibration and tuning knobs |
 | [docs/enclosure.md](docs/enclosure.md) | the printed enclosures (`cad/`) |
 | [docs/base-platform.md](docs/base-platform.md) | design notes: node abstraction, power profiles, discovery, testing |
 | [docs/ota.md](docs/ota.md) | over-the-air updates |
-| [docs/solar.md](docs/solar.md), [docs/solarleuchte.md](docs/solarleuchte.md) | solar for `terrasse`; the rebuilt garden lamp |
+| [docs/solar.md](docs/solar.md), [docs/solarleuchte.md](docs/solarleuchte.md) | solar for the bird scale; the rebuilt garden lamp (`solar-lamp`) |
 | [docs/long-term-history.md](docs/long-term-history.md) | keeping the fleet's data for years |
-| [docs/commissioning.md](docs/commissioning.md) | what is physically built, board by board |
-| [docs/annotations.md](docs/annotations.md) | fleet log: rollouts, outages, recalibrations — dated |
 | [CHANGELOG.md](CHANGELOG.md) | what changed in the code |
 
 ## Repository layout
@@ -138,8 +149,8 @@ const-eval cannot reach, such as anything that formats a string, negative cases,
 and inputs enumerated in a loop.
 
 [CI](.github/workflows/ci.yml) runs the tests, both clippy passes, and builds
-every node in the fleet — plus a check that a mistyped `NODE=` still fails the
-build.
+every flavor — plus a check that a mistyped `FLAVOR=`, a malformed `NODE_ID=`
+and the retired `NODE=` still fail the build.
 
 ## Long-term history
 

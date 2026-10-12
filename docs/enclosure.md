@@ -135,7 +135,7 @@ suspecting anything in the firmware.
 **`RAIL_T` was 14 mm until 2026-09-27, and that was not enough.** Over three warm
 days the terrace zero walked from +1.4 g to −75.8 g at matched air temperature and
 did not return overnight — creep in the printed spine, not deflection. See
-[`annotations.md`](annotations.md). 20 mm is 2.9× the stiffness and, since
+the deployment's fleet log. 20 mm is 2.9× the stiffness and, since
 bending stress goes with the square of the depth, about half the stress. It grows
 *downward* into open air, so the 4 mm clearance below is untouched.
 

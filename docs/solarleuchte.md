@@ -4,7 +4,7 @@
 > page is the diagnosis and the design behind it, written from 2026-09-22 and
 > corrected as the build measured things — the LED current on 2026-10-04.
 > What is still open is [at the bottom](#what-is-still-open); the build itself
-> is in the fleet log, [`annotations.md`](annotations.md) (2026-10-07 on).
+> is in the deployment's fleet log (2026-10-07 on).
 
 ## What this is
 

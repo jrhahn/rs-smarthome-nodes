@@ -2,7 +2,7 @@
 //!
 //! The outdoor node has twice gone silent mid-cadence with a healthy cell and
 //! come back only after power was removed entirely — see
-//! [`docs/commissioning.md`]. Nothing in the telemetry could distinguish the
+//! the deployment's commissioning log. Nothing in the telemetry could distinguish the
 //! candidates, because the evidence destroys itself: the reset-cause register
 //! describes *this* boot, so by the time anyone has pulled the cable to revive
 //! the node, it reports the cable.

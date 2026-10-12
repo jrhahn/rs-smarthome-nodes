@@ -1503,8 +1503,8 @@ mod tests {
     // --- Node identity blob -------------------------------------------------
 
     #[test]
-    fn node_blob_round_trips_every_fleet_name() {
-        for (name, _) in crate::node::FLEET {
+    fn node_blob_round_trips_every_flavor() {
+        for (name, _) in crate::node::FLAVORS {
             let blob = encode_node_name(name).expect("encodable");
             assert_eq!(decode_node_name(&blob).as_deref(), Some(*name));
         }
