@@ -547,6 +547,21 @@ const leadRank = (c) => {
 /// discovery name is a topic path rather than something to show.
 const prettyNode = (node) => node.charAt(0).toUpperCase() + node.slice(1).replace(/_/g, " ");
 
+/// When a reading deserves attention, by device class: `[elevated, high]`.
+/// CO₂ follows the German Umweltbundesamt's indoor guidance -- below 1000 ppm
+/// harmless, 1000–2000 ppm conspicuous (air the room), above 2000 ppm
+/// unacceptable.
+const LIMITS = { carbon_dioxide: [1000, 2000] };
+
+/// `""`, `"warn"` or `"alert"`, for the reading's class and its word.
+function level(c) {
+  const limits = LIMITS[c.device_class];
+  if (!limits || c.last_value === null || c.last_value === undefined) return "";
+  if (c.last_value >= limits[1]) return "alert";
+  if (c.last_value >= limits[0]) return "warn";
+  return "";
+}
+
 function renderDashboard() {
   const byNode = new Map();
   for (const c of state.channels) {
@@ -555,9 +570,16 @@ function renderDashboard() {
     byNode.get(c.node).push(c);
   }
 
-  const value = (c) =>
-    `${esc(formatterFor(c).format(c.last_value ?? NaN).replace("NaN", "—"))}` +
-    (c.unit ? `<span class="unit">${esc(c.unit)}</span>` : "");
+  // Colour and a word, never colour alone: the same rule as the status dots.
+  const value = (c) => {
+    const l = level(c);
+    return (
+      `<span class="${l}">${esc(formatterFor(c).format(c.last_value ?? NaN).replace("NaN", "—"))}` +
+      (c.unit ? `<span class="unit">${esc(c.unit)}</span>` : "") +
+      `</span>` +
+      (l ? `<span class="badge ${l}">${l === "alert" ? "high" : "elevated"}</span>` : "")
+    );
+  };
   const link = (c, cls, inner) =>
     `<button class="${cls}" data-node="${esc(c.node)}" data-sensor="${esc(c.sensor)}">${inner}</button>`;
 

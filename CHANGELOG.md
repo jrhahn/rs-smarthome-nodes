@@ -51,6 +51,8 @@ reconstruction and reads like one.
   topics, raw twins and supply voltage and current are left out. The channel
   wall is still there as **Live**. The way back from a chart moved from inside
   the card to beside the title, labelled with the view it returns to.
+  CO₂ at or above 1000 ppm is drawn amber and marked *elevated*, at or above
+  2000 ppm red and *high* (the Umweltbundesamt's indoor guidance).
 - **The dashboard has a second view: values per day, week and month** (#52).
   Periods follow the house's calendar (`Europe/Berlin`, weeks from Monday).
   Meters — electricity in kWh, water in m³, anything announced

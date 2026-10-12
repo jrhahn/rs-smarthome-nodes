@@ -23,6 +23,7 @@
   --series-band: rgba(42, 120, 214, 0.16);
 
   --good: #0ca30c;
+  --warning: #b86e00;
   --critical: #d03b3b;
 
   --radius: 12px;
@@ -46,6 +47,7 @@
     --series-band: rgba(57, 135, 229, 0.22);
 
     --good: #0ca30c;
+    --warning: #e8a33a;
     --critical: #d03b3b;
 
     --shadow: none;
@@ -63,6 +65,7 @@
   --text-muted: #918f85;
   --series: #3987e5;
   --series-band: rgba(57, 135, 229, 0.22);
+  --warning: #e8a33a;
   --shadow: none;
 }
 
@@ -484,3 +487,24 @@ header .back[hidden] { display: none; }
 .reading { display: flex; flex-direction: column; }
 .reading .value { font-size: 1.1rem; }
 .reading .unit { font-size: 0.75em; }
+
+/* A reading past its limit: the number takes the colour, and a word beside it
+   says what the colour means. */
+.room .warn { color: var(--warning); }
+.room .alert { color: var(--critical); }
+.room .warn .unit, .room .alert .unit { color: inherit; }
+.room .badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  text-transform: uppercase;
+}
+.room .lead .badge { font-size: 0.75rem; }
+/* In a compact reading the badge sits on its own line under the number. */
+.reading .badge { margin: 0.15rem 0 0; align-self: flex-start; }
