@@ -938,7 +938,7 @@ this line, unlike across 2026-10-08.
 Checked afterwards: the retained discovery configs carry `ent_cat` on exactly
 the four board channels (read off the broker for `wohnzimmer`), and the
 archiver reports `entity_category: diagnostic` for them on every node. The
-five mains and deep-sleep nodes published further rounds on the new version, so
+other five nodes published further rounds on the new version, so
 none of them rolled back. `terrasse` had reported only its first round on the
 new image when this was written; its confirmation is the next ten-minute wake.
 Batteries unmoved across the update: `terrasse` 3.93 V, `solarleuchte`
