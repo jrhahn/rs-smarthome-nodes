@@ -211,7 +211,11 @@ pub fn entities(node: &NodeConfig) -> Vec<Entity, MAX_ENTITIES> {
         (node.ds18b20, ds18b20::DESCRIPTORS, false),
         (node.sht31, sht31::DESCRIPTORS, false),
         (node.scd41, scd41::DESCRIPTORS, false),
-        (node.sds011, sds011::descriptors(node.sds011.compensated), false),
+        (
+            node.sds011,
+            sds011::descriptors(node.sds011.compensated),
+            false,
+        ),
         (node.sgp41, sgp41::descriptors(node.sgp41.nox), false),
         (node.battery, battery::DESCRIPTORS, false),
         // Not behind a `NodeConfig` field, unlike every sensor above. A node
@@ -364,10 +368,7 @@ pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) 
         unit = OptionalMember("unit_of_meas", desc.unit),
         dev_cla = OptionalMember("dev_cla", desc.device_class),
         stat_cla = desc.state_class,
-        ent_cat = OptionalMember(
-            "ent_cat",
-            if entity.diagnostic { "diagnostic" } else { "" },
-        ),
+        ent_cat = OptionalMember("ent_cat", if entity.diagnostic { "diagnostic" } else { "" },),
     )
     .ok()?;
     write_device(&mut p, node).ok()?;
