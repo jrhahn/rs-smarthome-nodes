@@ -312,7 +312,7 @@ pub const TARE_SAMPLES: usize = 16;
 /// refusing is right -- a tare is not urgent, and a wrong zero is expensive to
 /// notice, since every later weight is quietly shifted by it.
 ///
-/// Sized off the measured resting scatter: `docs/commissioning.md` recorded
+/// Sized off the measured resting scatter: the deployment's commissioning log recorded
 /// about ±70 counts on a settled chain 2026-09-04, so 2000 is far outside
 /// normal noise while still well under a bird.
 pub const TARE_MAX_SPREAD: i32 = 2000;

@@ -92,7 +92,7 @@ tare. Because the press waits for the node rather than the other way round, the
 re-zero is a *median* of sixteen readings taken when it wakes — a bird landing
 partway through the ~1.6 s of sampling cannot become the new zero, and readings
 that never settle are refused outright rather than guessed at. See
-[`commissioning.md`](commissioning.md).
+the deployment's commissioning log.
 
 On a blank flash the firmware falls back to built-in defaults
 ([`src/config.rs`](../src/config.rs) — `offset` mid-scale, `scale_factor` 420, `threshold` 10 g,

@@ -655,7 +655,7 @@ print("terrasse body  %.1f cm3   floor %.1f cm3" % (
 ##      until 2026-09-27. Over three warm days the terrace zero walked from
 ##      +1.4 g to -75.8 g, measured at matched air temperature so the
 ##      reversible thermal part cancels out, and it did not come back in the
-##      evenings -- see the entry in `docs/annotations.md`. That is creep, not
+##      evenings -- see the entry in the deployment's fleet log. That is creep, not
 ##      deflection: the part was printed in PLA, which yields under sustained
 ##      load well below its glass transition, and a dark part in direct sun
 ##      runs far hotter than the shaded air the SHT31 reads.
@@ -1658,7 +1658,7 @@ print("schlafzimmer sz_tray %.1f cm3  sz_lid %.1f cm3" % (
 ## because nothing in it is a spring", and the terrace disproved it on
 ## 2026-09-27. `terrasse_beam_hanger` is no spring either -- it is a stiff
 ## cantilever -- and it crept anyway, walking the scale's zero 77 g over three
-## warm days (`docs/annotations.md`). **Sustained load is the test, not
+## warm days (the deployment's fleet log). **Sustained load is the test, not
 ## springiness**, and sunlight counts twice: a dark part in the sun runs far
 ## above air temperature. The load-path parts of the terrace mount want PETG or
 ## ASA for the same reason this clamp does. Boxes and lids can stay PLA -- they

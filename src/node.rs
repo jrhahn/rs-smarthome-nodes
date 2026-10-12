@@ -58,7 +58,7 @@ pub enum PowerProfile {
     ///
     /// The reason is heat, not power. A node that keeps Wi-Fi associated draws
     /// on the order of 80-110 mA without pause, and in a closed box that is a
-    /// third of a watt with nowhere to go. `docs/commissioning.md` measured
+    /// third of a watt with nowhere to go. The deployment's commissioning log measured
     /// 0.9 °C of it on a `climate-co2` board in 2026-09, and the `climate` boxes are
     /// smaller. A node whose entire job is to report the room's temperature
     /// cannot afford to warm the air it is reporting on, and the cheapest way

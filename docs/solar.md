@@ -5,7 +5,7 @@
 > rests on is an estimate; see
 > [Before you build any of this](#before-you-build-any-of-this) at the bottom.
 > When it *is* built, the record goes in
-> [`commissioning.md`](commissioning.md), not here.
+> the deployment's commissioning log, not here.
 
 A second solar build borrows this page's parts list and its December-yield
 arithmetic: [`solarleuchte.md`](solarleuchte.md), a bought garden light whose

@@ -10,7 +10,7 @@ the two ever disagree, the source wins and this page is the bug.
 
 > Every node on this page is built and running; what is actually on which
 > board, and what went wrong building it, is in
-> [commissioning.md](commissioning.md). Still check each connection against
+> the deployment's commissioning log. Still check each connection against
 > your own modules' silkscreen before powering anything up.
 >
 > `solarleuchte` is wired on its own page, [solarleuchte.md](solarleuchte.md):

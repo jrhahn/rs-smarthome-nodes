@@ -7,7 +7,7 @@
 //! was failing. None of that is in the numbers, and in two years none of it
 //! will be in anyone's head either.
 //!
-//! `docs/annotations.md` in this repository keeps the same list by hand and is
+//! The deployment's fleet log keeps the same list by hand and is
 //! the better place for the long explanations. What this table adds is *where*:
 //! a note with a timestamp can be drawn on the chart it explains, at the point
 //! it explains, which is where the question gets asked.
@@ -112,7 +112,7 @@ pub fn check(a: &Annotation) -> Result<()> {
         bail!("a note without text explains nothing");
     }
     if a.note.chars().count() > NOTE_MAX {
-        bail!("a note longer than {NOTE_MAX} characters belongs in docs/annotations.md");
+        bail!("a note longer than {NOTE_MAX} characters belongs in the fleet log");
     }
     if a.at_ms <= 0 {
         bail!("a note needs a timestamp; 0 would file it under 1970");
