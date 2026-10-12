@@ -338,8 +338,10 @@ async function loadOverview() {
     return;
   }
   // A chart drawn before the channel list arrived is labelled with its raw
-  // key; now that the names are here, label it again.
-  if (state.selected && state.series) renderDetail();
+  // key; now that the names are here, label it again. Only the label: the
+  // series on screen may still be the previous channel's, and redrawing it is
+  // `loadDetail`'s business.
+  if (state.selected) renderTitle();
   else if (state.dashboard) renderDashboard();
   else renderOverview();
 }
@@ -576,10 +578,12 @@ function renderDashboard() {
   // A node whose every channel is filtered gets no card -- say so, or a node
   // gone quiet looks like one that never existed.
   const hidden = [...new Set(state.channels.map((c) => c.node))].filter((n) => !byNode.has(n));
-  dom.dashboardHint.hidden = !hidden.length;
-  dom.dashboardHint.textContent = hidden.length
-    ? `${byNode.size ? "Not shown" : "Nothing to show"}: ${hidden.join(", ")} — diagnostics only, see Live.`
-    : "";
+  dom.dashboardHint.hidden = byNode.size > 0 && !hidden.length;
+  dom.dashboardHint.textContent = !state.channels.length
+    ? "No channels yet."
+    : hidden.length
+      ? `${byNode.size ? "Not shown" : "Nothing to show"}: ${hidden.join(", ")} — diagnostics only, see Live.`
+      : "";
 
   // Colour and a word, never colour alone: the same rule as the status dots.
   const value = (c) => {
@@ -806,11 +810,16 @@ function channel() {
   );
 }
 
+function renderTitle() {
+  const c = channel();
+  dom.title.textContent = label(c);
+  dom.sub.textContent = `${c.node_name || c.node} · ${c.sensor}${c.unit ? ` · ${c.unit}` : ""}`;
+}
+
 function renderDetail() {
   const c = channel();
   const s = state.series;
-  dom.title.textContent = label(c);
-  dom.sub.textContent = `${c.node_name || c.node} · ${c.sensor}${c.unit ? ` · ${c.unit}` : ""}`;
+  renderTitle();
 
   dom.exportCsv.disabled = !s || !s.points.length;
 

@@ -28,7 +28,8 @@ reconstruction and reads like one.
 
 - **A chart opened from a link shows its channel's name, not its key.** When
   the series arrived before the channel list, the title stayed `temperature`
-  instead of `Temperatur` until the next refresh.
+  instead of `Temperatur` until the next refresh; it is now relabelled as soon
+  as the names arrive.
 - **A mistyped `NODE=` now lists `solarleuchte` among the valid names.** The
   build-time error spelled the list out a second time and had missed it; the
   message and `KNOWN_NODES` now share one literal.
