@@ -11,7 +11,7 @@ half an hour of wall-clock — and one of them went wrong in a way that is only
 possible with a cable: a `wohnzimmer` image ended up on the `terrasse` board,
 which then published eleven hours of living-room data under the wrong name
 before anyone noticed. That failure is written up in
-[`commissioning.md`](commissioning.md) and [`annotations.md`](annotations.md);
+the deployment's commissioning log and the deployment's fleet log;
 what matters here is that **the mistake is a property of the process, not of the
 person** — `NODE=` is set per invocation, the ELF path is the same for every
 node, and nothing between the shell and the flash checks that the image matches

@@ -1,7 +1,7 @@
-# Wiring, per node
+# Wiring, per flavor
 
-One firmware image, six different boards. What you solder depends on which
-`NODE=` the board is going to be — this page has the complete wiring for each,
+One code base, five kinds of board. What you solder depends on which
+`FLAVOR=` the board is going to be — this page has the complete wiring for each,
 so you should not have to read the source to build one.
 
 The pin assignments here are taken from the firmware
@@ -58,7 +58,7 @@ regulated supply), `5V` (tied to USB VBUS — an *output* when USB is plugged in
 
 ---
 
-## `NODE=bad` / `NODE=kueche` — SHT31-D only
+## `FLAVOR=climate` — SHT31-D only
 
 The simplest build, and the right one to start with: four wires and one sensor.
 If this works, the I²C half of every other node works.
@@ -124,7 +124,7 @@ straps its address somewhere unexpected.
 
 ---
 
-## `NODE=schlafzimmer` — SCD41 **and** SHT31-D
+## `FLAVOR=climate-co2` — SCD41 **and** SHT31-D
 
 The living room is this build plus a particulate sensor; everything in this
 section applies there too, so read it first and then the `wohnzimmer` section
@@ -287,7 +287,7 @@ wiring, supply or placement rather than the part
 
 ---
 
-## `NODE=wohnzimmer` — SCD41, SHT31-D, SDS011 **and** SGP41
+## `FLAVOR=air-quality` — SCD41, SHT31-D, SDS011 **and** SGP41
 
 The busiest mains node, and the only one on two buses at once. Build the
 `schlafzimmer` node above first — the I²C half is identical, down to the
@@ -523,7 +523,7 @@ still work. It goes back to 1 Hz the moment one attempt succeeds.
 
 ---
 
-## `NODE=terrasse` — the bird scale
+## `FLAVOR=bird-scale` — the bird scale
 
 The busiest board: two sensors, two buses, a battery and the only analogue
 measurement in the fleet. This is the one that already exists; the others are
@@ -563,7 +563,7 @@ reading nothing.
 
 ### SHT31-D → XIAO
 
-Exactly as for `NODE=bad`: 3V3, GND, SDA→D4, SCL→D5.
+Exactly as for `FLAVOR=climate`: 3V3, GND, SDA→D4, SCL→D5.
 
 On this node the SHT31-D publishes the plain `temperature` and `humidity` keys.
 Under its old name, `draussen`, it used `air_temperature` / `air_humidity` to

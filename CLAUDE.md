@@ -26,24 +26,36 @@ against the behaviour a node shows — a changed publish cadence or topic layout
 is breaking, a new sensor channel is a minor, a fix that makes an existing
 channel behave as documented is a patch.
 
-### `CHANGELOG.md` against `docs/annotations.md`
+### `CHANGELOG.md` against the fleet log
 
 Two files, two jobs, and letting them blur is how one of them rots.
 
 - **`CHANGELOG.md`** — what changed in the code. One entry per change, written
   with the change.
-- **`docs/annotations.md`** — what happened to the fleet. A rollout, an outage,
-  a measurement that corrected an assumption. Written when it happens, dated to
+- **The fleet log** — what happened to the boards. A rollout, an outage, a
+  measurement that corrected an assumption. Written when it happens, dated to
   the minute, and it is the file that explains a step in the archive to whoever
-  reads that data in a year.
+  reads that data in a year. It lives in the private deployment repository
+  (`rs-smarthome-nodes-private` on `git.home.arpa`, `docs/annotations.md`),
+  not here.
 
 A commit that fixes a join retry goes in the changelog. The evening it went on
-`kueche` and `bad`, with the counters before and after, goes in the fleet log.
+two boards, with the counters before and after, goes in the fleet log.
 Cross-reference rather than repeat.
 
 **A rollout that is not written down costs an evening.** The 2026-10-06 update
-to `kueche` was not recorded, and finding out what had been done to that node
+to one board was not recorded, and finding out what had been done to it
 took most of 2026-10-07. Record it as part of doing it.
+
+## Public, and about no particular house
+
+This repository is public. It describes **flavors** — kinds of board — and
+never which board hangs where. Room names, node ids, MAC addresses, IP
+addresses, the fleet log, the commissioning log and a floor plan all belong to
+the private deployment repository, which builds each board with `FLAVOR`,
+`NODE_ID` and `NODE_NAME`. New examples in code, tests and docs use neutral ids
+(`kitchen`, `garden`, `living`), not the real ones; older history in comments
+and design notes still names the rooms it happened in.
 
 ## Language
 

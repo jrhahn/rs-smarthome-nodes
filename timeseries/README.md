@@ -279,9 +279,9 @@ and the notes are drawn on the chart at the moment they describe. **It carries
 no TTL at any setting**: a note that expires before the data it explains is
 worse than no note at all.
 
-The dashboard's *Notiz …* button writes one. `docs/annotations.md` in this
-repository keeps the same history in prose and is the better place for the long
-version; this is the half that a chart can draw.
+The dashboard's *Note …* button writes one. The deployment's fleet log keeps
+the same history in prose and is the better place for the long version; this is
+the half that a chart can draw.
 
 ### A note is confirmed, and can be taken back
 

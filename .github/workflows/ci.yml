@@ -46,16 +46,17 @@ jobs:
           cargo test --no-default-features --features host-tests
           --target x86_64-unknown-linux-gnu
 
-  # The real thing: every node in the fleet has to build, because `NODE=` picks
-  # a different sensor set and power profile at compile time and a node nobody
-  # has flashed lately is exactly where a break hides.
+  # The real thing: every flavor has to build, because `FLAVOR=` picks a
+  # different sensor set and power profile at compile time and a flavor nobody
+  # has flashed lately is exactly where a break hides. Which board runs which
+  # flavor is the deployment's business and not known here.
   firmware:
-    name: Firmware (NODE=${{ matrix.node }})
+    name: Firmware (FLAVOR=${{ matrix.flavor }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: [schlafzimmer, wohnzimmer, kueche, bad, terrasse]
+        flavor: [climate, climate-co2, air-quality, bird-scale, solar-lamp]
     steps:
       - uses: actions/checkout@v5
 
@@ -69,7 +70,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --lib --bins -- -D warnings
         env:
-          NODE: ${{ matrix.node }}
+          FLAVOR: ${{ matrix.flavor }}
 
       - name: Build
         run: cargo build --release
@@ -77,16 +78,18 @@ jobs:
           # Credentials and the broker address are compile-time; CI has none and
           # builds against the placeholder defaults. The image is never flashed
           # from here, so that is fine.
-          NODE: ${{ matrix.node }}
+          FLAVOR: ${{ matrix.flavor }}
 
       - name: Report size
         run: ls -l target/riscv32imc-unknown-none-elf/release/rs-smarthome-nodes
 
-  # A typo in `NODE=` must fail the build rather than quietly produce an image
-  # for the wrong room. That guard is a const-eval panic, so the only way to
-  # check it still works is to try.
+  # A typo in `FLAVOR=`, a malformed `NODE_ID=` and the retired `NODE=` must
+  # each fail the build rather than quietly produce an image for the wrong
+  # hardware or under the wrong topics. The first two are const-eval panics and
+  # the third a build-script panic, so the only way to check they still work
+  # is to try.
   unknown-node-fails:
-    name: An unknown NODE fails the build
+    name: A bad FLAVOR, NODE_ID or NODE fails the build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -98,15 +101,20 @@ jobs:
         with:
           key: firmware
 
-      - name: Build with a mistyped node name
+      - name: Build with each of the three mistakes
         run: |
-          if NODE=kuche cargo build --release 2>build.log; then
-            echo "::error::NODE=kuche built successfully; the const-eval guard is gone"
-            exit 1
-          fi
-          grep -q "unknown NODE" build.log || {
-            echo "::error::build failed, but not on the node-name guard:"
-            cat build.log
-            exit 1
+          check() {
+            if env "$1" cargo build --release 2>build.log; then
+              echo "::error::$1 built successfully; the guard is gone"
+              exit 1
+            fi
+            grep -q "$2" build.log || {
+              echo "::error::$1 failed, but not on its guard:"
+              cat build.log
+              exit 1
+            }
+            echo "$1 rejected as expected"
           }
-          echo "rejected as expected"
+          check FLAVOR=climat "unknown FLAVOR"
+          check NODE_ID=Kitchen "NODE_ID must"
+          check NODE=kitchen "NODE=kitchen is gone"

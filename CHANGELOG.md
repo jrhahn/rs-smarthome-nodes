@@ -4,16 +4,18 @@ What changed in this repository, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**This is not [`docs/annotations.md`](docs/annotations.md), and the two must not
-drift into each other.** This file says *what changed in the code*, one entry
-per change, written when the change is made. The fleet log says *what happened
-to the hardware* — a rollout, an outage, a measurement that corrected an
-assumption — written when it happens. A commit that fixes a join retry belongs
-here; the evening it went on `kueche` and `bad` belongs there, and the two link
-to each other rather than repeating.
+**This is not the fleet log, and the two must not drift into each other.** This
+file says *what changed in the code*, one entry per change, written when the
+change is made. The fleet log says *what happened to the hardware* — a rollout,
+an outage, a measurement that corrected an assumption — written when it
+happens. It lives with the deployment, in a private repository, since flavors
+replaced the room table — before that it was `docs/annotations.md` here, and
+older entries below still name rooms because the firmware did. A commit that
+fixes a join retry belongs here; the evening it went on two boards belongs
+there.
 
 **The version here is part of `FW_VERSION`.** A node publishes
-`<node>-<release>-<commit>` (`build.rs`), e.g. `kueche-0.2.0-6c81631`: the
+`<id>-<release>-<commit>` (`build.rs`), e.g. `kitchen-0.2.0-6c81631`: the
 release is `version` from `Cargo.toml`, the commit names the exact build and is
 what an over-the-air offer must match. Images built before #39 publish
 `<node>-<commit>` only.
@@ -23,6 +25,27 @@ nothing was backfilled, because a changelog written after the fact is a
 reconstruction and reads like one.
 
 ## [Unreleased]
+
+### Changed
+
+- **Boards are built from flavors, not from a table of rooms — breaking for
+  every build command.** `src/node.rs` now lists five flavors (`climate`,
+  `climate-co2`, `air-quality`, `bird-scale`, `solar-lamp`): a sensor set and a
+  power profile each, and nothing about where a board hangs. The identity
+  comes from the build: `FLAVOR=` picks the entry, `NODE_ID=` is the topic
+  level, client id and unique-id prefix, `NODE_NAME=` the device name in Home
+  Assistant. `NODE=` is gone and refused with a message naming its
+  replacement; an unknown flavor or a malformed id fails the build. A board
+  rebuilt with its old room name as `NODE_ID` publishes exactly what it did
+  before — same topics, same unique ids, same `FW_VERSION` — so no series and
+  no Home Assistant entity changes. Provisioning over
+  `smarthome/provision/<mac>` now switches a board's flavor and keeps its id;
+  room names in a provisioning sector are ignored. `meta/board` gains a
+  `flavor` field.
+- **The fleet log and the commissioning log left this repository.**
+  `docs/annotations.md` and `docs/commissioning.md` describe one house, not
+  the firmware, and moved with their history to the deployment's private
+  repository.
 
 ### Changed
 

@@ -1,10 +1,11 @@
 //! rs-smarthome-nodes — async firmware for a fleet of ESP32-C3 sensor nodes.
 //!
-//! One image serves every node: which sensors are populated, what the node is
-//! called and how it is powered come from [`node`], picked by `NODE=<name>` at
-//! build time or by a provisioned identity in flash. It started life as a
-//! battery bird-feeder scale, and that node — now `terrasse`, the default —
-//! still drives the flow described below.
+//! One code base serves every board: which sensors are populated and how it is
+//! powered come from a flavor in [`node`], picked by `FLAVOR=<flavor>` at build
+//! time or by a provisioned flavor in flash; what the board is called comes
+//! from `NODE_ID` / `NODE_NAME`. It started life as a battery bird-feeder
+//! scale, and that flavor — `bird-scale` — still drives the flow described
+//! below.
 //!
 //! **Battery profile** — to catch short bird visits without keeping the radio
 //! awake, the firmware polls by cold-booting out of deep sleep on a short
@@ -453,17 +454,18 @@ async fn main(spawner: Spawner) -> ! {
     // is two minutes on a board that cannot join.
     spawner.spawn(feed_watchdog(watchdog).expect("watchdog task spawns once"));
 
-    // Who am I? A provisioned identity in flash wins over the one this image was
-    // built with. Must happen before any peripheral is touched: the sensor set
+    // What am I? A provisioned flavor in flash wins over the one this image was
+    // built with; the id and name are the built ones either way. Must happen before any peripheral is touched: the sensor set
     // decides which buses come up at all.
     node::init();
     node::set_mac(mac_address());
     let node = node::active();
 
     info!(
-        "node '{}' ({}) booted, {} profile",
+        "node '{}' ({}) booted, flavor {}, {} profile",
         node.id,
         node.name,
+        node.flavor,
         node.power.label()
     );
     // Say where to reach this board if it needs to be told what it is; the MAC
@@ -2103,12 +2105,13 @@ fn board_meta(stack: WifiStack) -> Option<heapless::String<224>> {
     let mut p = heapless::String::new();
     write!(
         p,
-        r#"{{"mac":"{}","version":"{}","node":"{}","identity":"{}","slot":{},"seq":{}"#,
+        r#"{{"mac":"{}","version":"{}","node":"{}","flavor":"{}","identity":"{}","slot":{},"seq":{}"#,
         node::mac_string(),
         FW_VERSION,
         node.id,
-        // Whether this board is running the identity it was flashed with, which
-        // is the other half of "why is this node called that".
+        node.flavor,
+        // Whether this board is running the flavor it was flashed with, which
+        // is the other half of "why does this node publish that".
         if config::load_node_name().is_some() {
             "provisioned"
         } else {
@@ -2785,7 +2788,7 @@ async fn publish_samples(
     })
 }
 
-/// Store the new identity and restart into it.
+/// Store the new flavor and restart into it.
 ///
 /// A reboot rather than an in-place switch: the sensor set decides which buses
 /// are initialised, which happens once during boot. Re-doing that at runtime
@@ -2801,13 +2804,13 @@ fn apply_provisioning(request: Provision) {
 
     match (stored, &request) {
         (Ok(()), Provision::Become(name)) => {
-            info!("provisioned as node '{}'; restarting", name);
+            info!("provisioned as flavor '{}'; restarting", name);
             software_reset();
         }
         (Ok(()), Provision::Reset) => {
             info!(
-                "provisioning cleared; restarting as built-in node '{}'",
-                node::BUILT_AS.id
+                "provisioning cleared; restarting as built-in flavor '{}'",
+                node::BUILT_AS.flavor
             );
             software_reset();
         }

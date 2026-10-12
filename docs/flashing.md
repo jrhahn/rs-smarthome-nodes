@@ -50,39 +50,48 @@ Everything below is baked in at compile time (see [`.env.example`](../.env.examp
 | MQTT credentials    | optional `MQTT_USER` / `MQTT_PASSWORD` env vars |
 | MQTT port           | `MQTT_PORT` in [`src/main.rs`](../src/main.rs)    |
 
-`NODE` is the important one — one image serves the whole fleet:
+`FLAVOR` and `NODE_ID` are the important ones. The flavor is the kind of
+board — its sensor set and power profile:
 
-| `NODE=` | Sensors | Power |
+| `FLAVOR=` | Sensors | Power |
 | --- | --- | --- |
-| `terrasse` (default) | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
-| `schlafzimmer` | SCD41 + SHT31-D | mains |
-| `wohnzimmer` | SCD41 + SHT31-D + SDS011 + SGP41 | mains |
-| `kueche`, `bad` | SHT31-D | mains, duty-cycled |
-| `solarleuchte` | SHT31-D + cell voltage, LED string | battery, deep sleep |
+| `climate` (default) | SHT31-D | mains, duty-cycled |
+| `climate-co2` | SCD41 + SHT31-D | mains |
+| `air-quality` | SCD41 + SHT31-D + SDS011 + SGP41 | mains |
+| `bird-scale` | HX711 load cell + SHT31-D + cell voltage | battery, deep sleep |
+| `solar-lamp` | SHT31-D + cell voltage, LED string | battery, deep sleep |
 
-A typo fails the build rather than flashing the wrong personality onto a board:
+`NODE_ID` is which board: the topic level (`smarthome/<id>/<key>`), the client
+id and the start of every Home Assistant unique id — 1–16 of `a-z`, `0-9`, `-`,
+`_`. `NODE_NAME` is the device name Home Assistant shows, up to 24 bytes.
+Without them a board is called after its flavor. Keeping a board's id across
+rebuilds is what keeps its history: a changed id is a new series in the
+archive and a new device in Home Assistant.
+
+A typo fails the build rather than flashing the wrong hardware profile onto a
+board:
 
 ```
-error[E0080]: evaluation of constant value failed
-  = the evaluated program panicked at 'unknown NODE; expected one of:
-    schlafzimmer, wohnzimmer, kueche, bad, terrasse, solarleuchte'
+error[E0080]: evaluation panicked: unknown FLAVOR; expected one of:
+    climate, climate-co2, air-quality, bird-scale, solar-lamp
 ```
+
+The retired `NODE=` is refused the same way, with the replacement spelled out.
 
 ## 3. Compile
 
 ```bash
-# Just build the ELF (defaults to NODE=terrasse)
+# Just build the ELF (a `climate` board called `climate`)
 cargo build --release
 # -> target/riscv32imc-unknown-none-elf/release/rs-smarthome-nodes
 
-# …or build for another node
-NODE=kueche cargo build --release
+# …or a specific board
+FLAVOR=air-quality NODE_ID=living NODE_NAME="Living room" cargo build --release
 ```
 
-> Each node is a **separate build**, so rebuild before flashing a different
-> board — the ELF path is the same for all of them. Or flash the same image
-> everywhere and tell each board what it is afterwards; see
-> [§7](#7-provisioning-a-board-without-reflashing).
+> Each board is a **separate build** — its id is baked into the image and into
+> the version an update is matched against — so rebuild before flashing a
+> different board; the ELF path is the same for all of them.
 
 `espflash` reads that ELF directly; there's no separate objcopy/bin step.
 
@@ -100,8 +109,8 @@ your computer, no probe or adapter involved.
 #  `--partition-table partitions.csv` -- see below)
 SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
 
-# …for one of the other nodes
-NODE=kueche SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
+# …for a specific board
+FLAVOR=climate NODE_ID=kitchen SSID="MyNetwork" PASSWORD="s3cret" cargo run --release
 
 # …or flash an already-built ELF explicitly:
 espflash flash --monitor --partition-table partitions.csv \
@@ -143,7 +152,7 @@ espflash partition-table partitions.csv     # what we intend to write
 and after flashing, the boot log lists what is really there — a board that has
 been migrated shows `ota_0` and `ota_1` where it used to show `factory`.
 
-> **Getting into download mode:** a battery node (`NODE=terrasse`) enters deep
+> **Getting into download mode:** a battery node (`FLAVOR=bird-scale`) enters deep
 > sleep a couple of seconds after boot, which can interrupt a flash — mains
 > nodes stay awake. If `espflash` can't sync, force the
 > ROM bootloader: **hold the `B` (BOOT / GPIO9) button, tap `R` (RESET), release
@@ -186,7 +195,7 @@ that. Publish it retained, because the node is asleep when you send it:
 
 ```bash
 mosquitto_pub -h "$BROKER" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
-  -t smarthome/terrasse/config/deep_sleep -m 0 -r -q 1
+  -t smarthome/garden/config/deep_sleep -m 0 -r -q 1
 ```
 
 It is picked up on the node's next publish round — up to `heartbeat_interval`
@@ -195,7 +204,7 @@ and stays. Then flash normally, and **put it back afterwards**:
 
 ```bash
 espflash flash --port /dev/ttyACM0 "$ELF"
-mosquitto_pub ... -t smarthome/terrasse/config/deep_sleep -m 1 -r -q 1
+mosquitto_pub ... -t smarthome/garden/config/deep_sleep -m 1 -r -q 1
 ```
 
 Watch for `config: deep_sleep = 1` / `deep sleep re-enabled — sleeping` on the
@@ -371,10 +380,10 @@ The first line names the node the image was built for — check it before anythi
 else, it is the one mistake that produces a board that looks perfectly healthy
 while publishing to the wrong room.
 
-**Outdoor scale (`NODE=terrasse`, battery)** — a publish cycle:
+**Outdoor scale (`FLAVOR=bird-scale NODE_ID=garden`, battery)** — a publish cycle:
 
 ```
-node 'terrasse' (Terrasse) booted, battery profile
+node 'garden' (Garden) booted, flavor bird-scale, battery profile
 config: offset=8388608 scale=420 threshold=10g idle=2s active=10s
 HX711 raw reading: 8402193
 presence: raw=8402193 baseline=8388608 delta=13585
@@ -385,9 +394,9 @@ SHT31-D: humidity = 47.2
 battery = 3.94 V
 Wi-Fi link up, waiting for DHCP...
 Got IP: 192.168.1.42/24
-published Home Assistant discovery for node 'terrasse'
-Published 32.3 to smarthome/terrasse/weight
-Published 21.4 to smarthome/terrasse/temperature
+published Home Assistant discovery for node 'garden'
+Published 32.3 to smarthome/garden/weight
+Published 21.4 to smarthome/garden/temperature
 Entering deep sleep for 10s
 ```
 
@@ -397,17 +406,17 @@ wake, quietly, because the scale's temperature correction needs the air
 temperature before the presence check:
 
 ```
-node 'terrasse' (Terrasse) booted, battery profile
+node 'garden' (Garden) booted, flavor bird-scale, battery profile
 HX711 raw reading: 8388601
 Entering deep sleep for 2s
 ```
 
-**An air-quality node (`NODE=wohnzimmer`, mains)** stays associated and loops.
+**An air-quality node (`FLAVOR=air-quality NODE_ID=living`, mains)** stays associated and loops.
 Most rounds are the 60 s ones; the SDS011 joins one round in fifteen, which is
 the only time the fan is heard:
 
 ```
-node 'wohnzimmer' (Wohnzimmer) booted, mains profile
+node 'living' (Living room) booted, flavor air-quality, mains profile
 Wi-Fi link up, waiting for DHCP...
 Got IP: 192.168.1.51/24
 SHT31-D: temperature = 21.8
@@ -417,8 +426,8 @@ SDS011: pm25_raw = 8.3
 SDS011: pm10_raw = 12.1
 SDS011: pm25 = 6.1
 SDS011: pm10 = 8.9
-published Home Assistant discovery for node 'wohnzimmer'
-Published 6.1 to smarthome/wohnzimmer/pm25
+published Home Assistant discovery for node 'living'
+Published 6.1 to smarthome/living/pm25
 ```
 
 Weight is published in **grams** (converted on-device from the flash-stored
@@ -449,7 +458,7 @@ Subscribe on the broker side to confirm the payload:
 
 ```bash
 # One node
-mosquitto_sub -h <broker-ip> -t 'smarthome/terrasse/#' -v
+mosquitto_sub -h <broker-ip> -t 'smarthome/garden/#' -v
 
 # Everything the fleet publishes, including the discovery configs
 mosquitto_sub -h <broker-ip> -t 'smarthome/#' -t 'homeassistant/#' -v
@@ -477,23 +486,25 @@ and for calibrating the scale.
 
 ## 7. Provisioning a board without reflashing
 
-`NODE=` is only the identity a board *starts* with. Any board can be told to
-become another node over MQTT — useful to repurpose one, to swap in a spare, or
-to flash the whole fleet with one image and sort out which is which afterwards.
+`FLAVOR=` is only the hardware profile a board *starts* with. A board whose
+hardware changed — a sensor fitted or removed — can be told to run another
+flavor over MQTT. Its id and name stay the ones it was built with: provisioning
+changes what a board measures, never what it is called, so its topics and its
+history are untouched.
 
 Every boot prints the topic to address that board on. It is keyed by MAC,
-because that is the only name a board is sure of before it knows anything else:
+because that is the only name a board is sure of whatever it is running:
 
 ```
-node 'terrasse' (Terrasse) booted, battery profile
+node 'kitchen' (Kitchen) booted, flavor climate, mains, duty-cycled profile
 provision topic: smarthome/provision/a1b2c3d4e5f6
 ```
 
 ```bash
-# Become the kitchen node
-mosquitto_pub -h <broker-ip> -r -t smarthome/provision/a1b2c3d4e5f6 -m kueche
+# Run as climate-co2 from now on
+mosquitto_pub -h <broker-ip> -r -t smarthome/provision/a1b2c3d4e5f6 -m climate-co2
 
-# Go back to the identity it was flashed with
+# Go back to the flavor it was flashed with
 mosquitto_pub -h <broker-ip> -r -t smarthome/provision/a1b2c3d4e5f6 -m default
 ```
 
@@ -502,10 +513,10 @@ publish, so for a sleeping battery node the retained message is what gets the
 change delivered on its next wake-up. Then:
 
 ```
-provisioned as node 'kueche'; restarting
+provisioned as flavor 'climate-co2'; restarting
 …
-node 'kueche' (Küche) booted, mains profile
-provisioned as node 'kueche' (from flash)
+provisioned as flavor 'climate-co2' (from flash)
+node 'kitchen' (Kitchen) booted, flavor climate-co2, mains profile
 ```
 
 Notes:
@@ -513,13 +524,14 @@ Notes:
 - The restart is deliberate — the sensor set decides which buses are brought up,
   which happens during boot.
 - A name the firmware doesn't know is logged and ignored, and the board carries
-  on as it was: `provisioning asked for unknown node 'kuche'; expected one of: …`
+  on as it was: `provisioning asked for unknown flavor 'climat'; expected one of: …`.
+  That includes the room names boards were provisioned with before flavors.
 - The retained message is re-delivered on every connect, so the firmware writes
   flash only when the value actually changes.
-- The identity lives in its own flash sector, so provisioning a board never
+- The flavor lives in its own flash sector, so provisioning a board never
   disturbs a scale's stored tare/calibration.
-- Remember to clear the retained message (`-r -n`) if you later hand the board
-  to a different room by reflashing, or it will provision itself back.
+- Remember to clear the retained message (`-r -n`) if you later reflash the
+  board as another flavor, or it will provision itself back.
 
 ---
 

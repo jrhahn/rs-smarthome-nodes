@@ -8,11 +8,11 @@ of sensors, selected with `NODE=<name>` at build time.
 
 ## Fleet
 
-The node table — which `NODE=` carries which sensors on which power profile —
-is in the [README](../README.md#the-fleet); `src/node.rs` is its source.
+The flavor table — which `FLAVOR=` carries which sensors on which power
+profile — is in the [README](../README.md#flavors); `src/node.rs` is its source.
 
 A node's sensors need not share a cadence: `sample_secs` is the base round, and
-a slot may ask for a slower one of its own (`Slot::every`). `wohnzimmer` is the
+a slot may ask for a slower one of its own (`Slot::every`). `air-quality` is the
 case that forced it — a 60 s round for the SCD41, and one round in fifteen for
 the SDS011, whose fan is a ~8000 h consumable.
 
@@ -66,13 +66,29 @@ collide — the outdoor node's DS18B20 keeps `temperature` while its SHT31-D
 publishes `air_temperature` / `air_humidity`. An unknown `NODE` value fails the
 build in const-eval.
 
-### Which node am I? (build-time default + NVS override)
+### Which node am I? (flavor + identity at build time, flavor override in NVS)
 
-The identity is resolved once at boot, before any peripheral is touched, since
-the sensor set decides which buses come up at all:
+Two questions that used to be one. *What kind of board is this* — its sensors
+and power profile — is a **flavor**, and the table of flavors is public.
+*Which board is this* — its topic id and its name in Home Assistant — is the
+deployment's, and is never written down here. Until 2026-10 the table had one
+entry per room and `NODE=kueche` answered both at once, which put the house's
+floor plan into the firmware.
 
-1. `BUILT_AS` — the `NODE=` the image was compiled with (default `terrasse`);
-2. a name stored in flash, which overrides it.
+Both are fixed at build time: `FLAVOR=` picks the table entry, and `NODE_ID=` /
+`NODE_NAME=` are stamped onto it (`node::identify`), checked during const-eval
+so a malformed id fails the build. The id keeps every topic, unique id and
+`FW_VERSION` exactly as they were under the room table, which is what let the
+fleet move to flavors without a single series or Home Assistant entity
+changing.
+
+The flavor is then resolved once at boot, before any peripheral is touched,
+since the sensor set decides which buses come up at all:
+
+1. `BUILT_AS` — the flavor the image was compiled with (default `climate`),
+   carrying the built id and name;
+2. a flavor stored in flash, which overrides the sensor set and leaves the id
+   and name alone.
 
 `node::active()` returns the result. It is a plain `Copy` struct read from a
 `static`, written once by `node::init()` — the same single-context discipline
@@ -80,11 +96,13 @@ the sensor set decides which buses come up at all:
 before `init()` and nothing writes after it.
 
 The override is set over MQTT on `smarthome/provision/<mac>` (retained), keyed
-by MAC because that is the only name an unprovisioned board is sure of. A valid,
-*different* name is written to flash and the board restarts into it; anything
-else — an unknown name, or the name it already answers to — is ignored without
-touching flash, which matters because a retained message is re-delivered on
-every single connect.
+by MAC because that is the only name a board is sure of whatever it runs. A
+valid, *different* flavor is written to flash and the board restarts into it;
+anything else — an unknown name, or the flavor it already runs — is ignored
+without touching flash, which matters because a retained message is
+re-delivered on every single connect. Flavors are compared, never ids: a
+deployed board's id is never its flavor's name, and comparing those would make
+every delivery look like a change.
 
 The identity blob lives in the **second** NVS sector (`0xA000`), separate from
 the calibration blob at `0x9000`: provisioning must never be able to disturb a

@@ -1,21 +1,27 @@
-//! Per-node identity, sensor selection and power profile (#12, #17).
+//! Flavors, identity and power profile (#12, #17).
 //!
-//! One firmware image serves the whole fleet: which sensors are populated, what
-//! the node is called, which MQTT namespace it publishes under and whether it
-//! sleeps between readings or stays awake all come from the table below.
+//! A **flavor** is a kind of board: which sensors are populated and whether it
+//! sleeps between readings or stays awake. The table below lists them, and it
+//! is all this repository knows about hardware. Which board is which -- its
+//! topic id and the name Home Assistant shows -- is not in here at all: that
+//! is the deployment's business and arrives at build time.
 //!
-//! Which entry is used is decided in two steps, at boot:
+//! An image is put together from three build-time values:
 //!
-//! 1. the identity the image was **built** for — `NODE=kueche cargo run
-//!    --release`, defaulting to `terrasse`, the outdoor node. An
-//!    unknown name fails the build (const-eval panic) rather than silently
-//!    flashing the wrong personality onto a board;
-//! 2. a **provisioned** name stored in flash, which overrides it. That is what
-//!    lets one generic image be flashed to every board and each one told what it
-//!    is afterwards, over MQTT, without a rebuild — see [`provision_topic`].
+//! - `FLAVOR=climate` picks the table entry, defaulting to `climate`. An
+//!   unknown flavor fails the build (const-eval panic) rather than silently
+//!   flashing the wrong hardware profile onto a board;
+//! - `NODE_ID=<slug>` is what the board publishes under, defaulting to the
+//!   flavor's own name, so a plain build still produces a working node;
+//! - `NODE_NAME=<text>` is the device name in Home Assistant, defaulting to
+//!   the id.
+//!
+//! A **provisioned** flavor stored in flash overrides the built one, without
+//! touching the id -- see [`provision_topic`]. That is for a board whose
+//! hardware changed, not for renaming one.
 //!
 //! Because the sensor set decides which peripherals get initialised, the
-//! identity is read once at boot ([`init`]) and then fixed for the run; a node
+//! flavor is read once at boot ([`init`]) and then fixed for the run; a node
 //! that is re-provisioned while running reboots into its new self.
 
 use core::fmt::Write as _;
@@ -53,7 +59,7 @@ pub enum PowerProfile {
     /// The reason is heat, not power. A node that keeps Wi-Fi associated draws
     /// on the order of 80-110 mA without pause, and in a closed box that is a
     /// third of a watt with nowhere to go. `docs/commissioning.md` measured
-    /// 0.9 °C of it on `schlafzimmer` in 2026-09, and the climate boxes are
+    /// 0.9 °C of it on a `climate-co2` board in 2026-09, and the `climate` boxes are
     /// smaller. A node whose entire job is to report the room's temperature
     /// cannot afford to warm the air it is reporting on, and the cheapest way
     /// not to is to stop running between readings.
@@ -319,12 +325,16 @@ impl Slot {
     }
 }
 
-/// Everything that makes one board a specific node in the fleet.
+/// A flavor, and once [`BUILT_AS`] has stamped an identity on it, one board.
 #[derive(Clone, Copy)]
 pub struct NodeConfig {
-    /// Slug used in topics, unique ids and the client id, e.g. `"kueche"`.
+    /// Which table entry this is, e.g. `"climate"`. What provisioning compares.
+    pub flavor: &'static str,
+    /// Slug used in topics, unique ids and the client id. The flavor's name in
+    /// the table; the deployment's `NODE_ID` once built.
     pub id: &'static str,
-    /// Human-readable device name shown in Home Assistant, e.g. `"Küche"`.
+    /// Device name shown in Home Assistant. The flavor's description in the
+    /// table; the deployment's `NODE_NAME` once built.
     pub name: &'static str,
     /// Topic namespace: state topics are `<namespace>/<id>/<key>`.
     pub namespace: &'static str,
@@ -347,9 +357,9 @@ pub struct NodeConfig {
     /// only ever belongs on a node with [`PowerProfile::Battery`] — and never
     /// alongside `ds18b20`, which wants the same pin.
     pub battery: Slot,
-    /// The LED string on `solarleuchte`: a `light` entity in Home Assistant
+    /// The LED string of the `solar-lamp` flavor: a `light` entity in Home Assistant
     /// and an LEDC channel on the board. Unlike every slot above it names no
-    /// bus and no sensor — it is an output, and the only one in the fleet.
+    /// bus and no sensor — it is an output, and the only one in the table.
     pub lamp: Slot,
 }
 
@@ -457,20 +467,48 @@ impl NodeConfig {
     }
 }
 
-// --- The fleet ---------------------------------------------------------------
+// --- The flavors -------------------------------------------------------------
 
-/// Bedroom air. The SHT31-D is not redundant with the SCD41's built-in RH/T:
-/// the SCD4x datasheet specifies its humidity at ±6 %RH (±9 outside 15–35 °C /
-/// 20–65 %RH) against the SHT31-D's ±2 %, because it sits on a die that heats
-/// itself for the CO₂ measurement. Measured side by side on 2026-08-26 the two
-/// disagreed by 15 points. So the SHT31-D owns `temperature` and `humidity`,
-/// and the SCD41's own pair is published under `scd41_` — still worth having,
-/// because calibrating its temperature offset against a reference is exactly
-/// Sensirion's field procedure and needs both numbers visible. `co2` keeps its
-/// plain key: nothing collides with it, and its history is worth preserving.
-const SCHLAFZIMMER: NodeConfig = NodeConfig {
-    id: "schlafzimmer",
-    name: "Schlafzimmer",
+/// Temperature and humidity, nothing else: a XIAO and an SHT31-D on wires.
+///
+/// Duty-cycled rather than awake. On a USB charger staying associated costs
+/// nothing in energy, but it costs about 0.3 W of heat in a 65 x 39 x 30 box,
+/// and a node that reports only temperature and humidity has no other output
+/// to weigh that against. A box that reads 2.5 K warmer than the room reports a
+/// relative humidity about seven points low -- in a room that gets wet on
+/// purpose, the one number people look at. Nothing here needs continuity: no
+/// fan, no CO₂ self-calibration, no hotplate. So it sleeps, and `sample_secs`
+/// below is the sleep, at the 120 s cadence these nodes have always published.
+const CLIMATE: NodeConfig = NodeConfig {
+    flavor: "climate",
+    id: "climate",
+    name: "Climate",
+    namespace: "smarthome",
+    power: PowerProfile::MainsDutyCycled,
+    sample_secs: 120,
+    scale: Slot::off(),
+    ds18b20: Slot::off(),
+    sht31: Slot::on(),
+    scd41: Slot::off(),
+    sds011: Slot::off(),
+    sgp41: Slot::off(),
+    battery: Slot::off(),
+    lamp: Slot::off(),
+};
+
+/// Climate plus CO₂. The SHT31-D is not redundant with the SCD41's built-in
+/// RH/T: the SCD4x datasheet specifies its humidity at ±6 %RH (±9 outside
+/// 15–35 °C / 20–65 %RH) against the SHT31-D's ±2 %, because it sits on a die
+/// that heats itself for the CO₂ measurement. Measured side by side on
+/// 2026-08-26 the two disagreed by 15 points. So the SHT31-D owns
+/// `temperature` and `humidity`, and the SCD41's own pair is published under
+/// `scd41_` — still worth having, because calibrating its temperature offset
+/// against a reference is exactly Sensirion's field procedure and needs both
+/// numbers visible. `co2` keeps its plain key: nothing collides with it.
+const CLIMATE_CO2: NodeConfig = NodeConfig {
+    flavor: "climate-co2",
+    id: "climate-co2",
+    name: "Climate CO2",
     namespace: "smarthome",
     power: PowerProfile::Mains,
     sample_secs: 60,
@@ -484,27 +522,27 @@ const SCHLAFZIMMER: NodeConfig = NodeConfig {
     lamp: Slot::off(),
 };
 
-/// The busiest mains node: the bedroom's pair plus the fleet's particulate
-/// sensor, on both buses at once.
+/// The busiest flavor: [`CLIMATE_CO2`] plus particulates and a gas index, on
+/// both buses at once.
 ///
-/// The SDS011 sits here rather than in the kitchen, where the particulates
-/// actually come from, for two reasons. Its optics and fan are open to the air
-/// they measure, and kitchen air carries fat aerosol from frying — that films
-/// the optical path and drifts the calibration without ever failing outright,
-/// which is the same silent-but-plausible failure the SCD41's membrane already
-/// cost us one of. And the question worth a long time series is what reaches
-/// the room people sit in, not that cooking makes smoke.
+/// Meant for the room people sit in, not for a kitchen. The SDS011's optics and
+/// fan are open to the air they measure, and kitchen air carries fat aerosol
+/// from frying — that films the optical path and drifts the calibration without
+/// ever failing outright, the same silent-but-plausible failure the SCD41's
+/// membrane already cost one of. And the question worth a long time series is
+/// what reaches the room people are in, not that cooking makes smoke.
 ///
-/// It also lands where the SHT31 already is, which is what makes the humidity
-/// correction possible at all (see [`Slot::compensated`]).
+/// The SHT31 on the same board is what makes the humidity correction possible
+/// at all (see [`Slot::compensated`]).
 ///
 /// The three sensors' natural cadences are two orders of magnitude apart, hence
 /// the per-slot period: the base round stays at the SCD41's minute, and the
 /// SDS011 sits out fourteen of every fifteen of them so its ~8000 h fan is not
 /// spent keeping up with the CO₂.
-const WOHNZIMMER: NodeConfig = NodeConfig {
-    id: "wohnzimmer",
-    name: "Wohnzimmer",
+const AIR_QUALITY: NodeConfig = NodeConfig {
+    flavor: "air-quality",
+    id: "air-quality",
+    name: "Air quality",
     namespace: "smarthome",
     power: PowerProfile::Mains,
     sample_secs: 60,
@@ -513,9 +551,8 @@ const WOHNZIMMER: NodeConfig = NodeConfig {
     sht31: Slot::on(),
     scd41: Slot::on_as("scd41_", "SCD41").keeping(&["co2"]),
     sds011: Slot::on().compensated().every(900),
-    // The gas sensor lives here rather than anywhere else for two reasons that
-    // both point at this room: it has to be sampled at 1 Hz, which only a mains
-    // node can do, and a VOC index is a statement about the air people are in.
+    // The gas sensor needs a 1 Hz sample, which only a mains node can give
+    // it, and a VOC index is a statement about the air people are in.
     // `with_nox` announces the second channel; an SGP40 in the socket instead
     // of an SGP41 is detected at boot and simply never feeds it.
     sgp41: Slot::on().with_nox(),
@@ -523,86 +560,21 @@ const WOHNZIMMER: NodeConfig = NodeConfig {
     lamp: Slot::off(),
 };
 
-/// Kitchen climate — the same build as [`BAD`], and for the same reason: a room
-/// that gets wet on purpose, where the useful signal is humidity and how long it
-/// takes to fall again.
+/// The outdoor bird-feeder scale: load cell, SHT31-D and cell-voltage sense,
+/// on a battery so it needs no cable run outside.
 ///
-/// It carried the SDS011 until the particulate sensor moved to
-/// [`WOHNZIMMER`]; see there for why.
-/// The kitchen: a XIAO and an SHT31 on wires, and nothing else.
+/// D2 carries either the divider or a DS18B20, never both — the divider has the
+/// pin here.
 ///
-/// Duty-cycled rather than awake. It is on a USB-C charger, so staying
-/// associated costs nothing in energy — but it costs about 0.3 W of heat in a
-/// 65 x 39 x 30 box, and a node that reports only temperature and humidity has
-/// no other output to weigh that against. Nothing here needs continuity: no
-/// fan, no CO₂ self-calibration, no hotplate. So it sleeps, and `sample_secs`
-/// below is the sleep, which keeps the 120 s cadence the published history
-/// already has.
-const KUECHE: NodeConfig = NodeConfig {
-    id: "kueche",
-    name: "Küche",
-    namespace: "smarthome",
-    power: PowerProfile::MainsDutyCycled,
-    sample_secs: 120,
-    scale: Slot::off(),
-    ds18b20: Slot::off(),
-    sht31: Slot::on(),
-    scd41: Slot::off(),
-    sds011: Slot::off(),
-    sgp41: Slot::off(),
-    battery: Slot::off(),
-    lamp: Slot::off(),
-};
-
-/// The bathroom: the same build as [`KUECHE`], and duty-cycled for the same
-/// reason. If anything the case is stronger here — a bathroom's humidity is the
-/// number people actually look at, and relative humidity is read against
-/// temperature, so a box that reads 2.5 K warmer than the room reports a humidity
-/// that is about seven points low.
-const BAD: NodeConfig = NodeConfig {
-    id: "bad",
-    name: "Bad",
-    namespace: "smarthome",
-    power: PowerProfile::MainsDutyCycled,
-    sample_secs: 120,
-    scale: Slot::off(),
-    ds18b20: Slot::off(),
-    sht31: Slot::on(),
-    scd41: Slot::off(),
-    sds011: Slot::off(),
-    sgp41: Slot::off(),
-    battery: Slot::off(),
-    lamp: Slot::off(),
-};
-
-/// The terrace: the outdoor node, carrying the bird-feeder scale.
-///
-/// Slots are switched on here as their hardware is actually wired, not before.
-/// A slot enabled early publishes nothing while warning every round, and puts
-/// entities in Home Assistant for parts that do not exist — which reads as a
-/// fault rather than as work in progress. The load cell, the SHT31-D and the
-/// cell-voltage divider are all fitted. D2 carries either that divider or a
-/// DS18B20, never both — the DS18B20 is gone from this node for good, and the
-/// divider has the pin.
-///
-/// The divider keeps a `battery_` prefix where the SHT31-D lost its `air_`
-/// one, and the difference is deliberate: `air_` existed to dodge a key
-/// collision that no longer exists, while `battery_` is a label. A bare
-/// `voltage` entity in Home Assistant does not say whose.
-///
-/// The SHT31-D owns the plain `temperature` and `humidity` keys, with no
-/// prefix. This node replaced one called `draussen`, which published to
-/// `birds/scale/...` and put its SHT31 behind an `air_` prefix to leave those
-/// keys to a DS18B20 that had not been fitted for a long time. Both the
-/// namespace and the prefix outlived their reasons purely because changing
-/// them would have orphaned history in Home Assistant. That history was let go
-/// with the rename, so neither carries over — and with no probe on this node,
-/// there is nothing for the plain keys to collide with.
-///
-/// Battery, so it needs no cable run outside.
-const TERRASSE: NodeConfig = NodeConfig {
-    id: "terrasse",
-    name: "Terrasse",
+/// The divider keeps a `battery_` prefix and the SHT31-D has none, and the
+/// difference is deliberate: a bare `voltage` entity in Home Assistant does not
+/// say whose, while `temperature` and `humidity` have nothing to collide with on
+/// a board without a probe. (Its predecessor put the SHT31 behind `air_` to
+/// leave those keys to a DS18B20 that was not fitted for a long time.)
+const BIRD_SCALE: NodeConfig = NodeConfig {
+    flavor: "bird-scale",
+    id: "bird-scale",
+    name: "Bird scale",
     namespace: "smarthome",
     power: PowerProfile::Battery,
     // Only consulted by mains nodes; a battery cadence comes from `Config`.
@@ -617,20 +589,21 @@ const TERRASSE: NodeConfig = NodeConfig {
     lamp: Slot::off(),
 };
 
-/// The garden lamp: a rebuilt solar light, the only node in the fleet whose
-/// job is to *emit* rather than to measure.
+/// A rebuilt solar garden light, the only flavor whose job is to *emit* rather
+/// than to measure.
 ///
 /// Battery and deep-sleeping, but on a cadence nothing else here has: it wakes
 /// once at dusk, stays up for hours breathing, and sleeps through the day. See
 /// [`docs/solarleuchte.md`](../docs/solarleuchte.md).
 ///
 /// One sensor, the SHT31-D, and only to find out whether the cell is charged
-/// below freezing. The cell voltage is not telemetry on this node but part of the
-/// control loop — [`crate::lamp::charge_permille`] derives the evening's
+/// below freezing. The cell voltage is not telemetry on this board but part of
+/// the control loop — [`crate::lamp::charge_permille`] derives the evening's
 /// brightness ceiling from it.
-const SOLARLEUCHTE: NodeConfig = NodeConfig {
-    id: "solarleuchte",
-    name: "Solarleuchte",
+const SOLAR_LAMP: NodeConfig = NodeConfig {
+    flavor: "solar-lamp",
+    id: "solar-lamp",
+    name: "Solar lamp",
     namespace: "smarthome",
     power: PowerProfile::Battery,
     // Only consulted by mains nodes; a battery cadence comes from `Config`.
@@ -650,16 +623,15 @@ const SOLARLEUCHTE: NodeConfig = NodeConfig {
     lamp: Slot::on(),
 };
 
-/// The fleet, keyed by the name `NODE=` and provisioning accept. The single
-/// source of truth: [`by_name`] walks it, so a node added here is immediately
-/// selectable both ways.
-pub const FLEET: &[(&str, NodeConfig)] = &[
-    ("schlafzimmer", SCHLAFZIMMER),
-    ("wohnzimmer", WOHNZIMMER),
-    ("kueche", KUECHE),
-    ("bad", BAD),
-    ("terrasse", TERRASSE),
-    ("solarleuchte", SOLARLEUCHTE),
+/// Every flavor, keyed by the name `FLAVOR=` and provisioning accept. The
+/// single source of truth: [`flavor`] walks it, so an entry added here is
+/// immediately selectable both ways.
+pub const FLAVORS: &[(&str, NodeConfig)] = &[
+    ("climate", CLIMATE),
+    ("climate-co2", CLIMATE_CO2),
+    ("air-quality", AIR_QUALITY),
+    ("bird-scale", BIRD_SCALE),
+    ("solar-lamp", SOLAR_LAMP),
 ];
 
 // D2 / GPIO4 carries either the DS18B20's 1-Wire line or the battery divider's
@@ -669,9 +641,9 @@ pub const FLEET: &[(&str, NodeConfig)] = &[
 // build here instead, where the table that caused it is on screen.
 const _: () = {
     let mut i = 0;
-    while i < FLEET.len() {
+    while i < FLAVORS.len() {
         assert!(
-            !(FLEET[i].1.ds18b20.enabled && FLEET[i].1.battery.enabled),
+            !(FLAVORS[i].1.ds18b20.enabled && FLAVORS[i].1.battery.enabled),
             "a node cannot carry both a DS18B20 and a battery divider: they share D2"
         );
         i += 1;
@@ -686,8 +658,8 @@ const _: () = {
 // rather than let it sit in a table looking effective.
 const _: () = {
     let mut i = 0;
-    while i < FLEET.len() {
-        let n = FLEET[i].1;
+    while i < FLAVORS.len() {
+        let n = FLAVORS[i].1;
         assert!(
             !(n.sds011.compensated && !n.sht31.enabled),
             "humidity compensation needs an SHT31 on the same node to read from"
@@ -713,8 +685,8 @@ const _: () = {
 // means nothing. Fail the build here, next to the table that asked for it.
 const _: () = {
     let mut i = 0;
-    while i < FLEET.len() {
-        let n = FLEET[i].1;
+    while i < FLAVORS.len() {
+        let n = FLAVORS[i].1;
         let duty_cycled = matches!(n.power, PowerProfile::MainsDutyCycled);
         assert!(
             !(duty_cycled && (n.sds011.enabled || n.scd41.enabled || n.sgp41.enabled)),
@@ -733,48 +705,121 @@ const _: () = {
 };
 
 // The same names as one string, for error messages. Spelled out rather than
-// built from [`FLEET`] because the const-eval `panic!` in `select` needs a
-// literal, and a macro so that panic and `KNOWN_NODES` share one; a test keeps
-// it in step with `FLEET`.
-macro_rules! known_nodes {
+// built from [`FLAVORS`] because the const-eval `panic!` in `select` needs a
+// literal, and a macro so that panic and `KNOWN_FLAVORS` share one; a test
+// keeps it in step with `FLAVORS`.
+macro_rules! known_flavors {
     () => {
-        "schlafzimmer, wohnzimmer, kueche, bad, terrasse, solarleuchte"
+        "climate, climate-co2, air-quality, bird-scale, solar-lamp"
     };
 }
 
-/// The fleet's names as one string, for error messages.
-pub const KNOWN_NODES: &str = known_nodes!();
+/// The flavors' names as one string, for error messages.
+pub const KNOWN_FLAVORS: &str = known_flavors!();
 
-/// The node this image was **built** for — the fallback when flash carries no
-/// provisioned identity. Use [`active`] for the identity actually in force.
-pub const BUILT_AS: NodeConfig = select(match option_env!("NODE") {
-    Some(s) => s,
-    None => "terrasse",
-});
+/// The longest id a board may publish under. The flash slot, the client id and
+/// every topic buffer are sized for it; a longer one would be cut short
+/// somewhere silently, so the build refuses it instead.
+pub const NODE_ID_MAX: usize = crate::config::NODE_NAME_MAX;
 
-/// Look a node up by name. Shared by the build-time selection and by runtime
+/// The longest device name. It goes verbatim into every discovery payload,
+/// whose buffer is sized for it (see `discovery`).
+pub const NODE_NAME_MAX: usize = 24;
+
+/// The board this image was **built** as: the flavor from `FLAVOR`, the id and
+/// name from `NODE_ID` / `NODE_NAME`. The fallback when flash carries no
+/// provisioned flavor; use [`active`] for what is actually in force.
+pub const BUILT_AS: NodeConfig = identify(
+    select(match option_env!("FLAVOR") {
+        Some(s) => s,
+        None => "climate",
+    }),
+    option_env!("NODE_ID"),
+    option_env!("NODE_NAME"),
+);
+
+/// Look a flavor up by name. Shared by the build-time selection and by runtime
 /// provisioning, so both accept exactly the same set of names.
-pub const fn by_name(id: &str) -> Option<NodeConfig> {
+pub const fn flavor(name: &str) -> Option<NodeConfig> {
     let mut i = 0;
-    while i < FLEET.len() {
-        if str_eq(id, FLEET[i].0) {
-            return Some(FLEET[i].1);
+    while i < FLAVORS.len() {
+        if str_eq(name, FLAVORS[i].0) {
+            return Some(FLAVORS[i].1);
         }
         i += 1;
     }
     None
 }
 
-/// Map the `NODE` build-time name onto a config. Unknown names panic during
+/// Map the `FLAVOR` build-time name onto a config. Unknown names panic during
 /// const-eval, i.e. the build fails with the typo instead of producing a
-/// plausible-looking image for the wrong room.
-const fn select(id: &str) -> NodeConfig {
-    match by_name(id) {
+/// plausible-looking image for the wrong hardware.
+const fn select(name: &str) -> NodeConfig {
+    match flavor(name) {
         Some(cfg) => cfg,
         None => {
-            panic!(concat!("unknown NODE; expected one of: ", known_nodes!()))
+            panic!(concat!(
+                "unknown FLAVOR; expected one of: ",
+                known_flavors!()
+            ))
         }
     }
+}
+
+/// Stamp a deployment's identity on a flavor. No id keeps the flavor's own; no
+/// name falls back to the id, which is at least the string the topics say.
+pub const fn identify(
+    flavor: NodeConfig,
+    id: Option<&'static str>,
+    name: Option<&'static str>,
+) -> NodeConfig {
+    let (id, name) = match (id, name) {
+        (Some(id), Some(name)) => (id, name),
+        (Some(id), None) => (id, id),
+        (None, Some(name)) => (flavor.id, name),
+        (None, None) => (flavor.id, flavor.name),
+    };
+    assert!(valid_id(id), "NODE_ID must be 1-16 of a-z, 0-9, '-', '_'");
+    assert!(
+        valid_name(name),
+        "NODE_NAME must be 1-24 bytes without quotes or backslashes"
+    );
+    NodeConfig { id, name, ..flavor }
+}
+
+/// An id is a topic level, a client id and part of every unique id: lowercase
+/// ASCII, digits, `-` and `_`, and short enough for the buffers.
+const fn valid_id(id: &str) -> bool {
+    let b = id.as_bytes();
+    if b.is_empty() || b.len() > NODE_ID_MAX {
+        return false;
+    }
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_') {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// A name is written into JSON unescaped, so it may carry anything but the two
+/// characters that would end or break the string.
+const fn valid_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    if b.is_empty() || b.len() > NODE_NAME_MAX {
+        return false;
+    }
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' || b[i] == b'\\' || b[i] < 0x20 {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 // --- The identity in force ---------------------------------------------------
@@ -791,8 +836,8 @@ pub fn active() -> NodeConfig {
 
 /// This board's MAC, or all-zero before [`set_mac`] has been called.
 ///
-/// The MAC is the only name that does not move: a board can be provisioned into
-/// another room and reflashed with another image, and this stays what it was.
+/// The MAC is the only name that does not move: a board can be provisioned to
+/// another flavor and reflashed with another image, and this stays what it was.
 /// That is exactly the distinction that took two hours to make on 2026-09-17,
 /// when two boards published under one node name — so it is published, not just
 /// printed to a console nobody is reading.
@@ -826,44 +871,51 @@ pub fn set_mac(mac: [u8; 6]) {
 
 static mut BOARD_MAC: [u8; 6] = [0; 6];
 
-/// Resolve the identity for this boot: a provisioned name in flash wins over
-/// the one the image was built with. Call once, early in `main`, before any
-/// peripheral is set up — the sensor set decides which buses come up at all.
+/// Resolve the flavor for this boot: a provisioned one in flash wins over the
+/// one the image was built with, and the id and name stay the built ones either
+/// way. Call once, early in `main`, before any peripheral is set up — the
+/// sensor set decides which buses come up at all.
 ///
 /// A stored name that is not in the table is reported and ignored rather than
-/// obeyed, so a bad provisioning message degrades to the build-time identity
-/// instead of a board that does nothing.
+/// obeyed, so a bad provisioning message degrades to the build-time flavor
+/// instead of a board that does nothing. That includes every room name a board
+/// provisioned before flavors existed may still carry.
 #[cfg(feature = "hal")]
 pub fn init() {
     let Some(stored) = config::load_node_name() else {
         return;
     };
-    match by_name(&stored) {
+    match flavor(&stored) {
         Some(cfg) => {
+            let cfg = NodeConfig {
+                id: BUILT_AS.id,
+                name: BUILT_AS.name,
+                ..cfg
+            };
             unsafe { addr_of_mut!(ACTIVE).write(cfg) };
-            info!("provisioned as node '{}' (from flash)", stored);
+            info!("provisioned as flavor '{}' (from flash)", stored);
         }
         None => warn!(
-            "flash names unknown node '{}'; falling back to build-time '{}'. Expected one of: {}",
-            stored, BUILT_AS.id, KNOWN_NODES
+            "flash names unknown flavor '{}'; falling back to build-time '{}'. Expected one of: {}",
+            stored, BUILT_AS.flavor, KNOWN_FLAVORS
         ),
     }
 }
 
-/// Topic a board listens on to be told what it is:
+/// Topic a board listens on to be told which flavor it is:
 /// `smarthome/provision/<mac>`, with the MAC as lowercase hex, no separators.
 ///
-/// Keyed by MAC rather than by node name for the obvious chicken-and-egg
-/// reason — a board that does not yet know which node it is still knows its own
-/// MAC. Publish **retained** so a node picks its identity up whenever it next
-/// comes online:
+/// Keyed by MAC rather than by node id for the obvious chicken-and-egg
+/// reason — a board that is not running the flavor it should still knows its
+/// own MAC. Publish **retained** so a node picks it up whenever it next comes
+/// online:
 ///
 /// ```text
-/// mosquitto_pub -h <broker> -r -t smarthome/provision/a1b2c3d4e5f6 -m kueche
+/// mosquitto_pub -h <broker> -r -t smarthome/provision/a1b2c3d4e5f6 -m climate-co2
 /// ```
 ///
 /// The payload `default` clears the override, returning the board to the
-/// identity it was flashed with.
+/// flavor it was flashed with.
 pub fn provision_topic(mac: [u8; 6]) -> String<64> {
     let mut t = String::new();
     let _ = write!(t, "{}", PROVISION_PREFIX);
@@ -885,9 +937,9 @@ pub const PROVISION_RESET: &str = "default";
 /// What a retained provisioning message asks this board to become.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Provision {
-    /// Run as this node from the next boot (already checked against the table).
+    /// Run as this flavor from the next boot (already checked against the table).
     Become(String<{ crate::config::NODE_NAME_MAX }>),
-    /// Drop the stored override and go back to the built-in identity.
+    /// Drop the stored override and go back to the built-in flavor.
     Reset,
 }
 
@@ -897,7 +949,7 @@ pub enum Provision {
 /// it is re-delivered on *every* connect. Only an actual change may reach flash,
 /// or a board would rewrite its identity sector for the rest of its life.
 ///
-/// `current` is the identity in force and `has_override` says whether flash
+/// `current` is the node in force and `has_override` says whether flash
 /// carries one — both passed in rather than read here, so the decision itself
 /// stays pure and testable.
 pub fn provision_request(
@@ -914,18 +966,15 @@ pub fn provision_request(
         return has_override.then_some(Provision::Reset);
     }
 
-    match by_name(value) {
-        // Compared by node id, not by name. Every node in the fleet happens
-        // to use the same string for both today — the one that did not,
-        // `draussen`, answered to that name while its topics said `scale` —
-        // but a board must not re-provision itself in a loop if that ever
-        // diverges again, so the id is what decides.
-        Some(cfg) if cfg.id == current.id => None,
+    match flavor(value) {
+        // Compared by flavor, never by id: the id is the deployment's and a
+        // board running as `kitchen` is still a `climate` board.
+        Some(cfg) if str_eq(cfg.flavor, current.flavor) => None,
         Some(_) => Some(Provision::Become(String::try_from(value).ok()?)),
         None => {
             warn!(
-                "provisioning asked for unknown node '{}'; expected one of: {}",
-                value, KNOWN_NODES
+                "provisioning asked for unknown flavor '{}'; expected one of: {}",
+                value, KNOWN_FLAVORS
             );
             None
         }
@@ -953,24 +1002,27 @@ const _: () = {
     assert!(!str_eq("bad", "bat"));
     assert!(!str_eq("bad", "bads"));
     // Every name must round-trip through the lookup, and nothing else may.
-    assert!(by_name("kueche").is_some());
-    assert!(by_name("Kueche").is_none());
-    assert!(by_name("").is_none());
-    // Node names have to fit the flash slot they are provisioned into.
-    assert!("schlafzimmer".len() <= crate::config::NODE_NAME_MAX);
-    // The fleet's power profiles decide which sensors are even legal: the
-    // SDS011 fan and continuous CO₂ both need a node that stays awake.
-    assert!(!KUECHE.power.is_battery());
-    assert!(!SCHLAFZIMMER.power.is_battery());
-    assert!(!SCHLAFZIMMER.power.deep_sleeps());
-    assert!(KUECHE.power.deep_sleeps());
-    assert!(TERRASSE.power.is_battery());
+    assert!(flavor("climate").is_some());
+    assert!(flavor("Climate").is_none());
+    assert!(flavor("").is_none());
+    // Flavor names have to fit the flash slot they are provisioned into.
+    assert!("climate-co2".len() <= crate::config::NODE_NAME_MAX);
+    // The power profiles decide which sensors are even legal: the SDS011 fan
+    // and continuous CO₂ both need a node that stays awake.
+    assert!(!CLIMATE.power.is_battery());
+    assert!(!CLIMATE_CO2.power.is_battery());
+    assert!(!CLIMATE_CO2.power.deep_sleeps());
+    assert!(CLIMATE.power.deep_sleeps());
+    assert!(BIRD_SCALE.power.is_battery());
+    // Every flavor's own id and name must pass what a deployment's must.
+    assert!(valid_id(AIR_QUALITY.id) && valid_name(AIR_QUALITY.name));
+    assert!(!valid_id("Kitchen") && !valid_id("") && !valid_id("a/b"));
+    assert!(!valid_name("say \"hi\"") && valid_name("Küche"));
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::NODE_NAME_MAX;
 
     /// The bar this has to clear: a working fleet must not feel it at all.
     #[test]
@@ -1015,12 +1067,12 @@ mod tests {
     /// What the ceilings mean in minutes, so changing one has to be deliberate.
     #[test]
     fn the_ceilings_stay_inside_over_the_air_reach() {
-        // `kueche` and `bad`: 120 s rounds, so at worst four minutes dark.
-        let mains = KUECHE.sample_secs * u64::from(KUECHE.power.sleep_backoff_ceiling());
+        // `climate`: 120 s rounds, so at worst four minutes dark.
+        let mains = CLIMATE.sample_secs * u64::from(CLIMATE.power.sleep_backoff_ceiling());
         assert_eq!(mains, 240);
-        // `terrasse`: a ten-minute heartbeat, so at worst 160 minutes. Long,
+        // `bird-scale`: a ten-minute heartbeat, so at worst 160 minutes. Long,
         // and the reason the ceiling is not higher.
-        let battery = 600 * u64::from(TERRASSE.power.sleep_backoff_ceiling());
+        let battery = 600 * u64::from(BIRD_SCALE.power.sleep_backoff_ceiling());
         assert_eq!(battery, 9_600);
     }
 
@@ -1060,8 +1112,8 @@ mod tests {
         // The SCD4x specifies its humidity at ±6 %RH against the SHT31-D's ±2 %,
         // so the plain `temperature`/`humidity` entities — the ones a dashboard
         // reaches for — must come from the SHT31-D.
-        for name in ["schlafzimmer", "wohnzimmer"] {
-            let node = by_name(name).unwrap();
+        for name in ["climate-co2", "air-quality"] {
+            let node = flavor(name).unwrap();
             assert!(node.sht31.enabled, "{name} has no SHT31-D");
             assert!(node.scd41.enabled, "{name} has no SCD41");
             assert_eq!(node.sht31.prefix_for("humidity"), "");
@@ -1072,78 +1124,144 @@ mod tests {
     }
 
     #[test]
-    fn every_fleet_name_resolves_and_nothing_else_does() {
-        for (name, cfg) in FLEET {
-            assert_eq!(by_name(name).expect("in the table").id, cfg.id);
+    fn every_flavor_resolves_and_nothing_else_does() {
+        for (name, cfg) in FLAVORS {
+            assert_eq!(flavor(name).expect("in the table").flavor, cfg.flavor);
         }
-        // `draussen` and `scale` are the retired outdoor node's name and id.
-        // Neither may resolve: a board still carrying either in its
+        // The room names boards were built and provisioned under before
+        // flavors existed. None may resolve: a board still carrying one in its
         // provisioning sector has to fall back to what it was built as.
         for name in [
             "",
-            "Terrasse",
-            "terrasse ",
-            "küche",
-            "kuche",
+            "Climate",
+            "climate ",
+            "kueche",
+            "bad",
+            "schlafzimmer",
+            "wohnzimmer",
+            "terrasse",
+            "solarleuchte",
             "draussen",
             "scale",
         ] {
-            assert!(by_name(name).is_none(), "{name:?} resolved");
+            assert!(flavor(name).is_none(), "{name:?} resolved");
         }
     }
 
     #[test]
-    fn known_nodes_lists_exactly_the_fleet() {
-        // The message a mistyped `NODE=` prints. It has to be a literal (it is
-        // used in a const-eval panic), so nothing but this test ties it to `FLEET`.
-        let listed: Vec<&str> = KNOWN_NODES.split(", ").collect();
-        let actual: Vec<&str> = FLEET.iter().map(|(name, _)| *name).collect();
+    fn known_flavors_lists_exactly_the_table() {
+        // The message a mistyped `FLAVOR=` prints. It has to be a literal (it
+        // is used in a const-eval panic), so nothing but this test ties it to
+        // `FLAVORS`.
+        let listed: Vec<&str> = KNOWN_FLAVORS.split(", ").collect();
+        let actual: Vec<&str> = FLAVORS.iter().map(|(name, _)| *name).collect();
         assert_eq!(listed, actual);
     }
 
     #[test]
-    fn node_ids_and_names_are_unique() {
-        // Two nodes sharing an id would share topics, a Home Assistant device
-        // and an MQTT client id — they would fight over the broker session.
-        for (i, (name_a, a)) in FLEET.iter().enumerate() {
-            for (name_b, b) in &FLEET[i + 1..] {
-                assert_ne!(a.id, b.id, "{name_a} and {name_b} share an id");
-                assert_ne!(name_a, name_b);
+    fn every_flavor_is_its_own_default_identity() {
+        // A plain build, with no deployment around it, publishes under the
+        // flavor's own name -- so the key, the flavor and the id agree, and two
+        // flavors never share one.
+        for (i, (name, cfg)) in FLAVORS.iter().enumerate() {
+            assert_eq!(*name, cfg.flavor);
+            assert_eq!(*name, cfg.id);
+            for (other, _) in &FLAVORS[i + 1..] {
+                assert_ne!(name, other);
             }
         }
     }
 
     #[test]
-    fn every_fleet_name_fits_the_flash_slot() {
+    fn every_flavor_fits_the_flash_slot() {
         // A name that does not fit could be built but never provisioned.
-        for (name, _) in FLEET {
-            assert!(name.len() <= NODE_NAME_MAX, "{name} is too long to store");
+        for (name, _) in FLAVORS {
+            assert!(
+                name.len() <= crate::config::NODE_NAME_MAX,
+                "{name} is too long to store"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deployment_identity_replaces_only_id_and_name() {
+        let kitchen = identify(CLIMATE, Some("kitchen"), Some("Kitchen"));
+        assert_eq!(
+            (kitchen.id, kitchen.name, kitchen.flavor),
+            ("kitchen", "Kitchen", "climate")
+        );
+        assert_eq!(kitchen.sample_secs, CLIMATE.sample_secs);
+        assert!(kitchen.sht31.enabled && !kitchen.scd41.enabled);
+        assert_eq!(
+            kitchen.state_topic("", "humidity").as_str(),
+            "smarthome/kitchen/humidity"
+        );
+        // No name: the id is the next best thing to show.
+        assert_eq!(identify(CLIMATE, Some("kitchen"), None).name, "kitchen");
+        // Nothing: the flavor's own.
+        let plain = identify(CLIMATE, None, None);
+        assert_eq!((plain.id, plain.name), ("climate", "Climate"));
+    }
+
+    #[test]
+    fn the_longest_identity_fits_every_topic() {
+        let id = "abcdefghijklmnop";
+        assert_eq!(id.len(), NODE_ID_MAX);
+        for (_, cfg) in FLAVORS {
+            let node = identify(*cfg, Some(id), None);
+            assert!(node
+                .state_topic("battery_", "heartbeat_interval")
+                .ends_with("heartbeat_interval"));
+            assert!(node.config_wildcard().ends_with('#'));
+            assert!(node.ota_offer_topic().ends_with("/ota/offer"));
+            assert!(node.ota_version_topic().ends_with("/ota/version"));
+            assert!(node.meta_topic().ends_with("/meta/board"));
+            assert_eq!(node.client_id().len(), 3 + id.len());
+        }
+    }
+
+    #[test]
+    fn ids_and_names_are_checked() {
+        for ok in ["kitchen", "node-1", "a_b", "abcdefghijklmnop"] {
+            assert!(valid_id(ok), "{ok}");
+        }
+        for bad in ["", "Kueche", "kü", "a b", "a/b", "a+", "abcdefghijklmnopq"] {
+            assert!(!valid_id(bad), "{bad}");
+        }
+        for ok in ["Küche", "Wohnzimmer Süd", "x"] {
+            assert!(valid_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "a\"b",
+            "a\\b",
+            "line\nbreak",
+            "this name is far too long!",
+        ] {
+            assert!(!valid_name(bad), "{bad:?}");
         }
     }
 
     #[test]
     fn topics_are_built_from_the_identity() {
-        let outdoor = by_name("terrasse").unwrap();
+        let outdoor = identify(BIRD_SCALE, Some("garden"), None);
         assert_eq!(
             outdoor.state_topic("", "weight").as_str(),
-            "smarthome/terrasse/weight"
+            "smarthome/garden/weight"
         );
         assert_eq!(
             outdoor.state_topic("air_", "temperature").as_str(),
-            "smarthome/terrasse/air_temperature"
+            "smarthome/garden/air_temperature"
         );
-        assert_eq!(
-            outdoor.config_prefix().as_str(),
-            "smarthome/terrasse/config/"
-        );
+        assert_eq!(outdoor.config_prefix().as_str(), "smarthome/garden/config/");
         assert_eq!(
             outdoor.config_wildcard().as_str(),
-            "smarthome/terrasse/config/#"
+            "smarthome/garden/config/#"
         );
-        assert_eq!(outdoor.client_id().as_str(), "rs-terrasse");
+        assert_eq!(outdoor.client_id().as_str(), "rs-garden");
         assert_eq!(
             outdoor.availability_topic().as_str(),
-            "smarthome/terrasse/status"
+            "smarthome/garden/status"
         );
     }
 
@@ -1151,7 +1269,7 @@ mod tests {
     fn no_topic_is_truncated() {
         // The heapless buffers are fixed; a longer node would silently lose the
         // tail of its topic and publish somewhere unexpected.
-        for (_, node) in FLEET {
+        for (_, node) in FLAVORS {
             let longest_key = "heartbeat_interval";
             assert!(node.state_topic("air_", longest_key).ends_with(longest_key));
             assert!(node.config_wildcard().ends_with('#'));
@@ -1160,30 +1278,29 @@ mod tests {
     }
 
     #[test]
-    fn the_climate_nodes_sleep_without_changing_what_they_publish() {
-        // The whole point of duty-cycling `kueche` and `bad`: the board stops
-        // heating the air its own SHT31 is measuring. What must *not* change is
-        // the cadence — these two have years of history at 120 s, and a node
+    fn the_climate_flavor_sleeps_without_changing_what_it_publishes() {
+        // The whole point of duty-cycling it: the board stops heating the air
+        // its own SHT31 is measuring. What must *not* change is the cadence —
+        // the boards running it have years of history at 120 s, and a node
         // that starts reporting every ten minutes instead has quietly thrown
         // that continuity away to fix a different problem.
-        for id in ["kueche", "bad"] {
-            let node = by_name(id).expect("in the fleet");
-            assert!(node.power.deep_sleeps(), "{id} is still staying awake");
-            assert!(!node.power.is_battery(), "{id} is on a cable, not a cell");
-            assert_eq!(node.sample_secs, 120, "{id} changed cadence");
-            // Asleep between rounds, so a will would declare it dead after
-            // every publish; Home Assistant expires it instead.
-            assert!(!node.uses_lwt(), "{id} kept a last-will it cannot honour");
-        }
+        let id = "climate";
+        let node = flavor(id).expect("in the table");
+        assert!(node.power.deep_sleeps(), "{id} is still staying awake");
+        assert!(!node.power.is_battery(), "{id} is on a cable, not a cell");
+        assert_eq!(node.sample_secs, 120, "{id} changed cadence");
+        // Asleep between rounds, so a will would declare it dead after
+        // every publish; Home Assistant expires it instead.
+        assert!(!node.uses_lwt(), "{id} kept a last-will it cannot honour");
     }
 
     #[test]
     fn the_power_profile_decides_sleep_and_availability() {
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             // A sleeping node is offline by design between readings, so a last
             // will would declare it dead after every single publish. The
             // question is whether it sleeps, not what it is plugged into —
-            // `kueche` and `bad` are on a cable and still take the expiry path.
+            // `climate` is on a cable and still takes the expiry path.
             assert_eq!(
                 node.uses_lwt(),
                 !node.power.deep_sleeps(),
@@ -1201,7 +1318,7 @@ mod tests {
 
     #[test]
     fn bus_setup_follows_the_populated_sensors() {
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             assert_eq!(
                 node.uses_i2c(),
                 node.sht31.enabled || node.scd41.enabled,
@@ -1215,7 +1332,7 @@ mod tests {
     fn the_fan_and_continuous_co2_never_land_on_battery() {
         // Both rule out deep sleep: the SDS011's fan has to spin up per sample,
         // and the SCD41's self-calibration assumes it keeps running.
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             if node.sds011.enabled {
                 assert!(!node.power.is_battery(), "{name} runs a fan on battery");
             }
@@ -1237,7 +1354,7 @@ mod tests {
         // The bedroom has two temperature and humidity sources. Without a prefix
         // they would publish to the same topics and one would overwrite the
         // other.
-        let bedroom = by_name("schlafzimmer").unwrap();
+        let bedroom = flavor("climate-co2").unwrap();
         assert!(bedroom.scd41.enabled && bedroom.sht31.enabled);
         assert_ne!(bedroom.scd41.prefix, bedroom.sht31.prefix);
     }
@@ -1246,7 +1363,7 @@ mod tests {
     fn nothing_double_books_the_one_pin_two_things_want() {
         // The runtime half of the const assert above: D2 belongs to the DS18B20
         // or to the battery divider, never both.
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             assert!(
                 !(node.ds18b20.enabled && node.battery.enabled),
                 "{name} claims D2 twice"
@@ -1258,7 +1375,7 @@ mod tests {
     fn only_a_battery_node_senses_a_cell() {
         // A mains node has no cell to read, so the entity would sit at whatever
         // the divider that is not fitted happens to leave on the pin.
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             if node.battery.enabled {
                 assert!(
                     node.power.is_battery(),
@@ -1274,7 +1391,7 @@ mod tests {
         // that is *not* fitted yet, because enabling either has consequences
         // beyond one more entity: the divider shares D2 with a DS18B20, and a
         // probe on a node that also wants cell voltage fails the build.
-        let outdoor = by_name("terrasse").unwrap();
+        let outdoor = identify(BIRD_SCALE, Some("garden"), None);
         assert!(outdoor.sht31.enabled);
         assert!(outdoor.scale.enabled);
         assert!(outdoor.battery.enabled);
@@ -1288,7 +1405,7 @@ mod tests {
             outdoor
                 .state_topic(outdoor.sht31.prefix_for("temperature"), "temperature")
                 .as_str(),
-            "smarthome/terrasse/temperature"
+            "smarthome/garden/temperature"
         );
     }
 
@@ -1298,14 +1415,14 @@ mod tests {
     fn an_empty_payload_is_not_a_request() {
         // How a retained message is deleted. Acting on it would re-provision
         // every board whose provisioning was just cleared.
-        let outdoor = by_name("terrasse").unwrap();
+        let outdoor = flavor("bird-scale").unwrap();
         assert_eq!(provision_request("", &outdoor, true), None);
         assert_eq!(provision_request("", &outdoor, false), None);
     }
 
     #[test]
     fn reset_only_does_something_when_there_is_an_override() {
-        let outdoor = by_name("terrasse").unwrap();
+        let outdoor = flavor("bird-scale").unwrap();
         assert_eq!(
             provision_request(PROVISION_RESET, &outdoor, true),
             Some(Provision::Reset)
@@ -1317,15 +1434,15 @@ mod tests {
 
     #[test]
     fn being_told_what_it_already_is_changes_nothing() {
-        let outdoor = by_name("terrasse").unwrap();
-        assert_eq!(provision_request("terrasse", &outdoor, false), None);
-        assert_eq!(provision_request("terrasse", &outdoor, true), None);
+        let outdoor = flavor("bird-scale").unwrap();
+        assert_eq!(provision_request("bird-scale", &outdoor, false), None);
+        assert_eq!(provision_request("bird-scale", &outdoor, true), None);
     }
 
     #[test]
     fn a_different_node_is_adopted() {
-        let outdoor = by_name("terrasse").unwrap();
-        for (name, _) in FLEET.iter().filter(|(n, _)| *n != "terrasse") {
+        let outdoor = flavor("bird-scale").unwrap();
+        for (name, _) in FLAVORS.iter().filter(|(n, _)| *n != "bird-scale") {
             assert_eq!(
                 provision_request(name, &outdoor, false),
                 Some(Provision::Become(String::try_from(*name).unwrap())),
@@ -1336,27 +1453,32 @@ mod tests {
 
     #[test]
     fn an_unknown_name_is_ignored() {
-        let outdoor = by_name("terrasse").unwrap();
-        // `draussen` and `scale` are the retired outdoor node's name and id;
-        // a stale provisioning sector carrying either must be ignored.
-        for value in ["kuche", "Terrasse", "draussen", "scale", "  ", "0"] {
+        let outdoor = flavor("bird-scale").unwrap();
+        // Room names from before flavors, and the retired outdoor node's
+        // `draussen` / `scale`; a stale provisioning sector carrying any of
+        // them must be ignored.
+        for value in [
+            "terrasse",
+            "kueche",
+            "Bird-scale",
+            "draussen",
+            "scale",
+            "  ",
+            "0",
+        ] {
             assert_eq!(provision_request(value, &outdoor, false), None, "{value}");
         }
     }
 
     #[test]
-    fn the_node_is_matched_by_id_not_by_name() {
-        // Retired `draussen` was the case that made this visible: it answered
-        // to that name while its id — and its topics — said `scale`. Nothing
-        // in the fleet diverges today, so assert that too; if it ever does
-        // again, a board already running as a node must still not
-        // re-provision itself in a loop.
-        for (name, node) in FLEET {
-            assert_eq!(
-                *name, node.id,
-                "{name} and its id have diverged; the id is what provisioning compares"
-            );
-            assert_eq!(provision_request(name, node, false), None, "{name}");
+    fn a_board_is_matched_by_flavor_not_by_id() {
+        // A deployed board's id never equals its flavor's name. Comparing ids
+        // would make every retained provisioning message look like a change,
+        // and the board would rewrite its flash and reboot on every connect.
+        for (name, cfg) in FLAVORS {
+            let deployed = identify(*cfg, Some("somewhere"), Some("Somewhere"));
+            assert_eq!(provision_request(name, &deployed, false), None, "{name}");
+            assert_eq!(provision_request(name, &deployed, true), None, "{name}");
         }
     }
 
@@ -1397,7 +1519,7 @@ mod tests {
     fn every_fleet_period_is_a_whole_number_of_base_rounds() {
         // Otherwise the node publishes on a cadence nobody wrote down: the
         // table says 900 s and the sensor actually runs every 960.
-        for (name, node) in FLEET {
+        for (name, node) in FLAVORS {
             for (what, slot) in [
                 ("sht31", node.sht31),
                 ("scd41", node.scd41),
