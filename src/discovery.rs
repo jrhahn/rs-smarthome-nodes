@@ -193,35 +193,51 @@ impl Availability {
 pub struct Entity {
     pub slot: Slot,
     pub desc: &'static EntityDescriptor,
+    /// About the board rather than the room: announced with
+    /// `ent_cat: diagnostic`, so Home Assistant files it under the device
+    /// page's diagnostics and the archive's dashboard leaves it out.
+    pub diagnostic: bool,
 }
 
 /// Every entity this node exposes, in publish order.
 pub fn entities(node: &NodeConfig) -> Vec<Entity, MAX_ENTITIES> {
     let mut out = Vec::new();
-    for (slot, descriptors) in [
-        (node.scale, scale::DESCRIPTORS),
-        (node.ds18b20, ds18b20::DESCRIPTORS),
-        (node.sht31, sht31::DESCRIPTORS),
-        (node.scd41, scd41::DESCRIPTORS),
-        (node.sds011, sds011::descriptors(node.sds011.compensated)),
-        (node.sgp41, sgp41::descriptors(node.sgp41.nox)),
-        (node.battery, battery::DESCRIPTORS),
+    // The third column is `diagnostic`. Decided per group rather than per
+    // descriptor: whether a channel describes the house or the board is a
+    // property of where it comes from, the same way a control's `ent_cat`
+    // follows its component.
+    for (slot, descriptors, diagnostic) in [
+        (node.scale, scale::DESCRIPTORS, false),
+        (node.ds18b20, ds18b20::DESCRIPTORS, false),
+        (node.sht31, sht31::DESCRIPTORS, false),
+        (node.scd41, scd41::DESCRIPTORS, false),
+        (
+            node.sds011,
+            sds011::descriptors(node.sds011.compensated),
+            false,
+        ),
+        (node.sgp41, sgp41::descriptors(node.sgp41.nox), false),
+        (node.battery, battery::DESCRIPTORS, false),
         // Not behind a `NodeConfig` field, unlike every sensor above. A node
         // that cannot reach Wi-Fi cannot publish at all, so there is no
         // configuration to express: the slot is on for everyone, and `Slot::on`
         // means "every round", which is exactly the cadence a link property
         // has. Its `expire_after` therefore follows the node's base round.
-        (Slot::on(), rssi::DESCRIPTORS),
+        (Slot::on(), rssi::DESCRIPTORS, true),
         // Same reasoning as the RSSI above: not a sensor, a property of the
         // board, and every node has one. Diagnostics rather than readings, but
         // the cost of carrying them is two small numbers per publish.
-        (Slot::on(), reset_reason::DESCRIPTORS),
+        (Slot::on(), reset_reason::DESCRIPTORS, true),
     ] {
         if !slot.enabled {
             continue;
         }
         for desc in descriptors {
-            let _ = out.push(Entity { slot, desc });
+            let _ = out.push(Entity {
+                slot,
+                desc,
+                diagnostic,
+            });
         }
     }
     out
@@ -317,7 +333,7 @@ pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) 
          \"val_tpl\":\"{val_tpl}\",\
          {unit}{dev_cla}\
          \"stat_cla\":\"{stat_cla}\",\
-         \"exp_aft\":{expire},{avty}",
+         {ent_cat}\"exp_aft\":{expire},{avty}",
         // Only the sensors get this. A control's `stat_t` points at
         // `~/config/<key>`, which carries the knob's value as a bare number
         // written by Home Assistant itself -- a template there would look for a
@@ -352,6 +368,7 @@ pub fn config_payload(node: &NodeConfig, entity: &Entity, avail: &Availability) 
         unit = OptionalMember("unit_of_meas", desc.unit),
         dev_cla = OptionalMember("dev_cla", desc.device_class),
         stat_cla = desc.state_class,
+        ent_cat = OptionalMember("ent_cat", if entity.diagnostic { "diagnostic" } else { "" },),
     )
     .ok()?;
     write_device(&mut p, node).ok()?;
@@ -955,6 +972,28 @@ mod tests {
                     "{} {} must not template its config topic",
                     node.id,
                     control.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_board_diagnostics_are_announced_as_diagnostic() {
+        // Link and reset counters describe the board, not the room: Home
+        // Assistant files them under diagnostics and the archive's dashboard
+        // leaves them out. A measurement marked so would vanish from both.
+        const BOARD: [&str; 4] = ["rssi", "reset_reason", "reset_count", "boot_count"];
+        for (_, node) in FLEET {
+            let avail = availability_of(node);
+            for entity in entities(node) {
+                let payload = parse(&config_payload(node, &entity, &avail).unwrap());
+                let expected = BOARD.contains(&entity.desc.key).then_some("diagnostic");
+                assert_eq!(
+                    payload["ent_cat"].as_str(),
+                    expected,
+                    "{} {}",
+                    node.id,
+                    entity.desc.key
                 );
             }
         }
