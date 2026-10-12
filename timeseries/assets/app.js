@@ -284,8 +284,10 @@ function readHash() {
     return;
   }
   state.periods = null;
-  // No hash at all is the landing page, and the landing page is the dashboard.
-  state.dashboard = parts[0] === "d" || parts[0] === "";
+  // Everything but the channel wall belongs to the dashboard, the landing
+  // page. A chart link does not say where it was opened from, so after a reload
+  // or from a pasted link its way back leads there rather than to "Live".
+  state.dashboard = parts[0] !== "all";
   if (parts[0] === "c" && parts[1] && parts[2]) {
     state.selected = { node: parts[1], sensor: parts[2] };
   } else {
@@ -328,7 +330,6 @@ async function loadOverview() {
   try {
     state.channels = await getJSON(`/api/overview?from=${from}&to=${to}&points=80`);
     dom.overviewHint.hidden = state.channels.length > 0;
-    dom.dashboardHint.hidden = state.channels.length > 0;
   } catch (e) {
     for (const hint of [dom.overviewHint, dom.dashboardHint]) {
       hint.hidden = false;
@@ -336,7 +337,10 @@ async function loadOverview() {
     }
     return;
   }
-  if (state.dashboard) renderDashboard();
+  // A chart drawn before the channel list arrived is labelled with its raw
+  // key; now that the names are here, label it again.
+  if (state.selected && state.series) renderDetail();
+  else if (state.dashboard) renderDashboard();
   else renderOverview();
 }
 
@@ -569,6 +573,13 @@ function renderDashboard() {
     if (!byNode.has(c.node)) byNode.set(c.node, []);
     byNode.get(c.node).push(c);
   }
+  // A node whose every channel is filtered gets no card -- say so, or a node
+  // gone quiet looks like one that never existed.
+  const hidden = [...new Set(state.channels.map((c) => c.node))].filter((n) => !byNode.has(n));
+  dom.dashboardHint.hidden = !hidden.length;
+  dom.dashboardHint.textContent = hidden.length
+    ? `${byNode.size ? "Not shown" : "Nothing to show"}: ${hidden.join(", ")} — diagnostics only, see Live.`
+    : "";
 
   // Colour and a word, never colour alone: the same rule as the status dots.
   const value = (c) => {
@@ -771,6 +782,7 @@ dom.viewDashboard.addEventListener("click", () => {
 
 dom.viewLive.addEventListener("click", () => {
   state.periods = null;
+  state.selected = null;
   state.dashboard = false;
   writeHash();
   show();
