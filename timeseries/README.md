@@ -129,6 +129,7 @@ below, which compares every zoom level against a full scan of the raw table.
 | `POST /api/annotations/void` | takes one back, by `at_ms` and `node` |
 | `GET /api/channels` | the channel list without any series — for scripts |
 | `GET /api/health` | broker and database reachability, rollups, counters |
+| `GET /api/floorplan` | the configured floor plan and its node-to-room map; 404 without one |
 
 `/api/overview` is one database query for the whole screen rather than one per
 channel. Thirty-one round trips to paint a page would be the obvious way and the
@@ -173,6 +174,16 @@ Everything about the devices rather than the rooms is left out: channels marked
 `diagnostic`, the firmware's link and reset counters, unnamed topics, raw twins
 of corrected readings, supply voltage and current. The rule is `isDebug` in
 `assets/app.js`; all of it stays one click away under **Live**.
+
+Above the cards sits a **floor plan**, if `web.floorplan` names one: an SVG in
+which each room is a shape (a `rect`, `path` or `polygon` — or a group whose
+children set no `fill` of their own) whose `id` appears in `web.rooms` (node
+id → room id). Every room with a board in it is tinted by its worst reading — amber for
+elevated, red for high, grey when nothing has arrived for an hour — and shows
+each board's lead value plus any reading past its limit; a click scrolls to the
+card of the room's first board. The SVG is inlined into the page as it is, so it has to be the
+operator's own file, and its classes should not reuse the page's (`room` is
+taken). Without `web.floorplan` the dashboard is the cards alone.
 
 **The overview** (**Live**, `#all/<range>`) is a wall of tiles, one per channel, grouped by node: the
 current value, its unit, a sparkline over the selected range, and the span that

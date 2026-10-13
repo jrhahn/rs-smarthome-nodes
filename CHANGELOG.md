@@ -26,6 +26,15 @@ reconstruction and reads like one.
 
 ## [Unreleased]
 
+### Added
+
+- **A floor plan on the archive dashboard.** `web.floorplan` names an SVG and
+  `web.rooms` maps node ids to the ids of its rooms; the dashboard then draws
+  the plan above the cards, tints each room by its worst reading (or grey when
+  stale) and writes the boards' lead values into it. Served by the new
+  `GET /api/floorplan`, which answers 404 when no plan is configured, so a
+  setup without one looks as before.
+
 ### Changed
 
 - **Boards are built from flavors, not from a table of rooms — breaking for

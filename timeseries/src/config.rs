@@ -10,6 +10,7 @@
 //! Everything has a default that works against a broker and a QuestDB on
 //! localhost, so the smallest useful configuration file is an empty one.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -124,6 +125,16 @@ impl Default for QuestDb {
 #[serde(deny_unknown_fields, default)]
 pub struct Web {
     pub bind: SocketAddr,
+    /// An SVG floor plan for the dashboard. Each room is an element whose `id`
+    /// is a value in `rooms`; the page colours it and writes the room's
+    /// readings into it. Unset, the dashboard is the cards alone.
+    ///
+    /// The file is inlined into the page, so it must be trusted: it is the
+    /// operator's own drawing, not something a node publishes.
+    pub floorplan: Option<PathBuf>,
+    /// Node id to the `id` of its room in `floorplan`. Several nodes may share
+    /// a room; a node not listed is not drawn on the plan.
+    pub rooms: BTreeMap<String, String>,
 }
 
 impl Default for Web {
@@ -133,6 +144,8 @@ impl Default for Web {
             // its own. Put it behind the home server's reverse proxy, the same
             // way Home Assistant is reached.
             bind: "127.0.0.1:8087".parse().expect("literal is a valid addr"),
+            floorplan: None,
+            rooms: BTreeMap::new(),
         }
     }
 }
@@ -348,5 +361,16 @@ mod tests {
         std::fs::write(&path, "[questdb]\nretention = \"30s\"\n").unwrap();
         assert!(Settings::load(Some(&path)).is_err());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_floor_plan_maps_nodes_to_rooms() {
+        let s = toml::from_str::<Settings>(
+            "[web]\nfloorplan = \"/plan.svg\"\nrooms = { kitchen = \"k\", garden = \"g\", shed = \"g\" }\n",
+        )
+        .unwrap();
+        assert_eq!(s.web.floorplan.as_deref(), Some(Path::new("/plan.svg")));
+        assert_eq!(s.web.rooms["shed"], "g");
+        assert!(Settings::default().web.floorplan.is_none());
     }
 }

@@ -68,3 +68,8 @@ batch_max = 1000
 # Loopback: the dashboard has no authentication of its own. Put it behind the
 # same reverse proxy as Home Assistant to reach it from elsewhere.
 bind = "127.0.0.1:8087"
+
+# An SVG floor plan above the dashboard's cards, and which node sits in which
+# room: the values are element ids in the SVG. Unset, there is no plan.
+# floorplan = "/etc/smarthome/floorplan.svg"
+# rooms = { kitchen = "kitchen", garden = "garden", shed = "garden" }

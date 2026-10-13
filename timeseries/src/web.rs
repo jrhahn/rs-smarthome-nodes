@@ -43,6 +43,7 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/annotations/void", post(void_annotation))
         .route("/api/health", get(health))
+        .route("/api/floorplan", get(floorplan))
         .with_state(app)
 }
 
@@ -501,6 +502,33 @@ async fn health(State(app): State<App>) -> Json<Health> {
     })
 }
 
+#[derive(Serialize)]
+struct Floorplan {
+    svg: String,
+    rooms: std::collections::BTreeMap<String, String>,
+}
+
+/// The floor plan and which node sits in which room, or 404 when none is
+/// configured. Read on every request: it is a few kilobytes, asked for once
+/// per page load, and an edited file shows up without a restart.
+async fn floorplan(State(app): State<App>) -> Response {
+    let web = &app.settings.web;
+    let Some(path) = &web.floorplan else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read_to_string(path).await {
+        Ok(svg) => Json(Floorplan {
+            svg,
+            rooms: web.rooms.clone(),
+        })
+        .into_response(),
+        Err(e) => {
+            warn!("floor plan {}: {e}", path.display());
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The handlers all need a live QuestDB, so what is tested here is the
@@ -525,6 +553,7 @@ mod tests {
         "/api/annotations",
         "/api/annotations/void",
         "/api/health",
+        "/api/floorplan",
     ];
 
     #[test]
