@@ -437,6 +437,29 @@ header .back {
 header .back:hover { background: var(--series); color: #fff; border-color: var(--series); }
 header .back[hidden] { display: none; }
 
+/* The floor plan keeps its own paper colours in both themes: it is a drawing,
+   and its walls and labels are the operator's, not this stylesheet's. Only
+   the rooms with a board in them are recoloured, by their worst reading. */
+.plan {
+  background: #fbfaf7;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+}
+.plan[hidden] { display: none; }
+.plan svg { display: block; width: 100%; max-height: 60vh; }
+.plan .plan-room { cursor: pointer; fill: #eef3fa; }
+.plan .plan-room:hover { fill: #dde8f6; }
+.plan .plan-room.warn { fill: #f8e6c8; }
+.plan .plan-room.alert { fill: #f6d3d3; }
+.plan .plan-room.stale { fill: #e4e3df; }
+.plan .plan-values { fill: #0b0b0b; font-weight: 600; text-anchor: middle; pointer-events: none; }
+.plan .plan-values .warn { fill: #b86e00; }
+.plan .plan-values .alert { fill: #d03b3b; }
+.plan .plan-values .stale { fill: #83817a; font-weight: 500; }
+
 .rooms {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

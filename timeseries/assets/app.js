@@ -133,6 +133,8 @@ const state = {
   // The third view: the house at a glance. Stays set while a channel opened
   // from it is shown, so "back" returns to where the reader came from.
   dashboard: false,
+  // `{ svg, rooms }` from /api/floorplan, or null when the server has none.
+  floorplan: null,
 };
 
 /// How many earlier windows `compare` draws behind the current one.
@@ -181,6 +183,7 @@ const dom = {
   dashboard: el("dashboard"),
   dashboardHint: el("dashboard-hint"),
   rooms: el("rooms"),
+  plan: el("plan"),
   back: el("back"),
   viewPeriods: el("view-periods"),
 };
@@ -615,7 +618,7 @@ function renderDashboard() {
         ? `<span class="dot down"></span>offline`
         : `<span class="dot ${stale ? "down" : "up"}"></span>${esc(ago(last))}`;
     cards.push(
-      `<article class="room">` +
+      `<article class="room" data-node="${esc(node)}">` +
         `<div class="room-head"><h3>${esc(name)}</h3><span class="state${stale ? " stale" : ""}">${status}</span></div>` +
         link(lead, "lead", `<span class="label">${esc(label(lead))}</span><span class="value">${value(lead)}</span><canvas></canvas>`) +
         (rest.length
@@ -627,6 +630,7 @@ function renderDashboard() {
     );
   }
   dom.rooms.innerHTML = cards.join("");
+  renderPlan(byNode);
 
   for (const button of dom.rooms.querySelectorAll("button")) {
     const c = state.channels.find(
@@ -642,6 +646,71 @@ function renderDashboard() {
       writeHash();
       show();
     });
+  }
+}
+
+/// The floor plan: each room with a board in it takes the colour of its worst
+/// reading and shows every board's lead value; a click scrolls to the cards.
+/// `byNode` comes from `renderDashboard`, already filtered and lead-first.
+///
+/// The SVG is inlined as the server sends it. It is the operator's own file
+/// (`web.floorplan`), not anything a node publishes.
+function renderPlan(byNode) {
+  const plan = state.floorplan;
+  dom.plan.hidden = !plan;
+  if (!plan) return;
+  if (!dom.plan.firstElementChild) dom.plan.innerHTML = plan.svg;
+  const svg = dom.plan.querySelector("svg");
+  if (!svg) return;
+  for (const old of svg.querySelectorAll(".plan-values")) old.remove();
+
+  const nodesIn = new Map();
+  for (const [node, room] of Object.entries(plan.rooms)) {
+    if (!byNode.has(node)) continue;
+    if (!nodesIn.has(room)) nodesIn.set(room, []);
+    nodesIn.get(room).push(node);
+  }
+  const rank = { "": 0, warn: 1, alert: 2 };
+  for (const [room, nodes] of nodesIn) {
+    const shape = svg.getElementById(room);
+    if (!shape) continue;
+    const channels = nodes.flatMap((n) => byNode.get(n));
+    const worst = channels.map(level).reduce((a, b) => (rank[b] > rank[a] ? b : a), "");
+    const last = Math.max(...channels.map((c) => c.last_at_ms || 0));
+    shape.classList.add("plan-room");
+    shape.classList.toggle("warn", worst === "warn");
+    shape.classList.toggle("alert", worst === "alert");
+    shape.classList.toggle("stale", !last || Date.now() - last > 3600e3);
+
+    // Below the room's own label: each board's lead value, plus any reading
+    // past its limit -- the reason the room has its colour.
+    const lines = nodes.flatMap((n) => {
+      const [lead, ...rest] = byNode.get(n);
+      const stale = !lead.last_at_ms || Date.now() - lead.last_at_ms > 3600e3;
+      return [lead, ...rest.filter(level)].map((c) => ({ c, stale }));
+    });
+    const box = shape.getBBox();
+    const size = Math.min(30, box.width / 6, box.height / (lines.length + 3));
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("class", "plan-values");
+    // A style, not the attribute: the plan's own CSS for `text` would win over it.
+    text.style.fontSize = `${size}px`;
+    lines.forEach(({ c, stale }, i) => {
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+      line.setAttribute("x", box.x + box.width / 2);
+      line.setAttribute("y", box.y + box.height / 2 + size * (1.6 + 1.25 * i));
+      const l = level(c);
+      if (l || stale) line.setAttribute("class", l || "stale");
+      line.textContent =
+        formatterFor(c).format(c.last_value ?? NaN).replace("NaN", "—") +
+        (c.unit ? ` ${c.unit}` : "") +
+        // Colour and a word, as on the cards.
+        (l ? (l === "alert" ? " high" : " elevated") : "");
+      text.append(line);
+    });
+    shape.after(text);
+    shape.onclick = () =>
+      dom.rooms.querySelector(`[data-node="${CSS.escape(nodes[0])}"]`)?.scrollIntoView({ behavior: "smooth" });
   }
 }
 
@@ -1487,6 +1556,13 @@ readHash();
 writeHash();
 renderRanges();
 loadHealth();
+// Once per page load: the plan does not change while the page is open.
+getJSON("/api/floorplan")
+  .then((plan) => {
+    state.floorplan = plan;
+    if (state.dashboard && !state.selected && !state.periods) renderDashboard();
+  })
+  .catch(() => {});
 show();
 setInterval(() => {
   loadHealth();
