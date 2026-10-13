@@ -559,6 +559,15 @@ const leadRank = (c) => {
 /// discovery name is a topic path rather than something to show.
 const prettyNode = (node) => node.charAt(0).toUpperCase() + node.slice(1).replace(/_/g, " ");
 
+/// A node's display name: its discovery name, unless that is a topic path.
+const nodeName = (channels) =>
+  channels.find((c) => c.node_name && !c.node_name.includes("/"))?.node_name || prettyNode(channels[0].node);
+
+/// The last word of the name -- "Plug Desk" as "Desk" -- to tell
+/// boards apart inside one room on the plan.
+// ponytail: last word only; give the rooms map labels if two names ever end alike.
+const shortName = (channels) => nodeName(channels).split(" ").pop().replace(/^./, (ch) => ch.toUpperCase());
+
 /// When a reading deserves attention, by device class: `[elevated, high]`.
 /// CO₂ follows the German Umweltbundesamt's indoor guidance -- below 1000 ppm
 /// harmless, 1000–2000 ppm conspicuous (air the room), above 2000 ppm
@@ -608,7 +617,7 @@ function renderDashboard() {
   for (const [node, channels] of byNode) {
     channels.sort((a, b) => leadRank(a) - leadRank(b));
     const [lead, ...rest] = channels;
-    const name = channels.find((c) => c.node_name && !c.node_name.includes("/"))?.node_name || prettyNode(node);
+    const name = nodeName(channels);
     const online = channels.find((c) => c.online !== null && c.online !== undefined)?.online;
     const last = Math.max(...channels.map((c) => c.last_at_ms || 0));
     const stale = !last || Date.now() - last > 3600e3;
@@ -682,30 +691,49 @@ function renderPlan(byNode) {
     shape.classList.toggle("alert", worst === "alert");
     shape.classList.toggle("stale", !last || Date.now() - last > 3600e3);
 
-    // Below the room's own label: each board's lead value, plus any reading
-    // past its limit -- the reason the room has its colour.
+    // Under the room's own name, which the plan puts at the top of the room:
+    // each board's lead value, its CO₂ if it has one, and any reading past its
+    // limit -- the reason the room has its colour. With several boards in one
+    // room, each board's first line carries a short name.
     const lines = nodes.flatMap((n) => {
       const [lead, ...rest] = byNode.get(n);
-      const stale = !lead.last_at_ms || Date.now() - lead.last_at_ms > 3600e3;
-      return [lead, ...rest.filter(level)].map((c) => ({ c, stale }));
+      // The board's newest reading, as on its card: a plug that only
+      // publishes on change is not stale because its power sat still.
+      const last = Math.max(...byNode.get(n).map((c) => c.last_at_ms || 0));
+      const stale = !last || Date.now() - last > 3600e3;
+      const tag = nodes.length > 1 ? shortName(byNode.get(n)) : "";
+      return [lead, ...rest.filter((c) => c.device_class === "carbon_dioxide" || level(c))].map(
+        (c, i) => {
+          const l = level(c);
+          const words =
+            (i || !tag ? "" : `${tag} `) +
+            formatterFor(c).format(c.last_value ?? NaN).replace("NaN", "—") +
+            (c.unit ? ` ${c.unit}` : "") +
+            // Colour and a word, as on the cards.
+            (l ? (l === "alert" ? " high" : " elevated") : "");
+          return { words, cls: l || (stale ? "stale" : "") };
+        },
+      );
     });
     const box = shape.getBBox();
-    const size = Math.min(30, box.width / 6, box.height / (lines.length + 3));
+    const top = box.y + Math.min(48, box.height * 0.3);
+    const space = box.y + box.height - top;
+    // Sized to the longest line (a character is about 0.6 em wide) and to the
+    // number of lines, whichever is tighter.
+    const longest = Math.max(...lines.map((l) => l.words.length));
+    const size = Math.min(28, (box.width * 0.9) / (longest * 0.6), space / (lines.length * 1.3 + 0.3));
+    const step = size * 1.3;
     const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
     text.setAttribute("class", "plan-values");
     // A style, not the attribute: the plan's own CSS for `text` would win over it.
     text.style.fontSize = `${size}px`;
-    lines.forEach(({ c, stale }, i) => {
+    lines.forEach(({ words, cls }, i) => {
       const line = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
       line.setAttribute("x", box.x + box.width / 2);
-      line.setAttribute("y", box.y + box.height / 2 + size * (1.6 + 1.25 * i));
-      const l = level(c);
-      if (l || stale) line.setAttribute("class", l || "stale");
-      line.textContent =
-        formatterFor(c).format(c.last_value ?? NaN).replace("NaN", "—") +
-        (c.unit ? ` ${c.unit}` : "") +
-        // Colour and a word, as on the cards.
-        (l ? (l === "alert" ? " high" : " elevated") : "");
+      line.setAttribute("y", top + (space - lines.length * step) / 2 + step * (i + 0.5));
+      line.setAttribute("dominant-baseline", "middle");
+      if (cls) line.setAttribute("class", cls);
+      line.textContent = words;
       text.append(line);
     });
     shape.after(text);
