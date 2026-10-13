@@ -180,7 +180,10 @@ which each room is a shape (a `rect`, `path` or `polygon` — or a group whose
 children set no `fill` of their own) whose `id` appears in `web.rooms` (node
 id → room id). Every room with a board in it is tinted by its worst reading — amber for
 elevated, red for high, grey when nothing has arrived for an hour — and shows
-each board's lead value plus any reading past its limit; a click scrolls to the
+each board's lead value, its CO₂ if it measures one, and any reading past its
+limit; with several boards in one room, each one's first line starts with the
+last word of its name (`Plug Desk` as `Desk`). The readings fill the
+room below its top 48 units (less in a short room), so the plan should put the room's name there; a click scrolls to the
 card of the room's first board. The SVG is inlined into the page as it is, so it has to be the
 operator's own file, and its classes should not reuse the page's (`room` is
 taken). Without `web.floorplan` the dashboard is the cards alone.
