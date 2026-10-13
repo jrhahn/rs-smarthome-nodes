@@ -516,7 +516,7 @@ async fn floorplan(State(app): State<App>) -> Response {
     let Some(path) = &web.floorplan else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match std::fs::read_to_string(path) {
+    match tokio::fs::read_to_string(path).await {
         Ok(svg) => Json(Floorplan {
             svg,
             rooms: web.rooms.clone(),

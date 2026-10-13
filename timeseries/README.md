@@ -176,11 +176,12 @@ of corrected readings, supply voltage and current. The rule is `isDebug` in
 `assets/app.js`; all of it stays one click away under **Live**.
 
 Above the cards sits a **floor plan**, if `web.floorplan` names one: an SVG in
-which each room is an element whose `id` appears in `web.rooms` (node id → room
-id). Every room with a board in it is tinted by its worst reading — amber for
+which each room is a shape (a `rect`, `path` or `polygon` — or a group whose
+children set no `fill` of their own) whose `id` appears in `web.rooms` (node
+id → room id). Every room with a board in it is tinted by its worst reading — amber for
 elevated, red for high, grey when nothing has arrived for an hour — and shows
-each board's lead value plus any reading past its limit; a click scrolls to that
-board's card. The SVG is inlined into the page as it is, so it has to be the
+each board's lead value plus any reading past its limit; a click scrolls to the
+card of the room's first board. The SVG is inlined into the page as it is, so it has to be the
 operator's own file, and its classes should not reuse the page's (`room` is
 taken). Without `web.floorplan` the dashboard is the cards alone.
 
