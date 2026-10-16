@@ -26,6 +26,26 @@ let
   settingsFile = tomlFormat.generate "smarthome-timeseries.toml" settings;
 
   questdbConf = pkgs.writeText "questdb-server.conf" cfg.questdb.extraConfig;
+
+  # QuestDB's own default, with the file writer cut down from INFO to errors.
+  # At INFO it writes a line for every WAL commit, apply and view refresh: with
+  # three rollup tiers behind a commit every few seconds that was ~900 lines a
+  # minute, ~250 MB a day on the disk and ~4 % of a core on a small CPU, and
+  # none of it is read. ADVISORY keeps the start-up summary and the warnings
+  # about the environment.
+  questdbLogConf = pkgs.writeText "questdb-log.conf" ''
+    writers=file,http.min
+    w.file.class=io.questdb.log.LogRollingFileWriter
+    w.file.location=''${log.dir}/questdb-rolling.log.''${date:yyyyMMdd}
+    w.file.level=ERROR,CRITICAL,ADVISORY
+    w.file.rollEvery=day
+    w.file.rollSize=128m
+    w.file.lifeDuration=1M
+    w.file.sizeLimit=1g
+    w.http.min.class=io.questdb.log.LogConsoleWriter
+    w.http.min.level=ERROR
+    w.http.min.scope=http-min-server
+  '';
 in
 {
   options.services.smarthome-timeseries = {
@@ -153,6 +173,7 @@ in
           http.bind.to=''${questdb.httpEndpoint}
           pg.net.bind.to=127.0.0.1:8812
           line.tcp.net.bind.to=127.0.0.1:9009
+          telemetry.enabled=false
         '''
       '';
       description = ''
@@ -167,10 +188,14 @@ in
 
   config = lib.mkIf cfg.enable {
     # Derived rather than repeated: see `questdb.httpEndpoint`.
+    # Telemetry off: QuestDB otherwise records its own WAL and view activity
+    # into sys.telemetry_* tables (over 100 MB here within a month) and reports
+    # usage to QuestDB's servers.
     services.smarthome-timeseries.questdb.extraConfig = lib.mkDefault ''
       http.bind.to=${cfg.questdb.httpEndpoint}
       pg.net.bind.to=127.0.0.1:8812
       line.tcp.net.bind.to=127.0.0.1:9009
+      telemetry.enabled=false
     '';
 
     systemd.services.smarthome-timeseries = {
@@ -225,6 +250,7 @@ in
       preStart = ''
         mkdir -p ${cfg.questdb.dataDir}/conf
         install -m 0644 ${questdbConf} ${cfg.questdb.dataDir}/conf/server.conf
+        install -m 0644 ${questdbLogConf} ${cfg.questdb.dataDir}/conf/log.conf
       '';
 
       serviceConfig = {
