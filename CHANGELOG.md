@@ -38,6 +38,16 @@ reconstruction and reads like one.
 
 ### Changed
 
+- **QuestDB runs quieter.** The NixOS module now writes a `log.conf` next to
+  `server.conf` that logs errors, critical messages and advisories only, not
+  every WAL commit, apply and view refresh at INFO (~900 lines a minute and
+  ~250 MB a day on a server with three rollup tiers), and that also writes
+  them to stdout, so they reach the journal. Its default
+  `server.conf` also sets `telemetry.enabled=false`, so QuestDB stops filling
+  `sys.telemetry_*` tables and reporting usage; what those tables already
+  hold stays until they are dropped. A setup that sets
+  `questdb.extraConfig` itself keeps its own file and decides on telemetry
+  there.
 - **Boards are built from flavors, not from a table of rooms — breaking for
   every build command.** `src/node.rs` now lists five flavors (`climate`,
   `climate-co2`, `air-quality`, `bird-scale`, `solar-lamp`): a sensor set and a
