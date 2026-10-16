@@ -96,6 +96,14 @@ reconstruction and reads like one.
 
 ### Fixed
 
+- **The solar lamp's evening readings carry honest timestamps.** It synced
+  the time once at boot and then stamped every five-minute round from that
+  anchor plus its monotonic timer, for hours: on 2026-10-16 its readings were
+  three to four minutes in the future by the evening's second hour. Each round
+  now asks the time server again and re-anchors on the answer; a round whose
+  sync fails goes out unstamped and is dated on arrival, as on every other
+  flavor. Dusk and the cutoff still run on the carried clock. Takes effect on
+  reflash.
 - **A chart opened from a link shows its channel's name, not its key.** When
   the series arrived before the channel list, the title stayed `temperature`
   instead of `Temperatur` until the next refresh; it is now relabelled as soon

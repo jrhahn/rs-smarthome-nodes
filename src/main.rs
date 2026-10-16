@@ -806,16 +806,15 @@ async fn run_lamp(
     };
 
     // The clock only advances across sleeps (see `sleep_for`), so an evening
-    // spent awake would freeze it. Anchor once and carry the monotonic
-    // elapsed time on top.
-    let Some(anchor_ms) = state::clock_ms() else {
+    // spent awake would freeze it. Anchor here and carry the monotonic elapsed
+    // time on top -- re-anchored by every publish round's sync, below.
+    let Some(mut anchor_ms) = state::clock_ms() else {
         // Never set, and nothing to set it from. Without this the lamp would
         // light at an arbitrary hour, which is worse than not lighting.
         warn!("lamp: no clock and no NTP; retrying in an hour");
         enter_deep_sleep(lpwr, CoreDuration::from_secs(3600));
     };
-    let anchor = Instant::now();
-    let now_ms = || anchor_ms + anchor.elapsed().as_millis();
+    let mut anchor = Instant::now();
 
     // The PWM moves to its own task, and the string with it.
     if let Some(l) = board.lamp.take() {
@@ -827,7 +826,7 @@ async fn run_lamp(
 
     let mut last_publish = Instant::now();
     loop {
-        let ms = now_ms();
+        let ms = anchor_ms + anchor.elapsed().as_millis();
         let minute = solar::minute_of_day(ms);
         let doy = solar::day_of_year(ms);
 
@@ -875,9 +874,10 @@ async fn run_lamp(
         if lamp::charge_permille(cell) == 0 {
             LAMP_GATE.signal(0);
             Timer::after(LAMP_STEP).await;
+            let (ms, synced) = lamp_resync(stack, &mut anchor_ms, &mut anchor).await;
             state::set_clock_ms(ms);
             if let Some(s) = stack {
-                let _ = lamp_publish(s, board, cfg, Some(ms), &mut on_trial).await;
+                let _ = lamp_publish(s, board, cfg, synced, &mut on_trial).await;
             }
             let secs = lamp_sleep_secs(ms);
             warn!("lamp: cell at {cell} mV is too low to light; sleeping {secs} s");
@@ -887,9 +887,10 @@ async fn run_lamp(
         if !lamp::is_evening(minute, doy) {
             LAMP_GATE.signal(0);
             Timer::after(LAMP_STEP).await;
+            let (ms, synced) = lamp_resync(stack, &mut anchor_ms, &mut anchor).await;
             state::set_clock_ms(ms);
             if let Some(s) = stack {
-                let _ = lamp_publish(s, board, cfg, Some(ms), &mut on_trial).await;
+                let _ = lamp_publish(s, board, cfg, synced, &mut on_trial).await;
             }
             let secs = lamp_sleep_secs(ms);
             info!("lamp: outside the window, sleeping {secs} s until dusk");
@@ -898,14 +899,41 @@ async fn run_lamp(
 
         if last_publish.elapsed() >= LAMP_PUBLISH_EVERY {
             last_publish = Instant::now();
+            let (ms, synced) = lamp_resync(stack, &mut anchor_ms, &mut anchor).await;
             state::set_clock_ms(ms);
             if let Some(s) = stack {
-                cfg = lamp_publish(s, board, cfg, Some(ms), &mut on_trial).await;
+                cfg = lamp_publish(s, board, cfg, synced, &mut on_trial).await;
             }
         }
 
         Timer::after(LAMP_TICK).await;
     }
+}
+
+/// The lamp's wall clock for a publish round: re-anchored to a fresh sync if
+/// there is one, carried on from the last anchor if not.
+///
+/// The second half of the answer is what the readings get stamped with, and
+/// it is the sync or nothing. An evening is hours of the monotonic timer
+/// carrying a single boot-time sync, and on 2026-10-16 that had the lamp's
+/// readings stamped three to four minutes in the future by 20:25. The carried
+/// clock is still good enough to find dusk and the cutoff; for a timestamp,
+/// the archiver's time of receipt is better, as [`clock`] argues for every
+/// other node.
+async fn lamp_resync(
+    stack: Option<WifiStack>,
+    anchor_ms: &mut u64,
+    anchor: &mut Instant,
+) -> (u64, Option<u64>) {
+    let synced = match stack {
+        Some(s) => sync_time(s).await,
+        None => None,
+    };
+    if let Some(now) = synced {
+        *anchor_ms = now;
+        *anchor = Instant::now();
+    }
+    (*anchor_ms + anchor.elapsed().as_millis(), synced)
 }
 
 /// Seconds from `now_ms` until the next evening starts.
