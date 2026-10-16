@@ -27,14 +27,16 @@ let
 
   questdbConf = pkgs.writeText "questdb-server.conf" cfg.questdb.extraConfig;
 
-  # QuestDB's own default, with the file writer cut down from INFO to errors.
-  # At INFO it writes a line for every WAL commit, apply and view refresh: with
-  # three rollup tiers behind a commit every few seconds that was ~900 lines a
-  # minute, ~250 MB a day on the disk and ~4 % of a core on a small CPU, and
-  # none of it is read. ADVISORY keeps the start-up summary and the warnings
-  # about the environment.
+  # The log.conf QuestDB 9.3 writes on first start, with the file writer cut
+  # down from INFO to errors. At INFO it writes a line for every WAL commit,
+  # apply and view refresh: with three rollup tiers behind a commit every few
+  # seconds that was ~900 lines a minute, ~250 MB a day on the disk and ~4 % of
+  # a core on a small CPU, and none of it is read. ADVISORY keeps the start-up
+  # summary and the warnings about the environment. The stdout writer is an
+  # addition, at the same levels, so a failure also shows in the journal
+  # rather than only in a file under the data directory.
   questdbLogConf = pkgs.writeText "questdb-log.conf" ''
-    writers=file,http.min
+    writers=file,stdout,http.min
     w.file.class=io.questdb.log.LogRollingFileWriter
     w.file.location=''${log.dir}/questdb-rolling.log.''${date:yyyyMMdd}
     w.file.level=ERROR,CRITICAL,ADVISORY
@@ -42,6 +44,8 @@ let
     w.file.rollSize=128m
     w.file.lifeDuration=1M
     w.file.sizeLimit=1g
+    w.stdout.class=io.questdb.log.LogConsoleWriter
+    w.stdout.level=ERROR,CRITICAL,ADVISORY
     w.http.min.class=io.questdb.log.LogConsoleWriter
     w.http.min.level=ERROR
     w.http.min.scope=http-min-server
