@@ -38,6 +38,12 @@ reconstruction and reads like one.
 
 ### Changed
 
+- **QuestDB stops recording its own activity and polls with one network
+  worker.** The module's default `server.conf` adds
+  `telemetry.disable.completely=true`, because `telemetry.enabled=false` alone
+  left QuestDB 9.3 writing every WAL commit into `sys.telemetry_wal`, and
+  `shared.network.worker.count=1`, because the archiver's loopback connections
+  are all the network I/O there is and each idle worker polls on its own.
 - **QuestDB runs quieter.** The NixOS module now writes a `log.conf` next to
   `server.conf` that logs errors, critical messages and advisories only, not
   every WAL commit, apply and view refresh at INFO (~900 lines a minute and

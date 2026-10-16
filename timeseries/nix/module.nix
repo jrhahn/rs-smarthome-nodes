@@ -178,6 +178,8 @@ in
           pg.net.bind.to=127.0.0.1:8812
           line.tcp.net.bind.to=127.0.0.1:9009
           telemetry.enabled=false
+          telemetry.disable.completely=true
+          shared.network.worker.count=1
         '''
       '';
       description = ''
@@ -192,14 +194,21 @@ in
 
   config = lib.mkIf cfg.enable {
     # Derived rather than repeated: see `questdb.httpEndpoint`.
-    # Telemetry off: QuestDB otherwise records its own WAL and view activity
-    # into sys.telemetry_* tables (over 100 MB here within a month) and reports
-    # usage to QuestDB's servers.
+    # Telemetry off, both halves: `telemetry.enabled` only stops the usage
+    # reports; QuestDB 9.3 keeps recording its own WAL and view activity into
+    # sys.telemetry_* tables (over 100 MB within a month) until
+    # `telemetry.disable.completely` is set as well.
+    #
+    # One network worker: the archiver's one or two loopback connections are
+    # all the network I/O this database sees, and every idle worker polls on
+    # its own -- four of them cost ~7 % of a Celeron core doing nothing.
     services.smarthome-timeseries.questdb.extraConfig = lib.mkDefault ''
       http.bind.to=${cfg.questdb.httpEndpoint}
       pg.net.bind.to=127.0.0.1:8812
       line.tcp.net.bind.to=127.0.0.1:9009
       telemetry.enabled=false
+      telemetry.disable.completely=true
+      shared.network.worker.count=1
     '';
 
     systemd.services.smarthome-timeseries = {
