@@ -61,7 +61,7 @@ use crate::sensors::{scale, scd41, sds011, sgp41, sht31, EntityDescriptor};
 /// rather than a missing sensor, and it earned its keep here.
 pub const MAX_ENTITIES: usize = 16;
 /// Upper bound on command entities (the calibration and tuning knobs).
-pub const MAX_CONTROLS: usize = 15;
+pub const MAX_CONTROLS: usize = 20;
 
 /// Room for one discovery payload. The longest today is ~390 B (a `number`
 /// control on a node with a last will and a long name); the headroom is for the
@@ -462,16 +462,37 @@ pub struct Control {
 /// **Brightness here is a factor on [`crate::lamp::MAX_DUTY_PCT`]**, not a
 /// replacement for it. 255 means "as bright as the compiled ceiling allows",
 /// which is the whole reason the ceiling is a constant and this is not.
-const LAMP_CONTROLS: &[Control] = &[Control {
-    component: "light",
-    key: "enabled",
-    name: "Licht",
-    reads_back: true,
-    spec: "\"bri_cmd_t\":\"~/config/brightness\",\
-           \"bri_stat_t\":\"~/config/brightness\",\
-           \"bri_scl\":255,\
-           \"on_cmd_type\":\"brightness\",",
-}];
+///
+/// The two ends of the evening ride along (see [`crate::lamp::Schedule`]):
+/// the start as minutes after sunset, because that follows the season, and
+/// the end as a UTC clock time in a `text` entity, because that is how a
+/// person thinks of it. UTC in the name, since the firmware knows no DST.
+const LAMP_CONTROLS: &[Control] = &[
+    Control {
+        component: "light",
+        key: "enabled",
+        name: "Licht",
+        reads_back: true,
+        spec: "\"bri_cmd_t\":\"~/config/brightness\",\
+               \"bri_stat_t\":\"~/config/brightness\",\
+               \"bri_scl\":255,\
+               \"on_cmd_type\":\"brightness\",",
+    },
+    Control {
+        component: "number",
+        key: "lamp_start",
+        name: "Licht an nach Sonnenuntergang",
+        reads_back: true,
+        spec: "\"min\":0,\"max\":180,\"step\":5,\"unit_of_meas\":\"min\",\"mode\":\"box\",",
+    },
+    Control {
+        component: "text",
+        key: "lamp_off",
+        name: "Licht aus (UTC)",
+        reads_back: true,
+        spec: "\"min\":4,\"max\":5,\"pattern\":\"^([01]?[0-9]|2[0-3]):[0-5][0-9]$\",",
+    },
+];
 
 const REANNOUNCE_CONTROLS: &[Control] = &[Control {
     component: "button",
@@ -748,6 +769,7 @@ const _: () = {
             + SDS011_CONTROLS.len()
             + BATTERY_CONTROLS.len()
             + SLEEP_CONTROLS.len()
+            + LAMP_CONTROLS.len()
             <= MAX_CONTROLS
     );
 };
@@ -1056,9 +1078,12 @@ mod tests {
                 if matches!(control.key, "reannounce" | "reset_visits" | "tare") {
                     continue;
                 }
+                // "1:00" for the lamp's cutoff, which takes a clock time.
                 let mut probe = Config::DEFAULT;
                 assert!(
-                    probe.apply(control.key, "1") || probe.apply(control.key, "0"),
+                    probe.apply(control.key, "1")
+                        || probe.apply(control.key, "0")
+                        || probe.apply(control.key, "1:00"),
                     "{} is not a key Config::apply knows",
                     control.key
                 );
@@ -1185,7 +1210,7 @@ mod tests {
                 assert_eq!(parts[0], PREFIX);
                 assert!(matches!(
                     parts[1],
-                    "sensor" | "number" | "switch" | "button" | "light"
+                    "sensor" | "number" | "switch" | "button" | "light" | "text"
                 ));
                 assert_eq!(parts[2], node.id);
                 assert_eq!(parts[4], "config");

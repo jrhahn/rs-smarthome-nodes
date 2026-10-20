@@ -842,6 +842,7 @@ async fn run_lamp(
             cell,
             cfg.lamp_enabled,
             cfg.lamp_brightness,
+            cfg.lamp_schedule,
         ));
 
         // Outside its own window the lamp has no business being awake, and
@@ -879,12 +880,12 @@ async fn run_lamp(
             if let Some(s) = stack {
                 let _ = lamp_publish(s, board, cfg, synced, &mut on_trial).await;
             }
-            let secs = lamp_sleep_secs(ms);
+            let secs = lamp_sleep_secs(ms, cfg.lamp_schedule);
             warn!("lamp: cell at {cell} mV is too low to light; sleeping {secs} s");
             enter_deep_sleep(lpwr, CoreDuration::from_secs(secs));
         }
 
-        if !lamp::is_evening(minute, doy) {
+        if !lamp::is_evening(minute, doy, cfg.lamp_schedule) {
             LAMP_GATE.signal(0);
             Timer::after(LAMP_STEP).await;
             let (ms, synced) = lamp_resync(stack, &mut anchor_ms, &mut anchor).await;
@@ -892,7 +893,7 @@ async fn run_lamp(
             if let Some(s) = stack {
                 let _ = lamp_publish(s, board, cfg, synced, &mut on_trial).await;
             }
-            let secs = lamp_sleep_secs(ms);
+            let secs = lamp_sleep_secs(ms, cfg.lamp_schedule);
             info!("lamp: outside the window, sleeping {secs} s until dusk");
             enter_deep_sleep(lpwr, CoreDuration::from_secs(secs));
         }
@@ -943,10 +944,10 @@ async fn lamp_resync(
 ///
 /// Always at least a minute, so a clock that lands exactly on the boundary
 /// cannot produce a zero-length sleep and a boot loop with it.
-fn lamp_sleep_secs(now_ms: u64) -> u64 {
+fn lamp_sleep_secs(now_ms: u64, schedule: lamp::Schedule) -> u64 {
     let minute = solar::minute_of_day(now_ms);
     let doy = solar::day_of_year(now_ms);
-    let (start_today, _) = lamp::window(doy);
+    let (start_today, _) = lamp::window(doy, schedule);
     let minutes = if minute < start_today {
         start_today - minute
     } else {
@@ -954,7 +955,7 @@ fn lamp_sleep_secs(now_ms: u64) -> u64 {
         // end. Sunset moves about a minute a day, so that is worth less than
         // the civil calendar it would take to be exact — the same trade
         // `solar` itself makes.
-        let (start_tomorrow, _) = lamp::window(doy % 365 + 1);
+        let (start_tomorrow, _) = lamp::window(doy % 365 + 1, schedule);
         (24 * 60 - minute) + start_tomorrow
     };
     (minutes.max(1) as u64) * 60

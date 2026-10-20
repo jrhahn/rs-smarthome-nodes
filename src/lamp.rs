@@ -95,7 +95,9 @@ pub const MAX_DUTY_PCT: u32 = 70;
 /// to fall out of the arithmetic.
 pub const MAX_DUTY: u32 = FULL_SCALE * MAX_DUTY_PCT / 100;
 
-/// Minutes after sunset before the lamp lights at all.
+/// Minutes after sunset before the lamp lights at all, by default.
+///
+/// Home Assistant can move it (`config/lamp_start`, see [`Schedule`]).
 ///
 /// The cheapest saving available, because it costs nothing anyone can see: in
 /// civil twilight the sky still outshines the lamp, so the first half hour of
@@ -108,22 +110,27 @@ pub const START_AFTER_SUNSET_MIN: u32 = 45;
 /// the sky goes down rather than switching on into it.
 pub const RAMP_MIN: u32 = 40;
 
-/// When the evening ends, in **minutes past midnight UTC**.
+/// When the evening ends by default, in **minutes past midnight UTC**.
+///
+/// Home Assistant can move it (`config/lamp_off`, see [`Schedule`]).
 ///
 /// UTC and not local time, because [`solar`] deliberately has no civil
-/// calendar and therefore no EU daylight-saving rule. 21:30 UTC is 22:30 CET
-/// in winter and 23:30 CEST in summer — and summer is the half of the year
-/// where the lamp burns about an hour anyway and the panel returns five times
+/// calendar and therefore no EU daylight-saving rule. 20:30 UTC is 21:30 CET
+/// in winter and 22:30 CEST in summer — and summer is the half of the year
+/// where the lamp burns under an hour anyway and the panel returns five times
 /// what it needs, so the hour costs nothing. Implementing DST would cost more
 /// code than the behaviour is worth.
 ///
-/// Until 2026-10 this was 22:00 UTC. Half an hour less a night is the cheapest
-/// reserve there is for the weeks the panel does not keep up.
+/// Until 2026-10 this was 22:00 UTC. An hour and a half less a night is the
+/// cheapest reserve there is for the weeks the panel does not keep up.
 ///
-/// One property worth keeping: with sunset at 49.87 N never later than ~19:30
-/// UTC, the lit window never crosses midnight, so every comparison in this
-/// module is ordinary arithmetic on one day's minutes.
-pub const CUTOFF_MINUTE_UTC: u32 = 21 * 60 + 30;
+/// One property worth keeping: the lit window never crosses midnight UTC, so
+/// every comparison in this module is ordinary arithmetic on one day's
+/// minutes. A cutoff is a time of day, `0..1440`, so it cannot.
+///
+/// The summer solstice's window opens at 20:22 UTC, so at this default a June
+/// evening is eight minutes of ramp and then nothing: deliberate, see above.
+pub const CUTOFF_MINUTE_UTC: u32 = 20 * 60 + 30;
 
 /// Length of the fade-out before [`CUTOFF_MINUTE_UTC`].
 ///
@@ -142,47 +149,78 @@ pub const DARK_BELOW_PCT: u32 = 20;
 /// State of charge from which the lamp is allowed its full [`MAX_DUTY_PCT`].
 pub const FULL_FROM_PCT: u32 = 90;
 
+/// The two ends of the evening that Home Assistant can move.
+///
+/// Start is relative to sunset and not a clock time, because that is what
+/// follows the season: a fixed 17:00 is dark in December and broad daylight
+/// in June. The end is a clock time, because "off at half past ten" is what a
+/// person means by it.
+///
+/// Neither is persisted, like the light's switch and slider: the retained
+/// `config/` topics are re-delivered on every publish, and a lamp that cannot
+/// reach the broker falls back to [`Schedule::DEFAULT`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Schedule {
+    /// Minutes after sunset before the lamp lights.
+    pub start_after_sunset_min: u32,
+    /// When the evening ends, minutes past midnight UTC, `0..1440`.
+    pub cutoff_minute_utc: u32,
+}
+
+impl Schedule {
+    pub const DEFAULT: Schedule = Schedule {
+        start_after_sunset_min: START_AFTER_SUNSET_MIN,
+        cutoff_minute_utc: CUTOFF_MINUTE_UTC,
+    };
+}
+
 /// Tonight's lit window as minutes past midnight UTC, `[start, cutoff)`.
 ///
 /// One place that decides it, because two would drift: `twilight_permille`
 /// shapes the brightness inside the window and the firmware's sleep decides
 /// when to be awake for it, and a lamp awake outside its own window is a node
 /// burning a fifth of its cell for nothing.
-pub fn window(doy: u32) -> (u32, u32) {
+pub fn window(doy: u32, schedule: Schedule) -> (u32, u32) {
     let (_sunrise, sunset) = solar::sun(doy);
-    (sunset + START_AFTER_SUNSET_MIN, CUTOFF_MINUTE_UTC)
+    (
+        sunset + schedule.start_after_sunset_min,
+        schedule.cutoff_minute_utc,
+    )
 }
 
 /// Whether `minute_utc` falls inside [`window`].
-pub fn is_evening(minute_utc: u32, doy: u32) -> bool {
-    let (start, cutoff) = window(doy);
+pub fn is_evening(minute_utc: u32, doy: u32, schedule: Schedule) -> bool {
+    let (start, cutoff) = window(doy, schedule);
     minute_utc >= start && minute_utc < cutoff
 }
 
 /// How far into the evening the lamp has got, in per mille of full brightness.
 ///
-/// Zero before [`START_AFTER_SUNSET_MIN`] past sunset and from
-/// [`CUTOFF_MINUTE_UTC`] on; a [`RAMP_MIN`] climb at the start, a
-/// [`FADE_OUT_MIN`] fall at the end, and flat in between.
-pub fn twilight_permille(minute_utc: u32, doy: u32) -> u32 {
-    let (_sunrise, sunset) = solar::sun(doy);
-    let start = sunset + START_AFTER_SUNSET_MIN;
+/// Zero before the schedule's start and from its cutoff on; a [`RAMP_MIN`]
+/// climb at the start, a [`FADE_OUT_MIN`] fall at the end, and flat in
+/// between. Where the two overlap on a short evening, the dimmer one wins.
+pub fn twilight_permille(minute_utc: u32, doy: u32, schedule: Schedule) -> u32 {
+    let (start, cutoff) = window(doy, schedule);
     let full = start + RAMP_MIN;
-    let fade = CUTOFF_MINUTE_UTC.saturating_sub(FADE_OUT_MIN);
+    let fade = cutoff.saturating_sub(FADE_OUT_MIN);
 
-    // A sunset so late that the window would be empty: nothing to light.
-    if start >= CUTOFF_MINUTE_UTC || minute_utc < start || minute_utc >= CUTOFF_MINUTE_UTC {
+    // A cutoff at or before the start: an empty window, nothing to light.
+    if start >= cutoff || minute_utc < start || minute_utc >= cutoff {
         return 0;
     }
-    if minute_utc < full && full > start {
-        // Clamped because a late sunset can push `full` past the cutoff, where
-        // the ramp would otherwise still be climbing when the fade begins.
-        return ((minute_utc - start) * 1000 / RAMP_MIN).min(1000);
-    }
-    if minute_utc >= fade {
-        return (CUTOFF_MINUTE_UTC - minute_utc) * 1000 / FADE_OUT_MIN;
-    }
-    1000
+    let ramp = if minute_utc < full {
+        (minute_utc - start) * 1000 / RAMP_MIN
+    } else {
+        1000
+    };
+    let tail = if minute_utc >= fade {
+        (cutoff - minute_utc) * 1000 / FADE_OUT_MIN
+    } else {
+        1000
+    };
+    // `min`, because a short window puts the fade inside the ramp: taking the
+    // ramp alone there would cut from mid-climb straight to dark.
+    ramp.min(tail)
 }
 
 /// What the cell can afford tonight, in per mille of full brightness.
@@ -217,11 +255,14 @@ pub fn gate_permille(
     cell_mv: u32,
     enabled: bool,
     brightness: u8,
+    schedule: Schedule,
 ) -> u32 {
     if !enabled {
         return 0;
     }
-    twilight_permille(minute_utc, doy) * charge_permille(cell_mv) / 1000 * brightness as u32 / 255
+    twilight_permille(minute_utc, doy, schedule) * charge_permille(cell_mv) / 1000
+        * brightness as u32
+        / 255
 }
 
 /// The breath at `step`, scaled by a gate from [`gate_permille`].
@@ -256,10 +297,11 @@ pub fn duty(
     cell_mv: u32,
     enabled: bool,
     brightness: u8,
+    schedule: Schedule,
 ) -> u32 {
     shaped(
         step,
-        gate_permille(minute_utc, doy, cell_mv, enabled, brightness),
+        gate_permille(minute_utc, doy, cell_mv, enabled, brightness, schedule),
     )
 }
 
@@ -267,8 +309,10 @@ pub fn duty(
 mod tests {
     use super::*;
 
+    const S: Schedule = Schedule::DEFAULT;
+
     /// Winter solstice: sunset 926 UTC per `solar`'s own reference set, so the
-    /// lamp starts at 971 and is at full from 1011 until the fade at 1310.
+    /// lamp starts at 971 and is at full from 1011 until the fade at 1220.
     const WINTER_DOY: u32 = 354;
 
     /// A cell comfortably above [`FULL_FROM_PCT`], so brightness tests are not
@@ -278,46 +322,52 @@ mod tests {
     #[test]
     fn the_lamp_is_dark_until_the_margin_has_passed() {
         let (_, sunset) = solar::sun(WINTER_DOY);
-        assert_eq!(twilight_permille(sunset, WINTER_DOY), 0);
+        assert_eq!(twilight_permille(sunset, WINTER_DOY, S), 0);
         assert_eq!(
-            twilight_permille(sunset + START_AFTER_SUNSET_MIN - 1, WINTER_DOY),
+            twilight_permille(sunset + START_AFTER_SUNSET_MIN - 1, WINTER_DOY, S),
             0
         );
         assert_eq!(
-            twilight_permille(sunset + START_AFTER_SUNSET_MIN, WINTER_DOY),
+            twilight_permille(sunset + START_AFTER_SUNSET_MIN, WINTER_DOY, S),
             0
         );
-        assert!(twilight_permille(sunset + START_AFTER_SUNSET_MIN + 1, WINTER_DOY) > 0);
+        assert!(twilight_permille(sunset + START_AFTER_SUNSET_MIN + 1, WINTER_DOY, S) > 0);
     }
 
     #[test]
     fn the_ramp_climbs_to_full_and_stays_there() {
         let (_, sunset) = solar::sun(WINTER_DOY);
         let start = sunset + START_AFTER_SUNSET_MIN;
-        assert_eq!(twilight_permille(start + RAMP_MIN / 2, WINTER_DOY), 500);
-        assert_eq!(twilight_permille(start + RAMP_MIN, WINTER_DOY), 1000);
-        assert_eq!(twilight_permille(start + RAMP_MIN + 60, WINTER_DOY), 1000);
+        assert_eq!(twilight_permille(start + RAMP_MIN / 2, WINTER_DOY, S), 500);
+        assert_eq!(twilight_permille(start + RAMP_MIN, WINTER_DOY, S), 1000);
+        assert_eq!(
+            twilight_permille(start + RAMP_MIN + 60, WINTER_DOY, S),
+            1000
+        );
     }
 
     #[test]
     fn the_evening_fades_out_rather_than_stopping() {
         let fade = CUTOFF_MINUTE_UTC - FADE_OUT_MIN;
-        assert_eq!(twilight_permille(fade, WINTER_DOY), 1000);
-        assert_eq!(twilight_permille(fade + FADE_OUT_MIN / 2, WINTER_DOY), 500);
-        assert_eq!(twilight_permille(CUTOFF_MINUTE_UTC, WINTER_DOY), 0);
-        assert_eq!(twilight_permille(CUTOFF_MINUTE_UTC + 30, WINTER_DOY), 0);
+        assert_eq!(twilight_permille(fade, WINTER_DOY, S), 1000);
+        assert_eq!(
+            twilight_permille(fade + FADE_OUT_MIN / 2, WINTER_DOY, S),
+            500
+        );
+        assert_eq!(twilight_permille(CUTOFF_MINUTE_UTC, WINTER_DOY, S), 0);
+        assert_eq!(twilight_permille(CUTOFF_MINUTE_UTC + 30, WINTER_DOY, S), 0);
     }
 
     #[test]
     fn a_summer_evening_is_short_but_never_wraps_midnight() {
-        // Summer solstice: sunset 1177 UTC, so the window is 1222..1290 — late,
+        // Summer solstice: sunset 1177 UTC, so the window is 1222..1230 — late,
         // short, and still inside the same day, which every comparison here
         // depends on.
         let doy = 171;
         let (_, sunset) = solar::sun(doy);
         assert!(sunset + START_AFTER_SUNSET_MIN < CUTOFF_MINUTE_UTC);
-        assert_eq!(twilight_permille(sunset + 10, doy), 0);
-        assert!(twilight_permille(CUTOFF_MINUTE_UTC - 30, doy) > 0);
+        assert_eq!(twilight_permille(sunset + 10, doy, S), 0);
+        assert!(twilight_permille(CUTOFF_MINUTE_UTC - 5, doy, S) > 0);
     }
 
     #[test]
@@ -353,7 +403,7 @@ mod tests {
         for step in 0..BREATH.len() {
             for minute in (0..1440).step_by(7) {
                 for doy in [1, 90, 171, 265, 354] {
-                    let d = duty(step, minute, doy, 4200, true, 255);
+                    let d = duty(step, minute, doy, 4200, true, 255, S);
                     assert!(d <= cap, "duty {d} over cap {cap} at step {step}");
                 }
             }
@@ -365,7 +415,7 @@ mod tests {
         let (_, sunset) = solar::sun(WINTER_DOY);
         let minute = sunset + START_AFTER_SUNSET_MIN + RAMP_MIN + 30;
         let peak = (0..BREATH.len())
-            .map(|s| duty(s, minute, WINTER_DOY, FULL_CELL_MV, true, 255))
+            .map(|s| duty(s, minute, WINTER_DOY, FULL_CELL_MV, true, 255, S))
             .max()
             .unwrap();
         assert_eq!(peak, MAX_DUTY);
@@ -381,7 +431,10 @@ mod tests {
     fn home_assistant_can_switch_the_lamp_off_entirely() {
         let minute = winter_peak_minute();
         for step in 0..BREATH.len() {
-            assert_eq!(duty(step, minute, WINTER_DOY, FULL_CELL_MV, false, 255), 0);
+            assert_eq!(
+                duty(step, minute, WINTER_DOY, FULL_CELL_MV, false, 255, S),
+                0
+            );
         }
     }
 
@@ -390,7 +443,7 @@ mod tests {
         let minute = winter_peak_minute();
         let peak = |bri| {
             (0..BREATH.len())
-                .map(|s| duty(s, minute, WINTER_DOY, FULL_CELL_MV, true, bri))
+                .map(|s| duty(s, minute, WINTER_DOY, FULL_CELL_MV, true, bri, S))
                 .max()
                 .unwrap()
         };
@@ -412,10 +465,10 @@ mod tests {
                 (true, 32, FULL_CELL_MV),
                 (false, 255, FULL_CELL_MV),
             ] {
-                let gate = gate_permille(minute, WINTER_DOY, mv, enabled, bri);
+                let gate = gate_permille(minute, WINTER_DOY, mv, enabled, bri, S);
                 assert_eq!(
                     shaped(step, gate),
-                    duty(step, minute, WINTER_DOY, mv, enabled, bri)
+                    duty(step, minute, WINTER_DOY, mv, enabled, bri, S)
                 );
             }
         }
@@ -430,18 +483,18 @@ mod tests {
     #[test]
     fn the_lamp_is_never_lit_outside_its_own_window() {
         for doy in [1, 60, 171, 265, 354, 365] {
-            let (start, cutoff) = window(doy);
+            let (start, cutoff) = window(doy, S);
             for minute in 0..1440 {
-                let lit = twilight_permille(minute, doy) > 0;
+                let lit = twilight_permille(minute, doy, S) > 0;
                 if lit {
                     assert!(
-                        is_evening(minute, doy),
+                        is_evening(minute, doy, S),
                         "day {doy} minute {minute}: lit outside the window"
                     );
                 }
-                if !is_evening(minute, doy) {
+                if !is_evening(minute, doy, S) {
                     assert_eq!(
-                        twilight_permille(minute, doy),
+                        twilight_permille(minute, doy, S),
                         0,
                         "day {doy} minute {minute}: brightness outside the window"
                     );
@@ -449,17 +502,70 @@ mod tests {
             }
             // And the window is the span it claims to be, not a point.
             assert!(cutoff > start, "day {doy}: empty window {start}..{cutoff}");
-            assert_eq!(twilight_permille(start, doy), 0);
-            assert!(twilight_permille(start + 1, doy) > 0);
-            assert!(twilight_permille(cutoff - 1, doy) > 0);
-            assert_eq!(twilight_permille(cutoff, doy), 0);
+            assert_eq!(twilight_permille(start, doy, S), 0);
+            assert!(twilight_permille(start + 1, doy, S) > 0);
+            assert!(twilight_permille(cutoff - 1, doy, S) > 0);
+            assert_eq!(twilight_permille(cutoff, doy, S), 0);
         }
     }
 
     #[test]
     fn outside_the_window_every_step_is_dark() {
         for step in 0..BREATH.len() {
-            assert_eq!(duty(step, 12 * 60, WINTER_DOY, FULL_CELL_MV, true, 255), 0);
+            assert_eq!(
+                duty(step, 12 * 60, WINTER_DOY, FULL_CELL_MV, true, 255, S),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn home_assistant_moves_both_ends_of_the_evening() {
+        let (_, sunset) = solar::sun(WINTER_DOY);
+        let late = Schedule {
+            start_after_sunset_min: 90,
+            cutoff_minute_utc: 22 * 60,
+        };
+        assert_eq!(window(WINTER_DOY, late), (sunset + 90, 22 * 60));
+        assert!(!is_evening(sunset + 60, WINTER_DOY, late));
+        assert!(is_evening(sunset + 60, WINTER_DOY, S));
+        assert!(is_evening(21 * 60 + 30, WINTER_DOY, late));
+        assert!(!is_evening(21 * 60 + 30, WINTER_DOY, S));
+    }
+
+    #[test]
+    fn a_cutoff_before_the_start_lights_nothing() {
+        let (_, sunset) = solar::sun(WINTER_DOY);
+        let empty = Schedule {
+            start_after_sunset_min: 45,
+            cutoff_minute_utc: sunset,
+        };
+        for minute in 0..1440 {
+            assert!(!is_evening(minute, WINTER_DOY, empty));
+            assert_eq!(twilight_permille(minute, WINTER_DOY, empty), 0);
+        }
+    }
+
+    #[test]
+    fn a_short_evening_never_jumps() {
+        // Fade inside the ramp: no step between neighbouring minutes may be
+        // larger than the steeper of the two slopes.
+        let max_step = 1000 / FADE_OUT_MIN.min(RAMP_MIN);
+        let (_, sunset) = solar::sun(171);
+        for len in 1..=60 {
+            let s = Schedule {
+                start_after_sunset_min: 45,
+                cutoff_minute_utc: sunset + 45 + len,
+            };
+            let mut last = 0;
+            for minute in sunset..sunset + 120 {
+                let p = twilight_permille(minute, 171, s);
+                assert!(
+                    p.abs_diff(last) <= max_step,
+                    "len {len} minute {minute}: {last} -> {p}"
+                );
+                last = p;
+            }
         }
     }
 }
