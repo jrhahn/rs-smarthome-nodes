@@ -111,16 +111,19 @@ pub const RAMP_MIN: u32 = 40;
 /// When the evening ends, in **minutes past midnight UTC**.
 ///
 /// UTC and not local time, because [`solar`] deliberately has no civil
-/// calendar and therefore no EU daylight-saving rule. 22:00 UTC is 23:00 CET
-/// in winter and midnight CEST in summer — and summer is the half of the year
-/// where the lamp burns under an hour anyway and the panel returns five times
+/// calendar and therefore no EU daylight-saving rule. 21:30 UTC is 22:30 CET
+/// in winter and 23:30 CEST in summer — and summer is the half of the year
+/// where the lamp burns about an hour anyway and the panel returns five times
 /// what it needs, so the hour costs nothing. Implementing DST would cost more
 /// code than the behaviour is worth.
+///
+/// Until 2026-10 this was 22:00 UTC. Half an hour less a night is the cheapest
+/// reserve there is for the weeks the panel does not keep up.
 ///
 /// One property worth keeping: with sunset at 49.87 N never later than ~19:30
 /// UTC, the lit window never crosses midnight, so every comparison in this
 /// module is ordinary arithmetic on one day's minutes.
-pub const CUTOFF_MINUTE_UTC: u32 = 22 * 60;
+pub const CUTOFF_MINUTE_UTC: u32 = 21 * 60 + 30;
 
 /// Length of the fade-out before [`CUTOFF_MINUTE_UTC`].
 ///
@@ -307,7 +310,7 @@ mod tests {
 
     #[test]
     fn a_summer_evening_is_short_but_never_wraps_midnight() {
-        // Summer solstice: sunset 1177 UTC, so the window is 1222..1320 — late,
+        // Summer solstice: sunset 1177 UTC, so the window is 1222..1290 — late,
         // short, and still inside the same day, which every comparison here
         // depends on.
         let doy = 171;

@@ -38,6 +38,10 @@ reconstruction and reads like one.
 
 ### Changed
 
+- **The solar lamp goes out at 21:30 UTC instead of 22:00** — 22:30 in
+  winter, 23:30 in summer, still without a daylight-saving rule. The fade-out
+  starts ten minutes earlier with it. Half an hour less a night, for the
+  evenings the cell is too low to light at all. Takes effect on reflash.
 - **QuestDB stops recording its own activity and polls with one network
   worker.** The module's default `server.conf` adds
   `telemetry.disable.completely=true`, because `telemetry.enabled=false` alone
