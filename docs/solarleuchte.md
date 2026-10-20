@@ -196,6 +196,11 @@ The lamp does not run all night. It runs from dusk to **23:00**, and at 49.87 N
 December is the design case: sunset ~16:25, dark enough by ~17:00, so **6.5
 hours**. June is 45 minutes.
 
+*Since #72 the cutoff defaults to 20:30 UTC (21:30 CET) and both ends are set
+from Home Assistant, which takes December to about 4.5 hours. The budget below
+is kept at the 23:00 cutoff it was designed for: that is the more demanding
+case, and a later cutoff set from Home Assistant is still covered by it.*
+
 | | |
 | --- | --- |
 | awake fade, 25 mA controller + 20 mA LEDs | 45 mA |
