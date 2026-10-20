@@ -25,7 +25,7 @@ use embedded_storage::{ReadStorage, Storage};
 use heapless::String;
 
 use crate::sensors::{scd41, sds011};
-use crate::solar;
+use crate::{lamp, solar};
 
 /// Flash byte-offset of the config blob. Matches the `nvs` partition in
 /// espflash's default table; we only touch the first sector of it.
@@ -98,6 +98,10 @@ pub struct Config {
     /// duty". See the ceiling's own note for why that distinction is the whole
     /// point.
     pub lamp_brightness: u8,
+    /// When tonight's lamp window opens and closes, from Home Assistant's
+    /// `lamp_start` and `lamp_off`. Not persisted either, for the same reason
+    /// as the two above.
+    pub lamp_schedule: lamp::Schedule,
     /// Seconds between periodic "heartbeat" publishes: even with no visitor, the
     /// firmware brings Wi-Fi up this often and publishes temperature + weight so
     /// Home Assistant keeps a fresh reading. Realised as a whole number of idle
@@ -173,6 +177,13 @@ pub const TARE_TEMP_UNKNOWN: i32 = i32::MIN;
 /// so a mistyped slider cannot turn a few degrees into kilograms.
 pub const MAX_TEMP_COEFF_CENTI: i32 = 20_000;
 
+/// `"HH:MM"` (or `"H:MM"`) as minutes past midnight, `0..1440`.
+fn parse_hh_mm(value: &str) -> Option<u32> {
+    let (h, m) = value.trim().split_once(':')?;
+    let (h, m) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
 impl Config {
     /// Factory defaults, used on first boot or a corrupt sector. Chosen to match
     /// the historical compile-time constants, except the threshold which is now
@@ -193,6 +204,7 @@ impl Config {
         // blob — see `the_lamp_knobs_are_deliberately_not_persisted`.
         lamp_enabled: true,
         lamp_brightness: 255,
+        lamp_schedule: lamp::Schedule::DEFAULT,
         heartbeat_secs: 600, // 10 min
         // The sensor's own power-on value, so an un-calibrated node behaves
         // exactly as it did before this knob existed.
@@ -482,6 +494,21 @@ impl Config {
             "brightness" => {
                 if let Ok(v) = value.parse::<u32>() {
                     self.lamp_brightness = v.min(255) as u8;
+                }
+            }
+            // Minutes after sunset. Clamped rather than dropped, like the
+            // brightness; three hours is far past full dark in any season.
+            "lamp_start" => {
+                if let Ok(v) = value.parse::<u32>() {
+                    self.lamp_schedule.start_after_sunset_min = v.min(180);
+                }
+            }
+            // A UTC clock time, `HH:MM`, from Home Assistant's text entity.
+            // Dropped rather than clamped when it does not parse: unlike a
+            // slider, a garbled time has no nearest valid value.
+            "lamp_off" => {
+                if let Some(v) = parse_hh_mm(value) {
+                    self.lamp_schedule.cutoff_minute_utc = v;
                 }
             }
             // Seconds, like the other three intervals. `0` switches the night
@@ -877,6 +904,10 @@ mod tests {
             night_margin_min: 45,
             lamp_enabled: false,
             lamp_brightness: 123,
+            lamp_schedule: lamp::Schedule {
+                start_after_sunset_min: 30,
+                cutoff_minute_utc: 21 * 60,
+            },
         }
     }
 
@@ -889,6 +920,7 @@ mod tests {
         Config {
             lamp_enabled: Config::DEFAULT.lamp_enabled,
             lamp_brightness: Config::DEFAULT.lamp_brightness,
+            lamp_schedule: Config::DEFAULT.lamp_schedule,
             ..sample()
         }
     }
@@ -960,10 +992,27 @@ mod tests {
         let decoded = Config::from_bytes(&cfg.to_bytes()).expect("valid blob");
         assert_eq!(decoded.lamp_enabled, Config::DEFAULT.lamp_enabled);
         assert_eq!(decoded.lamp_brightness, Config::DEFAULT.lamp_brightness);
+        assert_eq!(decoded.lamp_schedule, Config::DEFAULT.lamp_schedule);
         // Everything else still survives, or this test would be hiding a bug
         // in the serialiser rather than documenting a choice.
         assert_eq!(decoded.night_margin_min, cfg.night_margin_min);
         assert_eq!(decoded.offset, cfg.offset);
+    }
+
+    #[test]
+    fn the_lamp_schedule_takes_minutes_and_a_utc_clock_time() {
+        let mut cfg = Config::DEFAULT;
+        assert!(cfg.apply("lamp_off", "21:15"));
+        assert_eq!(cfg.lamp_schedule.cutoff_minute_utc, 21 * 60 + 15);
+        assert!(cfg.apply("lamp_off", "0:05"));
+        assert_eq!(cfg.lamp_schedule.cutoff_minute_utc, 5);
+        for garbled in ["24:00", "20:60", "2030", "", "ab:cd", "-1:00"] {
+            assert!(!cfg.apply("lamp_off", garbled), "{garbled:?}");
+        }
+        assert!(cfg.apply("lamp_start", "60"));
+        assert_eq!(cfg.lamp_schedule.start_after_sunset_min, 60);
+        cfg.apply("lamp_start", "9999");
+        assert_eq!(cfg.lamp_schedule.start_after_sunset_min, 180);
     }
 
     #[test]

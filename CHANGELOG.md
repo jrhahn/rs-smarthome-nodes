@@ -28,6 +28,15 @@ reconstruction and reads like one.
 
 ### Added
 
+- **Both ends of the solar lamp's evening are set from Home Assistant.** Two
+  new controls next to the light: `Licht an nach Sonnenuntergang`
+  (`config/lamp_start`, minutes after sunset, 0–180, default 45) and
+  `Licht aus (UTC)` (`config/lamp_off`, a `text` entity taking `HH:MM` UTC,
+  default 20:30). Like the light's switch and slider they are retained and
+  not persisted, so a lamp that cannot reach the broker falls back to the
+  defaults. A cutoff at or before the start leaves the evening dark; on a
+  window shorter than ramp plus fade, the lamp now fades from wherever the
+  ramp has got to instead of cutting off mid-climb.
 - **A floor plan on the archive dashboard.** `web.floorplan` names an SVG and
   `web.rooms` maps node ids to the ids of its rooms; the dashboard then draws
   the plan above the cards, tints each room by its worst reading (or grey when
@@ -38,6 +47,10 @@ reconstruction and reads like one.
 
 ### Changed
 
+- **The solar lamp goes out at 20:30 UTC instead of 22:00** — 21:30 in
+  winter, 22:30 in summer, still without a daylight-saving rule. The fade-out
+  moves with it. An hour and a half less a night, for the evenings the cell is
+  too low to light at all. Takes effect on reflash.
 - **QuestDB stops recording its own activity and polls with one network
   worker.** The module's default `server.conf` adds
   `telemetry.disable.completely=true`, because `telemetry.enabled=false` alone

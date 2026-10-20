@@ -78,6 +78,8 @@ on / has just left the scale) and persists them. Changes therefore apply with a
 | `scd41_temp_offset` | °C the SCD41 subtracts for its own self-heating (default 4.0) | with SCD41 |
 | `sds011_kappa`      | κ for the PM humidity correction, `0` disables it (default 0.25) | with a compensated SDS011 |
 | `enabled` (light), `brightness` | the lamp, on/off and a factor on the compiled duty ceiling | `solarleuchte` |
+| `lamp_start`        | minutes after sunset before the lamp lights (default 45) | `solarleuchte` |
+| `lamp_off` (text)   | when the evening ends, `HH:MM` **UTC** (default 20:30); a time at or before the start leaves the evening dark | `solarleuchte` |
 | `reannounce` (button) | publish discovery again on the next connect | every node |
 
 Only the knobs that do something on a given node are announced. The
